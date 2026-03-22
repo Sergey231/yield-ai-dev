@@ -609,7 +609,7 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, showMobileW
       ) : (
         <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
           <DialogTrigger asChild>
-            <Button disabled={isConnecting}>
+            <Button disabled={isConnecting} data-action="connect_wallet">
               {isConnecting ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />

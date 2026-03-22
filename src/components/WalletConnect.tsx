@@ -33,7 +33,7 @@ export function WalletConnect() {
 
   return (
     <div className="flex flex-col gap-4">
-      <Button onClick={handleConnect} data-action="connect_wallet">
+      <Button onClick={handleConnect}>
         {address ? `Connected: ${address.slice(0, 6)}...${address.slice(-4)}` : "Connect Wallet"}
       </Button>
       
