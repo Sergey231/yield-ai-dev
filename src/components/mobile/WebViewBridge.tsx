@@ -118,6 +118,10 @@ export function WebViewBridge() {
       post: postToNative,
       handleNativeCommand: (command: NativeCommand) => {
         console.log("[Bridge ←RN]", command.type, command.payload ?? "");
+        postToNative("web_log", {
+          message: `[Bridge ←RN] ${command.type}`,
+          payload: command.payload ?? null,
+        });
         window.dispatchEvent(
           new CustomEvent<NativeCommand>("yieldai:native-command", {
             detail: command,
