@@ -44,8 +44,15 @@ function getClickableElement(target: EventTarget | null) {
 export function WebViewBridge() {
   useEffect(() => {
     const w = window as WindowWithBridge;
+    const isInWebView = !!w.ReactNativeWebView?.postMessage;
+
+    if (!isInWebView) {
+      console.log("[Bridge] ReactNativeWebView not found — running in browser");
+    }
+
     const postToNative = (type: string, payload?: Record<string, unknown>) => {
       if (!w.ReactNativeWebView?.postMessage) return;
+      console.log("[Bridge →RN]", type, payload ?? "");
       w.ReactNativeWebView.postMessage(stringifyMessage(type, payload));
     };
 
@@ -78,6 +85,12 @@ export function WebViewBridge() {
         return;
       }
 
+      const action = (element as HTMLElement).dataset.action;
+      if (action) {
+        postToNative(action, basePayload);
+        return;
+      }
+
       postToNative("button_click", basePayload);
     };
 
@@ -104,6 +117,7 @@ export function WebViewBridge() {
     w.YieldAIBridge = {
       post: postToNative,
       handleNativeCommand: (command: NativeCommand) => {
+        console.log("[Bridge ←RN]", command.type, command.payload ?? "");
         window.dispatchEvent(
           new CustomEvent<NativeCommand>("yieldai:native-command", {
             detail: command,
