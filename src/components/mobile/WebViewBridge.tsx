@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 type BridgeMessage = {
   source: "yield-ai-web";
   version: 1;
   type: string;
+  nonce: string | null;
   payload?: Record<string, unknown>;
   ts: number;
 };
@@ -25,11 +26,16 @@ type WindowWithBridge = Window & {
   };
 };
 
-function stringifyMessage(type: string, payload?: Record<string, unknown>) {
+function stringifyMessage(
+  type: string,
+  nonce: string | null,
+  payload?: Record<string, unknown>,
+) {
   const message: BridgeMessage = {
     source: "yield-ai-web",
     version: 1,
     type,
+    nonce,
     payload,
     ts: Date.now(),
   };
@@ -42,6 +48,8 @@ function getClickableElement(target: EventTarget | null) {
 }
 
 export function WebViewBridge() {
+  const sessionNonce = useRef<string | null>(null);
+
   useEffect(() => {
     const w = window as WindowWithBridge;
     const isInWebView = !!w.ReactNativeWebView?.postMessage;
@@ -52,8 +60,12 @@ export function WebViewBridge() {
 
     const postToNative = (type: string, payload?: Record<string, unknown>) => {
       if (!w.ReactNativeWebView?.postMessage) return;
+      // bridge_ready is sent before nonce is known — all others require nonce
+      if (type !== "bridge_ready" && !sessionNonce.current) return;
       console.log("[Bridge →RN]", type, payload ?? "");
-      w.ReactNativeWebView.postMessage(stringifyMessage(type, payload));
+      w.ReactNativeWebView.postMessage(
+        stringifyMessage(type, sessionNonce.current, payload),
+      );
     };
 
     const emitRouteChange = () => {
@@ -117,6 +129,17 @@ export function WebViewBridge() {
     w.YieldAIBridge = {
       post: postToNative,
       handleNativeCommand: (command: NativeCommand) => {
+        if (command.type === "native_ready") {
+          const nonce = command.payload?.nonce;
+          if (typeof nonce === "string") {
+            sessionNonce.current = nonce;
+            console.log("[Bridge] Session nonce received");
+          }
+          // emit initial route after handshake completes
+          emitRouteChange();
+          return;
+        }
+
         console.log("[Bridge ←RN]", command.type, command.payload ?? "");
         postToNative("web_log", {
           message: `[Bridge ←RN] ${command.type}`,
@@ -134,14 +157,12 @@ export function WebViewBridge() {
       userAgent: navigator.userAgent,
       href: window.location.href,
     });
-    emitRouteChange();
 
     document.addEventListener("click", onClick, true);
     window.addEventListener("popstate", emitRouteChange);
     window.addEventListener("hashchange", emitRouteChange);
     window.addEventListener("yieldai:native-command", onNativeCommand);
 
-    
     return () => {
       history.pushState = originalPushState;
       history.replaceState = originalReplaceState;
