@@ -63,7 +63,10 @@ export async function GET(request: NextRequest) {
       if (subRes.ok) {
         const subText = await subRes.text();
         const subList = subText ? JSON.parse(subText) : [];
-        const first = Array.isArray(subList) && subList[0] ? subList[0] : null;
+        const first =
+          Array.isArray(subList) && subList.length > 0
+            ? (subList.find((item: { is_primary?: boolean }) => item?.is_primary) ?? subList[0])
+            : null;
         const tryAddr = first ? (first.subaccount_address || first.primary_account_address) : null;
         if (tryAddr) {
           const paramsSub = new URLSearchParams({ account: String(tryAddr).trim() });

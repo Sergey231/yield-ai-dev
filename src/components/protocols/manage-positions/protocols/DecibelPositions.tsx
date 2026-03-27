@@ -112,6 +112,35 @@ function formatSize(size: number): string {
   return formatNumber(size, 2);
 }
 
+function formatLimitPriceInput(num: number, decimals = 4): string {
+  if (!Number.isFinite(num)) return '';
+  // Keep a stable decimal precision and avoid thousand separators in <input type="number" />.
+  return num.toFixed(decimals);
+}
+
+function applyLimitPriceAction(
+  current: string,
+  markPx: number | null,
+  action: 'mark' | 'minus1pct' | 'plus1pct'
+): string {
+  if (action === 'mark') {
+    if (markPx != null && markPx > 0) return formatLimitPriceInput(markPx, 4);
+    return current;
+  }
+  const parsed = parseFloat(current.trim());
+  const hasValidInput = Number.isFinite(parsed) && parsed > 0;
+  const base = hasValidInput ? parsed : markPx != null && markPx > 0 ? markPx : Number.NaN;
+  if (!Number.isFinite(base) || base <= 0) return current;
+  const next = action === 'minus1pct' ? base * 0.99 : base * 1.01;
+  return formatLimitPriceInput(next, 4);
+}
+
+function canAdjustLimitPricePct(current: string, markPx: number | null): boolean {
+  const parsed = parseFloat(current.trim());
+  if (Number.isFinite(parsed) && parsed > 0) return true;
+  return markPx != null && markPx > 0;
+}
+
 /** Decibel returns funding in bps; convert to percent for UI. */
 function formatFundingRatePercent(fundingRateBps: number): string {
   const percent = fundingRateBps / 100;
@@ -1248,7 +1277,7 @@ export function DecibelPositions() {
                         type="button"
                         onClick={() => {
                           setCloseMode('limit');
-                          if (dialogMarkPx != null) setCloseLimitPrice(formatNumber(dialogMarkPx, 4));
+                          if (dialogMarkPx != null) setCloseLimitPrice(formatLimitPriceInput(dialogMarkPx, 4));
                         }}
                         className={cn(
                           'flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors',
@@ -1268,11 +1297,49 @@ export function DecibelPositions() {
                           type="number"
                           step="any"
                           min="0"
-                          placeholder={dialogMarkPx != null ? String(dialogMarkPx) : '0'}
+                          placeholder={dialogMarkPx != null ? formatLimitPriceInput(dialogMarkPx, 4) : '0'}
                           value={closeLimitPrice}
                           onChange={(e) => setCloseLimitPrice(e.target.value)}
                           className="font-mono"
                         />
+                        <div className="flex flex-wrap gap-1.5">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            disabled={!canAdjustLimitPricePct(closeLimitPrice, dialogMarkPx)}
+                            onClick={() =>
+                              setCloseLimitPrice((prev) => applyLimitPriceAction(prev, dialogMarkPx, 'minus1pct'))
+                            }
+                          >
+                            −1%
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            disabled={dialogMarkPx == null || dialogMarkPx <= 0}
+                            onClick={() =>
+                              setCloseLimitPrice(applyLimitPriceAction(closeLimitPrice, dialogMarkPx, 'mark'))
+                            }
+                          >
+                            Mark
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            disabled={!canAdjustLimitPricePct(closeLimitPrice, dialogMarkPx)}
+                            onClick={() =>
+                              setCloseLimitPrice((prev) => applyLimitPriceAction(prev, dialogMarkPx, 'plus1pct'))
+                            }
+                          >
+                            +1%
+                          </Button>
+                        </div>
                         {dialogMarkPx != null && (
                           <p className="text-xs text-muted-foreground">Mark: {formatNumber(dialogMarkPx, 4)}</p>
                         )}
