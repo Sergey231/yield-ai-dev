@@ -145,11 +145,7 @@ export function WebViewBridge() {
           return;
         }
 
-        console.log("[Mobile ← RN]", command.type, command.payload ?? "");
-        postToNative("web_log", {
-          message: `[Mobile ← RN] ${command.type}`,
-          payload: command.payload ?? null,
-        });
+        console.log("[Web ← Mobile]", command.type, command.payload ?? "");
         window.dispatchEvent(
           new CustomEvent<NativeCommand>("yieldai:native-command", {
             detail: command,
