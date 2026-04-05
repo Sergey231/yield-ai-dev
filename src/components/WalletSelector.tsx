@@ -105,6 +105,11 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, showMobileW
     setMounted(true);
   }, []);
 
+  const isInWebView = useMemo(() => {
+    if (!mounted) return false;
+    return !!(window as any).ReactNativeWebView?.postMessage;
+  }, [mounted]);
+
   const isAndroidChrome = useMemo(() => {
     if (!mounted) return false;
     const ua = navigator.userAgent || "";
@@ -607,12 +612,26 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, showMobileW
           </DropdownMenuContent>
         </DropdownMenu>
       ) : (
+        isInWebView ? (
+          <Button
+            disabled={isConnecting}
+            data-action="connect_wallet"
+          >
+            {isConnecting ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Connecting...
+              </>
+            ) : (
+              'Connect Wallet'
+            )}
+          </Button>
+        ) : (
         <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
           <DialogTrigger asChild>
-            <Button 
-              disabled={isConnecting} 
-              data-action="connect_wallet" 
-              data-payload={JSON.stringify({ chain: "solana", walletId: "phantom" })}
+            <Button
+              disabled={isConnecting}
+              data-action="connect_wallet"
             >
               {isConnecting ? (
                 <>
@@ -626,6 +645,7 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, showMobileW
           </DialogTrigger>
           <ConnectWalletDialog close={closeDialog} isConnecting={isConnecting} {...walletSortingOptions} />
         </Dialog>
+        )
       )}
       </div>
 
