@@ -5,8 +5,9 @@ import { Token } from "@/lib/types/token";
 import { ChevronDown, Loader2 } from "lucide-react";
 import { useCollapsible } from "@/contexts/CollapsibleContext";
 import { cn } from "@/lib/utils";
-import { useMemo } from "react";
-import { formatCurrency } from "@/lib/utils/numberFormat";
+import { useMemo, useState } from "react";
+import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
+import { getTokenUsdValue } from "@/lib/utils/tokenUsdValue";
 
 interface SolanaWalletCardProps {
   tokens: Token[];
@@ -14,31 +15,21 @@ interface SolanaWalletCardProps {
   isRefreshing?: boolean;
   onRefresh?: () => Promise<void> | void;
   hideSmallAssets?: boolean;
+  onHideSmallAssetsChange?: (value: boolean) => void;
 }
 
 export function SolanaWalletCard({
   tokens,
   totalValueUsd,
   isRefreshing = false,
-  hideSmallAssets = false,
+  hideSmallAssets,
+  onHideSmallAssetsChange,
 }: SolanaWalletCardProps) {
+  const { formatUsd } = usePortfolioAmountsPrivacy();
   const { isExpanded, toggleSection } = useCollapsible();
-
-  const getTokenUsdValue = (token: Token): number => {
-    const directValue = Number(token.value);
-    if (Number.isFinite(directValue)) {
-      return directValue;
-    }
-
-    const price = Number(token.price);
-    const rawAmount = Number(token.amount);
-    const decimals = Number(token.decimals);
-    if (!Number.isFinite(price) || !Number.isFinite(rawAmount) || !Number.isFinite(decimals)) {
-      return 0;
-    }
-
-    return (rawAmount / Math.pow(10, decimals)) * price;
-  };
+  const [internalHideSmallAssets, setInternalHideSmallAssets] = useState(false);
+  const effectiveHideSmallAssets = hideSmallAssets ?? internalHideSmallAssets;
+  const setHideSmallAssets = onHideSmallAssetsChange ?? setInternalHideSmallAssets;
 
   const displayTotal = useMemo(() => {
     // Show spinner if refreshing or if totalValueUsd is null (still calculating)
@@ -46,12 +37,12 @@ export function SolanaWalletCard({
       return null; // Will render spinner instead
     }
     if (typeof totalValueUsd === "number" && Number.isFinite(totalValueUsd)) {
-      return formatCurrency(totalValueUsd, 2);
+      return formatUsd(totalValueUsd, 2);
     }
     return "N/A";
-  }, [totalValueUsd, isRefreshing]);
+  }, [totalValueUsd, isRefreshing, formatUsd]);
 
-  const filteredTokens = hideSmallAssets
+  const filteredTokens = effectiveHideSmallAssets
     ? tokens.filter((token) => {
         const value = getTokenUsdValue(token);
         return Number.isFinite(value) && value >= 1;
@@ -110,9 +101,21 @@ export function SolanaWalletCard({
           <CardContent className="flex-1 overflow-y-auto px-3 pt-0">
             <ScrollArea className="h-full">
               {filteredTokens.length > 0 ? <TokenList tokens={filteredTokens} disableDrag={true} /> : null}
-              {hideSmallAssets && hiddenCount > 0 ? (
-                <div className="text-xs text-muted-foreground py-1 text-right">
+              {effectiveHideSmallAssets && hiddenCount > 0 ? (
+                <div
+                  className="text-xs text-muted-foreground py-1 text-right cursor-pointer hover:text-foreground transition-colors"
+                  onClick={() => setHideSmallAssets(false)}
+                  title="Click to show hidden assets"
+                >
                   {hiddenCount} assets hidden
+                </div>
+              ) : !effectiveHideSmallAssets && tokens.length > 0 ? (
+                <div
+                  className="text-xs text-muted-foreground py-1 text-right cursor-pointer hover:text-foreground transition-colors"
+                  onClick={() => setHideSmallAssets(true)}
+                  title="Click to hide small assets"
+                >
+                  Hide assets {'<'}1$
                 </div>
               ) : null}
             </ScrollArea>

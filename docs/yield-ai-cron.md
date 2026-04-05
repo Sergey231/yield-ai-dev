@@ -63,6 +63,7 @@ Success shape (via `createSuccessResponse`):
     "maxTxPerRun": 200,
     "processedSafes": 0,
     "txCount": 0,
+    "txCountByKind": { "claim": 0, "swap": 0, "deposit": 0 },
     "claimedSafes": 0,
     "swappedSafes": 0,
     "depositedSafes": 0,
@@ -76,6 +77,7 @@ Success shape (via `createSuccessResponse`):
 }
 ```
 
+- **`txCount`** is the sum of claim + swap + deposit steps (including **`dryRun: true`**). **`txCountByKind`** breaks it down by type.
 - **Hashes** are populated only when transactions are actually submitted (`dryRun: false`).
 - If the body is invalid JSON, the handler may fall back to defaults and **`dryRun` may be `false`** — fix the JSON (valid JSON uses `:` not `=` in objects, e.g. `{"dryRun":false}` not `{"dryRun":=false}`).
 

@@ -11,6 +11,7 @@ import tokenList from "@/lib/data/tokenList.json";
 import { useCollapsible } from "@/contexts/CollapsibleContext";
 import { ManagePositionsButton } from "../ManagePositionsButton";
 import { ProtocolClosureNotice } from "@/components/ui/protocol-closure-notice";
+import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
 
 interface PositionsListProps {
   address?: string;
@@ -69,6 +70,7 @@ function normalizePriceMap(list: any[]): Record<string, number> {
 }
 
 export function PositionsList({ address, onPositionsValueChange, refreshKey, onPositionsCheckComplete, showManageButton=true }: PositionsListProps) {
+  const { formatUsd, maskBalance } = usePortfolioAmountsPrivacy();
   const { account } = useWallet();
   const walletAddress = address || account?.address?.toString();
   const protocol = getProtocolByName("Earnium");
@@ -374,7 +376,7 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
             <ProtocolClosureNotice protocolKey="earnium" stopPropagation />
           </div>
           <div className="flex items-center gap-2">
-            <div className="text-lg">${totalValue.toFixed(2)}</div>
+            <div className="text-lg">{formatUsd(totalValue)}</div>
             <ChevronDown className={cn(
               "h-5 w-5 transition-transform",
               isExpanded('earnium') ? "transform rotate-0" : "transform -rotate-90"
@@ -412,7 +414,7 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                       </TooltipProvider>
                     </div>
                   </div>
-                  <div className="font-medium">${(p.poolUserUSD || 0).toFixed(2)}</div>
+                  <div className="font-medium">{formatUsd(p.poolUserUSD || 0)}</div>
                 </div>
               </div>
             ))}
@@ -424,7 +426,7 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                 <TooltipProvider>
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <div className="font-medium cursor-help">${rewardsSummary.totalUSD.toFixed(2)}</div>
+                      <div className="font-medium cursor-help">{formatUsd(rewardsSummary.totalUSD)}</div>
                     </TooltipTrigger>
                     <TooltipContent className="bg-popover text-popover-foreground border-border">
                       <div className="space-y-1 text-xs">
@@ -432,8 +434,8 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                           <div key={i} className="flex items-center justify-between gap-6">
                             <span>{it.symbol}</span>
                             <div>
-                              <span className="mr-2">{it.amount.toFixed(4)}</span>
-                              <span>${it.usd.toFixed(2)}</span>
+                              <span className="mr-2">{maskBalance(it.amount.toFixed(4))}</span>
+                              <span>{formatUsd(it.usd)}</span>
                             </div>
                           </div>
                         ))}

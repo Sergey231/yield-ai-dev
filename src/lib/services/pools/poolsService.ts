@@ -1,5 +1,6 @@
 import { InvestmentData } from '@/types/investments';
 import { poolSources } from '@/lib/config/poolsConfig';
+import { getBaseUrl } from '@/lib/utils/config';
 
 export interface PoolSource {
   name: string;
@@ -19,9 +20,9 @@ export class PoolsService {
 
       try {
         // Handle relative URLs for internal APIs
-        const fullUrl = source.url.startsWith('http') 
-          ? source.url 
-          : `${process.env.NEXT_PUBLIC_API_URL || process.env.VERCEL_URL || 'http://localhost:3000'}${source.url}`;
+        const fullUrl = source.url.startsWith('http')
+          ? source.url
+          : `${getBaseUrl()}${source.url}`;
 
         const response = await fetch(fullUrl, {
           headers: {

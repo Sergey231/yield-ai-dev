@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getRequestOrigin } from '@/lib/utils/requestOrigin';
 import { Aptos, AptosConfig, Network } from '@aptos-labs/ts-sdk';
+import { getBaseUrl } from '@/lib/utils/config';
 
 // Auro Finance contract address (mainnet)
 const AURO_ADDRESS = "0x50a340a19e6ada1be07192c042786ca6a9651d5c845acc8727e8c6416a56a32c";
@@ -66,8 +68,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // Get base URL from environment or use default
-    const baseUrl = process.env.NEXT_PUBLIC_API_URL || process.env.VERCEL_URL || 'http://localhost:3000';
+    const baseUrl = getBaseUrl();
     
     // Fetch positions for the address
     const positionsResponse = await fetch(`${baseUrl}/api/protocols/auro/userPositions?address=${encodeURIComponent(address)}`);

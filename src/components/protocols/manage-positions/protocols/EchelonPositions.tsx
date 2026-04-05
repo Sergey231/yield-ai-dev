@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
@@ -24,10 +25,17 @@ import { ProtocolKey } from "@/lib/transactions/types";
 import { createDualAddressPriceMap } from "@/lib/utils/addressNormalization";
 import { TokenInfoService } from "@/lib/services/tokenInfoService";
 import { formatNumber, formatCurrency } from "@/lib/utils/numberFormat";
+import { queryKeys } from "@/lib/query/queryKeys";
+import { AccountHealthSummary } from "@/components/protocols/manage-positions/AccountHealthSummary";
+import {
+  useEchelonPositions,
+  useEchelonRewards,
+  useEchelonPools,
+} from "@/lib/query/hooks/protocols/echelon";
 
 interface Position {
   coin: string;
-  amount: number | string;
+  amount?: number | string;
   market?: string;
   type?: string; // supply или borrow
 }
@@ -44,9 +52,7 @@ interface EchelonReward {
 
 export function EchelonPositions() {
   const { account, signAndSubmitTransaction } = useWallet();
-  const [positions, setPositions] = useState<Position[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
   const [totalValue, setTotalValue] = useState<number>(0);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [showDepositModal, setShowDepositModal] = useState(false);
@@ -54,14 +60,66 @@ export function EchelonPositions() {
   const [selectedPosition, setSelectedPosition] = useState<Position | null>(null);
   const [selectedDepositMarketAddress, setSelectedDepositMarketAddress] = useState<string | undefined>(undefined);
   const [tokenPrices, setTokenPrices] = useState<Record<string, string>>({});
-  const [rewardsData, setRewardsData] = useState<EchelonReward[]>([]);
-  const [apyData, setApyData] = useState<Record<string, any>>({});
   const [fallbackTokenInfo, setFallbackTokenInfo] = useState<Record<string, any>>({});
   const { withdraw, isLoading: isWithdrawing } = useWithdraw();
   const { claimRewards, isLoading: isClaiming } = useClaimRewards();
   const { startDrag, endDrag, state, closePositionModal, closeAllModals, setPositionConfirmHandler } = useDragDrop();
   const isModalOpenRef = useRef(false);
   const pricesService = PanoraPricesService.getInstance();
+  const walletAddress = account?.address?.toString();
+
+  const {
+    data: positions = [],
+    isLoading: positionsLoading,
+    error: positionsError,
+  } = useEchelonPositions(walletAddress, { refetchOnMount: "always" });
+  const { data: rewardsData = [], isLoading: rewardsLoading } = useEchelonRewards(
+    walletAddress,
+    { refetchOnMount: "always" }
+  );
+  const { data: poolsResponse } = useEchelonPools();
+
+  const loading = positionsLoading || rewardsLoading;
+  const error = positionsError ? "Failed to load Echelon positions" : null;
+
+  const apyData = useMemo(() => {
+    const map: Record<string, any> = {};
+    if (!poolsResponse?.data) return map;
+    poolsResponse.data.forEach((pool: any) => {
+      const assetKey = pool.asset;
+      const tokenKey = pool.token;
+      if (!assetKey) return;
+
+      const poolData = {
+        supplyAPY: pool.depositApy,
+        borrowAPY: pool.borrowAPY,
+        supplyRewardsApr: pool.supplyRewardsApr,
+        borrowRewardsApr: pool.borrowRewardsApr,
+        marketAddress: pool.marketAddress,
+        asset: pool.asset,
+        poolType: pool.poolType,
+        hasSupply: pool.depositApy > 0,
+        hasBorrow: pool.borrowAPY > 0,
+        hasStaking: pool.stakingApr > 0,
+        lendingApr: pool.lendingApr || 0,
+        stakingAprOnly: pool.stakingAprOnly || 0,
+        totalSupplyApr: pool.totalSupplyApr || pool.depositApy || 0,
+        ltv: pool.ltv,
+        lt: pool.lt,
+        emodeLtv: pool.emodeLtv,
+        emodeLt: pool.emodeLt,
+      };
+
+      map[assetKey] = poolData;
+      if (tokenKey) map[tokenKey] = poolData;
+      if (assetKey === "APT" && pool.aptAlternativeAddresses) {
+        pool.aptAlternativeAddresses.forEach((altAddress: string) => {
+          map[altAddress] = poolData;
+        });
+      }
+    });
+    return map;
+  }, [poolsResponse?.data]);
 
   // Функция для нормализации адресов токенов
   const normalizeTokenAddress = (coinAddress: string): string => {
@@ -170,59 +228,6 @@ export function EchelonPositions() {
 
 
 
-  // Загрузка rewards
-  const fetchRewards = useCallback(async () => {
-    if (!account?.address) return;
-    
-    try {
-      const response = await fetch(`/api/protocols/echelon/rewards?address=${account.address}`);
-      const data = await response.json();
-      
-      if (data.success && Array.isArray(data.data)) {
-        setRewardsData(data.data);
-      } else {
-        setRewardsData([]);
-      }
-    } catch (error) {
-      setRewardsData([]);
-    }
-  }, [account?.address]);
-
-  // Унифицированный рефрешер данных (позиции + награды)
-  const reloadData = useCallback(async (positionsDataFromEvent?: any[]) => {
-    // Если пришли позиции из события, устанавливаем их и обновляем награды
-    if (positionsDataFromEvent && Array.isArray(positionsDataFromEvent)) {
-      setPositions(positionsDataFromEvent);
-      try {
-        await fetchRewards();
-      } catch {
-        // ignore
-      }
-      return;
-    }
-
-    if (!account?.address) return;
-    try {
-      setLoading(true);
-      setError(null);
-      const positionsResponse = await fetch(`/api/protocols/echelon/userPositions?address=${account.address}`);
-      if (!positionsResponse.ok) {
-        throw new Error(`Positions API returned status ${positionsResponse.status}`);
-      }
-      const positionsJson = await positionsResponse.json();
-      if (positionsJson.success && Array.isArray(positionsJson.data)) {
-        setPositions(positionsJson.data);
-      } else {
-        setPositions([]);
-      }
-      await fetchRewards();
-    } catch (err) {
-      setError('Failed to load Echelon positions');
-    } finally {
-      setLoading(false);
-    }
-  }, [account?.address, fetchRewards]);
-
   // Расчет стоимости rewards
   const calculateRewardsValue = useCallback(() => {
     return rewardsData.reduce((sum, reward) => {
@@ -293,18 +298,6 @@ export function EchelonPositions() {
     };
   }, [positions, apyData, tokenPrices]);
 
-  // Вспомогательные функции для Health Factor
-  const getHealthFactorColor = (healthFactor: number) => {
-    if (healthFactor >= 1.5) return 'text-green-500';
-    if (healthFactor >= 1.2) return 'text-yellow-500';
-    return 'text-red-500';
-  };
-
-  const getHealthFactorStatus = (healthFactor: number) => {
-    if (healthFactor >= 1.5) return 'Safe';
-    if (healthFactor >= 1.2) return '';
-    return 'Danger';
-  };
 
   // Claim rewards
   const handleClaimRewards = async () => {
@@ -334,8 +327,15 @@ export function EchelonPositions() {
         await claimRewards('echelon', [reward.farmingId], [reward.tokenType]);
       }
       
-      // Обновить данные
-      await fetchRewards();
+      const addr = account?.address?.toString();
+      if (addr) {
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.protocols.echelon.userPositions(addr),
+        });
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.protocols.echelon.rewards(addr),
+        });
+      }
     } catch (error) {
     }
   };
@@ -405,122 +405,17 @@ export function EchelonPositions() {
     return () => clearTimeout(timeoutId);
   }, [getAllTokenAddresses, pricesService, account?.address]);
 
-      // Загружаем APR данные из того же источника, что и Pro вкладка
-  useEffect(() => {
-    fetch('/api/protocols/echelon/v2/pools')
-      .then(res => res.json())
-      .then(data => {
-        if (data.success && data.data) {
-                      // Создаем двойной маппинг: по asset (символ) и по token (адрес) для совместимости
-          const apyMapping: Record<string, any> = {};
-          data.data.forEach((pool: any) => {
-            // Используем asset (символ токена) как основной ключ
-            const assetKey = pool.asset;
-            const tokenKey = pool.token;
-            
-            if (assetKey) {
-                          const poolData = {
-              supplyAPY: pool.depositApy,
-              borrowAPY: pool.borrowAPY,
-              supplyRewardsApr: pool.supplyRewardsApr,
-              borrowRewardsApr: pool.borrowRewardsApr,
-              marketAddress: pool.marketAddress,
-              asset: pool.asset,
-              poolType: pool.poolType,
-              // Добавляем информацию о том, какие типы операций доступны
-              hasSupply: pool.depositApy > 0,
-              hasBorrow: pool.borrowAPY > 0,
-              hasStaking: pool.stakingApr > 0,
-              // Добавляем разбивку APR для tooltip
-              lendingApr: pool.lendingApr || 0,
-              stakingAprOnly: pool.stakingAprOnly || 0,
-              totalSupplyApr: pool.totalSupplyApr || pool.depositApy || 0,
-              // LTV fields
-              ltv: pool.ltv,
-              lt: pool.lt,
-              emodeLtv: pool.emodeLtv,
-              emodeLt: pool.emodeLt
-            };
-              
-              // Сохраняем по символу токена
-              apyMapping[assetKey] = poolData;
-              
-              // Также сохраняем по адресу токена для совместимости с существующим кодом
-              if (tokenKey) {
-                apyMapping[tokenKey] = poolData;
-              }
-              
-              // Специальная обработка для APT токена - добавляем маппинги для альтернативных адресов
-              if (assetKey === 'APT' && pool.aptAlternativeAddresses) {
-                pool.aptAlternativeAddresses.forEach((altAddress: string) => {
-                  apyMapping[altAddress] = poolData;
-                });
-              }
-            }
-          });
-                     setApyData(apyMapping);
-           
-        }
-      })
-              .catch(error => {
-        // Fallback на старые данные
-        // setMarketData(echelonMarkets.markets); // This line is removed
-      });
-  }, []);
-
-  // Объединенный useEffect для загрузки позиций и наград с дебаунсингом
-  useEffect(() => {
-    if (!account?.address) {
-      setPositions([]);
-      setRewardsData([]);
-      return;
-    }
-
-    const timeoutId = setTimeout(async () => {
-      setLoading(true);
-      setError(null);
-      
-      try {
-        // Загружаем позиции
-        const positionsResponse = await fetch(`/api/protocols/echelon/userPositions?address=${account.address}`);
-        
-        if (!positionsResponse.ok) {
-          throw new Error(`Positions API returned status ${positionsResponse.status}`);
-        }
-        
-        const positionsData = await positionsResponse.json();
-        
-        if (positionsData.success && Array.isArray(positionsData.data)) {
-          setPositions(positionsData.data);
-        } else {
-          setPositions([]);
-        }
-        
-        // Загружаем награды
-        await fetchRewards();
-      } catch (err) {
-        setError('Failed to load Echelon positions');
-        setPositions([]);
-        setRewardsData([]);
-      } finally {
-        setLoading(false);
-      }
-    }, 500); // Дебаунсинг 500мс
-
-    return () => clearTimeout(timeoutId);
-  }, [account?.address, fetchRewards]);
-
   // Подписка на глобальное событие обновления позиций
   useEffect(() => {
     const handleRefresh = (event: CustomEvent) => {
       if (event.detail?.protocol === 'echelon') {
-        const incoming = event.detail?.data;
-        if (incoming && Array.isArray(incoming)) {
-          // При ручном Refresh из ManagePositions приходят новые позиции
-          reloadData(incoming);
-        } else {
-          // После Withdraw/Claim данных нет — перезагружаем из API
-          reloadData();
+        if (walletAddress) {
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.protocols.echelon.userPositions(walletAddress),
+          });
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.protocols.echelon.rewards(walletAddress),
+          });
         }
       }
     };
@@ -529,7 +424,7 @@ export function EchelonPositions() {
     return () => {
       window.removeEventListener('refreshPositions', handleRefresh as unknown as EventListener);
     };
-  }, [reloadData]);
+  }, [walletAddress, queryClient]);
 
   const getTokenInfo = (coinAddress: string) => {
     // Normalize addresses by removing leading zeros after 0x
@@ -843,6 +738,15 @@ export function EchelonPositions() {
       setSelectedPosition(null);
       isModalOpenRef.current = false;
       closePositionModal(selectedPosition.coin);
+      const addr = account?.address?.toString();
+      if (addr) {
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.protocols.echelon.userPositions(addr),
+        });
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.protocols.echelon.rewards(addr),
+        });
+      }
     } catch (error) {
     }
   };
@@ -865,7 +769,9 @@ export function EchelonPositions() {
       <ScrollArea>
         {sortedPositions.map((position, index) => {
           const tokenInfo = getTokenInfo(position.coin);
-          const rawAmount = typeof position.amount === 'number' ? position.amount : parseFloat(position.amount);
+          const rawAmount = typeof position.amount === 'number'
+            ? position.amount
+            : parseFloat(String(position.amount ?? 0));
           const amount = !isNaN(rawAmount) && tokenInfo?.decimals ? rawAmount / 10 ** tokenInfo.decimals : 0;
           const price = getTokenPrice(position.coin);
           const value = price ? formatCurrency(amount * parseFloat(price), 2) : 'N/A';
@@ -1244,25 +1150,11 @@ export function EchelonPositions() {
         if (!healthData) return null;
         
         return (
-          <div className="flex items-center justify-between pt-4 pb-6 border-t border-gray-200">
-            <span className="text-lg font-semibold">Account Health:</span>
-            <div className="text-right">
-              <div className="flex items-center gap-3">
-                <div className="text-center">
-                  <div className={`text-2xl font-bold ${getHealthFactorColor(healthData.healthFactor)}`}>
-                    {formatNumber(healthData.healthFactor, 2)}
-                  </div>
-                  <div className={`text-sm font-medium ${getHealthFactorColor(healthData.healthFactor)}`}>
-                    {getHealthFactorStatus(healthData.healthFactor)}
-                  </div>
-                </div>
-                <div className="text-sm text-muted-foreground">
-                  <div>Collateral: {formatCurrency(healthData.accountMargin, 2)}</div>
-                  <div>Liabilities: {formatCurrency(healthData.totalLiabilities, 2)}</div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <AccountHealthSummary
+            accountHealth={healthData.healthFactor}
+            collateral={healthData.accountMargin}
+            liabilities={healthData.totalLiabilities}
+          />
         );
       })()}
 

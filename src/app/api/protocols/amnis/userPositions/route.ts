@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getBaseUrl } from '@/lib/utils/config';
 
 export async function GET(request: NextRequest) {
   try {
@@ -14,8 +15,7 @@ export async function GET(request: NextRequest) {
 
     console.log('Fetching Amnis positions for address:', address);
 
-    // Get base URL from environment or use default
-    const baseUrl = process.env.NEXT_PUBLIC_API_URL || process.env.VERCEL_URL || 'http://localhost:3000';
+    const baseUrl = getBaseUrl();
     
     // Get AMI staking pools using our existing API
     console.log('Fetching AMI staking pools...');

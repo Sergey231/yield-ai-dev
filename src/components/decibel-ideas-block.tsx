@@ -16,12 +16,12 @@ import Image from 'next/image';
 import { DecibelOpenPositionModal } from '@/components/decibel/decibel-open-position-modal';
 import { fetchFundingApr, type FundingAprResult } from '@/lib/protocols/decibel/fundingApr';
 import { cn } from '@/lib/utils';
+import { DecibelCTABlock } from '@/components/ui/decibel-cta-block';
 
-/** Logo URLs for the three fixed perp markets. BTC and ETH from Decibel app; APT from Panora. */
+/** Logo URLs for fixed perp markets (BTC from Decibel app; APT from Panora). */
 const MARKET_LOGOS: Record<string, string> = {
   'BTC/USD': 'https://app.decibel.trade/images/icons/btc.svg?dpl=dpl_FECfRSDXc1wiUcCXB6MPHgx2CzKp',
   'APT/USD': 'https://assets.panora.exchange/tokens/aptos/apt.svg',
-  'ETH/USD': 'https://app.decibel.trade/images/icons/eth.svg?dpl=dpl_FECfRSDXc1wiUcCXB6MPHgx2CzKp',
 };
 
 interface DecibelMarket {
@@ -87,7 +87,7 @@ export function DecibelIdeasBlock() {
     return () => { cancelled = true; };
   }, []);
 
-  // Pick 3: BTC/USD, APT/USD, ETH/USD (fixed order)
+  // BTC/USD (center), APT/USD (right); Decibel CTA is always the left column.
   const normalizedMarkets = markets.map((m) => ({
     ...m,
     key: m.market_addr != null ? normalizeAddress(String(m.market_addr)) : '',
@@ -98,18 +98,15 @@ export function DecibelIdeasBlock() {
   const aptMarket = normalizedMarkets.find(
     (m) => (m.market_name || '').toUpperCase().includes('APT/USD') || (m.market_name || '').toUpperCase() === 'APT/USD'
   );
-  const ethMarket = normalizedMarkets.find(
-    (m) => (m.market_name || '').toUpperCase().includes('ETH/USD') || (m.market_name || '').toUpperCase() === 'ETH/USD'
-  );
 
-  const threeMarkets = [btcMarket, aptMarket, ethMarket].filter(Boolean) as typeof normalizedMarkets;
-  const marketKeysStr = threeMarkets.map((m) => m.key).filter(Boolean).join(',');
+  const perpMarkets = [btcMarket, aptMarket].filter(Boolean) as typeof normalizedMarkets;
+  const marketKeysStr = perpMarkets.map((m) => m.key).filter(Boolean).join(',');
 
   // Fetch 24h funding APR per market (cached 10 min)
   useEffect(() => {
     if (!marketKeysStr) return;
     let cancelled = false;
-    threeMarkets.forEach((m) => {
+    perpMarkets.forEach((m) => {
       const name = m.market_name;
       if (!name || !m.key) return;
       fetchFundingApr(name).then((data) => {
@@ -122,7 +119,10 @@ export function DecibelIdeasBlock() {
   if (loading) {
     return (
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-        {[1, 2, 3].map((i) => (
+        <div className="min-w-0 md:col-span-2 lg:col-span-1">
+          <DecibelCTABlock />
+        </div>
+        {[1, 2].map((i) => (
           <Card key={i} className="border-2">
             <CardHeader>
               <CardTitle className="flex items-center gap-2 w-full flex-wrap">
@@ -146,34 +146,49 @@ export function DecibelIdeasBlock() {
 
   if (error) {
     return (
-      <p className="text-sm text-destructive">
-        {error}
-        <button
-          type="button"
-          className="ml-2 underline"
-          onClick={() => window.location.reload()}
-        >
-          Retry
-        </button>
-      </p>
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <div className="min-w-0 md:col-span-2 lg:col-span-1">
+          <DecibelCTABlock />
+        </div>
+        <p className="text-sm text-destructive md:col-span-2 lg:col-span-2 self-center">
+          {error}
+          <button
+            type="button"
+            className="ml-2 underline"
+            onClick={() => window.location.reload()}
+          >
+            Retry
+          </button>
+        </p>
+      </div>
     );
   }
 
-  if (threeMarkets.length === 0) {
+  if (perpMarkets.length === 0) {
     return (
-      <p className="text-sm text-muted-foreground">No Decibel perp markets available.</p>
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <div className="min-w-0 md:col-span-2 lg:col-span-1">
+          <DecibelCTABlock />
+        </div>
+        <p className="text-sm text-muted-foreground md:col-span-2 lg:col-span-2 self-center">
+          No Decibel perp markets available.
+        </p>
+      </div>
     );
   }
 
   return (
     <>
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-      {threeMarkets.map((m) => {
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <div className="min-w-0 md:col-span-2 lg:col-span-1">
+          <DecibelCTABlock />
+        </div>
+      {perpMarkets.map((m) => {
         const priceInfo = pricesByMarket[m.key];
         const markPx = priceInfo?.mark_px;
         const marketName = m.market_name || '—';
         const logoUrl = MARKET_LOGOS[marketName];
-        const priceDecimals = marketName.toUpperCase().includes('BTC/USD') ? 0 : marketName.toUpperCase().includes('ETH/USD') ? 1 : 4;
+        const priceDecimals = marketName.toUpperCase().includes('BTC/USD') ? 0 : 4;
         const funding = fundingByKey[m.key];
         const apr = funding?.avg_yearly_apr_pct;
         const direction = funding?.direction ?? '—';
@@ -198,7 +213,6 @@ export function DecibelIdeasBlock() {
                 <div className="flex items-center min-w-0 flex-1 overflow-hidden">
                   <span className="truncate">{marketName}</span>
                 </div>
-                <Badge variant="outline" className="shrink-0">Decibel</Badge>
               </CardTitle>
             </CardHeader>
             <CardContent>

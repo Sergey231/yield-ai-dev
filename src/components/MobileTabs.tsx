@@ -21,6 +21,7 @@ import { PositionsList as EchoPositionsList } from "./protocols/echo/PositionsLi
 import { PositionsList as DecibelPositionsList } from "./protocols/decibel/PositionsList";
 import { PositionsList as AptreePositionsList } from "./protocols/aptree/PositionsList";
 import { PositionsList as JupiterPositionsList } from "./protocols/jupiter/PositionsList";
+import { PositionsList as KaminoPositionsList } from "./protocols/kamino/PositionsList";
 import { PositionsList as YieldAIPositionsList } from "./protocols/yield-ai/PositionsList";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { useAptosNativeRestore } from "@/hooks/useAptosNativeRestore";
@@ -42,6 +43,7 @@ function MobileTabsContent() {
   useWallet(); // Keep adapter state synced
   const {
     address: solanaAddress,
+    protocolsAddress: solanaProtocolsAddress,
     tokens: solanaTokens,
     totalValueUsd: solanaTotalValue,
     isLoading: isSolanaLoading,
@@ -69,7 +71,7 @@ function MobileTabsContent() {
   const [refreshKey, setRefreshKey] = useState<number>(0);
   const [checkingProtocols, setCheckingProtocols] = useState<string[]>([]);
 
-  const allProtocolNames = [
+  const APTOS_PROTOCOL_NAMES = [
     "Hyperion",
     "Echelon",
     "Aries",
@@ -87,10 +89,13 @@ function MobileTabsContent() {
     "APTree",
     "AI agent",
   ];
+  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino"];
 
   const resetChecking = useCallback(() => {
-    setCheckingProtocols(allProtocolNames);
-  }, []);
+    setCheckingProtocols(
+      solanaAddress ? [...APTOS_PROTOCOL_NAMES, ...SOLANA_PROTOCOL_NAMES] : [...APTOS_PROTOCOL_NAMES]
+    );
+  }, [solanaAddress]);
 
   // When set (e.g. "decibel" or "decibel,thala"), only these protocols are shown and fetched
   const debugProtocolKeys =
@@ -136,6 +141,12 @@ function MobileTabsContent() {
       setCheckingProtocols([]);
     }
   }, [account?.address, resetChecking]);
+
+  useEffect(() => {
+    if (!account?.address) return;
+    // Keep checking list in sync when Solana wallet connects/disconnects
+    resetChecking();
+  }, [account?.address, solanaProtocolsAddress, resetChecking]);
 
   // Обработчики изменения суммы позиций в протоколах
   const handleHyperionValueChange = (value: number) => {
@@ -283,7 +294,8 @@ function MobileTabsContent() {
                         <div className="flex items-center gap-1">
                           {checkingProtocols.map((name) => {
                             const proto = getProtocolByName(name);
-                            const logo = proto?.logoUrl || "/favicon.ico";
+                            const logo =
+                              name === "Kamino" ? "/protocol_ico/kamino.png" : proto?.logoUrl || "/favicon.ico";
                             return (
                               <ProtocolIcon
                                 key={name}
@@ -349,7 +361,18 @@ function MobileTabsContent() {
                       onRefresh={refreshSolana}
                       isRefreshing={isSolanaLoading}
                     />
-                    <JupiterPositionsList address={solanaAddress} />
+                    <JupiterPositionsList
+                      address={solanaProtocolsAddress ?? undefined}
+                      onPositionsCheckComplete={() =>
+                        setCheckingProtocols((prev) => prev.filter((p) => p !== "Jupiter"))
+                      }
+                    />
+                    <KaminoPositionsList
+                      address={solanaProtocolsAddress ?? undefined}
+                      onPositionsCheckComplete={() =>
+                        setCheckingProtocols((prev) => prev.filter((p) => p !== "Kamino"))
+                      }
+                    />
                     <SolanaSignMessageButton />
                   </div>
                 )}
@@ -358,7 +381,7 @@ function MobileTabsContent() {
                 {!account?.address && !solanaAddress && (
                   <div className="mt-6 p-4 bg-muted rounded-lg">
                     <p className="text-sm text-muted-foreground">
-                      Connect your wallet to view your assets and positions in DeFi protocols
+                      Connect your Aptos or Solana wallet to view your assets and positions in DeFi protocols
                     </p>
                   </div>
                 )}

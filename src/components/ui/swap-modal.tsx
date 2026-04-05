@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import Image from 'next/image';
 import { ArrowLeftRight, Loader2, Info, AlertCircle, CheckCircle, XCircle, Copy, ExternalLink, Settings, X } from 'lucide-react';
 import {
@@ -51,12 +51,28 @@ interface SwapResult {
   receivedSymbol?: string;
 }
 
+export interface SwapModalPrefill {
+  fromFaAddress: string;
+  toFaAddress: string;
+  amount?: string;
+}
+
 interface SwapModalProps {
   isOpen: boolean;
   onClose: () => void;
+  /** When set, modal applies from/to/amount after open (e.g. hedge flow). */
+  prefill?: SwapModalPrefill | null;
+  variantTitle?: string;
+  variantDescription?: string;
 }
 
-export function SwapModal({ isOpen, onClose }: SwapModalProps) {
+export function SwapModal({
+  isOpen,
+  onClose,
+  prefill = null,
+  variantTitle,
+  variantDescription,
+}: SwapModalProps) {
   const { tokens, address: userAddress, refreshPortfolio } = useWalletData();
   const { signAndSubmitTransaction, connected } = useWallet();
 
@@ -89,6 +105,20 @@ export function SwapModal({ isOpen, onClose }: SwapModalProps) {
   const [toToken, setToToken] = useState<TokenWithActualPrice | null>(null);
   const [amount, setAmount] = useState<string>('');
   const [slippage, setSlippage] = useState<number>(0.5);
+
+  const prefillSessionRef = useRef(false);
+  const prefillRequestedAmountRef = useRef<string>('');
+  const autoClampedFromPrefillRef = useRef(false);
+
+  const walletPriceForFa = (faOrAddr: string | undefined): string | undefined => {
+    if (!faOrAddr) return undefined;
+    const n = (x: string) =>
+      (x.startsWith('0x') ? '0x' + x.slice(2).replace(/^0+/, '') || '0x0' : x).toLowerCase();
+    const target = n(faOrAddr);
+    const w = tokens.find((t) => n(t.address) === target);
+    const p = w?.price;
+    return p == null ? undefined : p;
+  };
 
   // USD amount calculated from input amount and fromToken actual price from wallet
   const usdAmount = useMemo(() => {
@@ -241,29 +271,64 @@ export function SwapModal({ isOpen, onClose }: SwapModalProps) {
     }
   }, [isOpen, refreshPortfolio]);
 
-  // Set default tokens on load
+  // Apply prefilled route (hedge / deep links) when opening with prefill
   useEffect(() => {
+    if (!isOpen || !prefill?.fromFaAddress || !prefill?.toFaAddress) return;
+    const fromT = getTokenInfo(prefill.fromFaAddress);
+    const toT = getTokenInfo(prefill.toFaAddress);
+    if (!fromT || !toT) return;
+    const fromAddr = fromT.faAddress ?? fromT.tokenAddress ?? undefined;
+    const toAddr = toT.faAddress ?? toT.tokenAddress ?? undefined;
+    const fromPx = walletPriceForFa(fromAddr);
+    const toPx = walletPriceForFa(toAddr);
+    setFromToken({ ...fromT, actualPrice: fromPx ?? undefined });
+    setToToken({ ...toT, actualPrice: toPx ?? undefined });
+    setAmount(prefill.amount ?? '');
+    prefillRequestedAmountRef.current = prefill.amount ?? '';
+    autoClampedFromPrefillRef.current = false;
+    setSwapQuote(null);
+    setQuoteDebug(null);
+    setSwapResult(null);
+    setError(null);
+    prefillSessionRef.current = true;
+  }, [isOpen, prefill, tokens]);
+
+  // Reset token state after closing a session that used prefill (ChatPanel unchanged)
+  useEffect(() => {
+    if (isOpen || !prefillSessionRef.current) return;
+    setFromToken(null);
+    setToToken(null);
+    setAmount('');
+    prefillRequestedAmountRef.current = '';
+    autoClampedFromPrefillRef.current = false;
+    setSwapQuote(null);
+    setQuoteDebug(null);
+    setSwapResult(null);
+    setError(null);
+    prefillSessionRef.current = false;
+  }, [isOpen]);
+
+  // Set default tokens on load (skip when prefill drives the session)
+  useEffect(() => {
+    if (!isOpen) return;
+    if (prefill?.fromFaAddress && prefill?.toFaAddress) return;
     if (availableTokens.length > 0 && !fromToken) {
       const firstToken = availableTokens[0];
       const token = getTokenInfo(firstToken.address);
       if (token) {
-        // Attach actual price from wallet
         setFromToken({ ...token, actualPrice: firstToken.actualPrice });
       }
     }
 
     if (availableToTokens.length > 0 && !toToken) {
-      // Select second token from the list (next available)
       const secondToken = availableToTokens[1] || availableToTokens[0];
       if (hasTokenInfo(secondToken)) {
-        // Attach actual price from wallet
         setToToken({ ...secondToken.tokenInfo, actualPrice: secondToken.actualPrice });
       } else {
         setToToken({ ...(secondToken as Token), actualPrice: secondToken.actualPrice });
       }
     }
-
-  }, [availableTokens, availableToTokens, fromToken, toToken, tokens]);
+  }, [isOpen, prefill, availableTokens, availableToTokens, fromToken, toToken, tokens]);
 
   // Auto-fetch quote: Debounced for amount changes (600ms delay)
   useEffect(() => {
@@ -591,6 +656,69 @@ export function SwapModal({ isOpen, onClose }: SwapModalProps) {
     return { balance: effective };
   };
 
+  const formatHumanAmount = (val: number, decimals: number) => {
+    if (!Number.isFinite(val) || val <= 0) return '';
+    const maxDp = Math.min(Math.max(decimals, 0), 8);
+    const s = val.toFixed(maxDp).replace(/\.?0+$/, '');
+    return s || '';
+  };
+
+  const maxSpendableHuman = (token: Token) => {
+    const bal = getTokenBalance(token).balance;
+    const dec = token.decimals ?? 8;
+    // Safety dust to avoid rounding/precision issues; at least 2 base units.
+    const units = Math.max(2, 1);
+    const dust = units * Math.pow(10, -Math.min(dec, 8));
+    return Math.max(0, bal - dust);
+  };
+
+  const amountNum = useMemo(() => {
+    const n = Number(amount);
+    return Number.isFinite(n) ? n : NaN;
+  }, [amount]);
+
+  const fromBal = useMemo(() => {
+    if (!fromToken) return null;
+    return getTokenBalance(fromToken).balance;
+  }, [fromToken, tokens, balancesOverride]);
+
+  const insufficient = useMemo(() => {
+    if (!fromToken || fromBal == null) return null;
+    if (!Number.isFinite(amountNum) || amountNum <= 0) return null;
+    const need = amountNum;
+    const have = fromBal;
+    const eps = 1e-12;
+    if (need <= have + eps) return null;
+    const deficit = need - have;
+    const deficitRatio = need > 0 ? deficit / need : 1;
+    return { need, have, deficit, deficitRatio };
+  }, [fromToken, fromBal, amountNum]);
+
+  // Prefill UX: if we're slightly short, auto-clamp to max available and show amber hint.
+  useEffect(() => {
+    if (!isOpen) return;
+    if (!prefillSessionRef.current) return;
+    if (autoClampedFromPrefillRef.current) return;
+    if (!fromToken) return;
+    if (!insufficient) return;
+    // "Slightly short": <= 0.1%
+    if (insufficient.deficitRatio > 0.001) return;
+    const maxVal = maxSpendableHuman(fromToken);
+    const next = formatHumanAmount(maxVal, fromToken.decimals ?? 8);
+    if (!next) return;
+    autoClampedFromPrefillRef.current = true;
+    setAmount(next);
+    setSwapQuote(null);
+    setQuoteDebug(null);
+    setSwapResult(null);
+    setLastQuoteData({
+      fromToken: null,
+      toToken: null,
+      amount: '',
+      slippage: 0.5,
+    });
+  }, [isOpen, fromToken, insufficient]);
+
   const getHumanAmount = (raw: string | undefined, decimals: number | undefined) => {
     if (!raw || !decimals) return 0;
     return Number(raw) / Math.pow(10, decimals);
@@ -655,7 +783,7 @@ export function SwapModal({ isOpen, onClose }: SwapModalProps) {
                 height={24}
                 className="rounded-full"
               />
-              <DialogTitle>Gasless Swap Tokens</DialogTitle>
+              <DialogTitle>{variantTitle ?? 'Gasless Swap Tokens'}</DialogTitle>
             </div>
             <div className="flex flex-col items-end gap-2">
               <div className="flex items-center gap-2">
@@ -681,7 +809,8 @@ export function SwapModal({ isOpen, onClose }: SwapModalProps) {
           <div className="flex items-center">
             <div className="flex-1 min-w-0 pr-2">
               <DialogDescription>
-              Swap tokens using Panora DEX aggregator with gasless transactions
+                {variantDescription ??
+                  'Swap tokens using Panora DEX aggregator with gasless transactions'}
               </DialogDescription>
             </div>
             {showSlippage && (
@@ -890,14 +1019,35 @@ export function SwapModal({ isOpen, onClose }: SwapModalProps) {
                     variant="outline"
                     size="sm"
                     onClick={() => {
-                      const balance = getTokenBalance(fromToken);
-                      setAmount(balance.balance.toString());
+                      const maxVal = maxSpendableHuman(fromToken);
+                      setAmount(formatHumanAmount(maxVal, fromToken.decimals ?? 8) || '0');
                     }}
                     className="h-6 text-xs px-2"
                   >
                     Max
                   </Button>
 
+                </div>
+              )}
+              {fromToken && insufficient && (
+                <div
+                  className={
+                    insufficient.deficitRatio <= 0.001 || autoClampedFromPrefillRef.current
+                      ? 'text-xs text-amber-600 dark:text-amber-400'
+                      : 'text-xs text-red-600 dark:text-red-400'
+                  }
+                >
+                  {autoClampedFromPrefillRef.current ? (
+                    <span>
+                      Adjusted to max available. Balance: {formatHumanAmount(insufficient.have, fromToken.decimals ?? 8)}{' '}
+                      {fromToken.symbol}. You can tap Max to use 100%.
+                    </span>
+                  ) : (
+                    <span>
+                      Insufficient balance. You have {formatHumanAmount(insufficient.have, fromToken.decimals ?? 8)}{' '}
+                      {fromToken.symbol}, need {formatHumanAmount(insufficient.need, fromToken.decimals ?? 8)}.
+                    </span>
+                  )}
                 </div>
               )}
             </div>

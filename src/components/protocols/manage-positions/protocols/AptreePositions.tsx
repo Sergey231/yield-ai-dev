@@ -10,6 +10,12 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Button } from "@/components/ui/button";
 import { DepositModal } from "@/components/ui/deposit-modal";
 import { formatCurrency, formatNumber } from "@/lib/utils/numberFormat";
+import { useQueryClient } from "@tanstack/react-query";
+import { useAptreeDepositHistory, useAptreePools, useAptreePositions } from "@/lib/query/hooks/protocols/aptree";
+import { queryKeys } from "@/lib/query/queryKeys";
+import { History } from "lucide-react";
+import { AptreeHistoryModal } from "@/components/ui/aptree-history-modal";
+import { PnlSummaryRow } from "@/components/ui/pnl-summary-row";
 
 interface AptreePosition {
   poolId: number;
@@ -36,65 +42,40 @@ const USDT_FA_ADDRESS = "0x357b0b74bc833e95a115ad22604854d6b0fca151cecd94111770e
 
 export function AptreePositions() {
   const { account } = useWallet();
-  const [positions, setPositions] = useState<AptreePosition[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [aprPct, setAprPct] = useState<number | null>(null);
+  const queryClient = useQueryClient();
+  const walletAddress = account?.address?.toString();
+  const { data: positions = [], isLoading: positionsLoading, error: positionsError } = useAptreePositions(walletAddress, {
+    refetchOnMount: "always",
+  });
+  const { data: pools = [], isLoading: poolsLoading } = useAptreePools({ refetchOnMount: "always" });
+  const aprPct = useMemo(() => {
+    const firstPool = pools?.[0];
+    const aprRaw = Number(firstPool?.apr);
+    return Number.isFinite(aprRaw) ? aprRaw * 100 : null;
+  }, [pools]);
+
   const [showDepositModal, setShowDepositModal] = useState(false);
   const [selectedDepositPosition, setSelectedDepositPosition] = useState<AptreePosition | null>(null);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
 
   const handleDepositClick = (position: AptreePosition) => {
     setSelectedDepositPosition(position);
     setShowDepositModal(true);
   };
 
-  const loadPositions = async () => {
-    if (!account?.address) {
-      setPositions([]);
-      return;
-    }
-    try {
-      setLoading(true);
-      setError(null);
-      const [positionsResponse, poolsResponse] = await Promise.all([
-        fetch(`/api/protocols/aptree/userPositions?address=${encodeURIComponent(account.address.toString())}`),
-        fetch(`/api/protocols/aptree/pools`),
-      ]);
-      if (!positionsResponse.ok) throw new Error("Failed to fetch");
-      const data = await positionsResponse.json();
-      const poolsData = await poolsResponse.json().catch(() => null);
-      const firstPool = Array.isArray(poolsData?.data) ? poolsData.data[0] : null;
-      const aprRaw = Number(firstPool?.apr);
-      // Route returns APR as decimal (e.g. 0.12 => 12%)
-      setAprPct(Number.isFinite(aprRaw) ? aprRaw * 100 : null);
-      if (data?.success && Array.isArray(data.data)) {
-        setPositions(sortByValueDesc(data.data));
-      } else {
-        setPositions([]);
-      }
-    } catch {
-      setError("Failed to load APTree positions");
-      setPositions([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    loadPositions();
     const handleRefresh: EventListener = (evt) => {
       const event = evt as CustomEvent<{ protocol: string; data?: AptreePosition[] }>;
       if (event?.detail?.protocol === "aptree") {
-        if (Array.isArray(event.detail.data)) {
-          setPositions(sortByValueDesc(event.detail.data));
-        } else {
-          void loadPositions();
+        if (walletAddress) {
+          queryClient.invalidateQueries({ queryKey: queryKeys.protocols.aptree.userPositions(walletAddress) });
         }
+        queryClient.invalidateQueries({ queryKey: queryKeys.protocols.aptree.pools() });
       }
     };
     window.addEventListener("refreshPositions", handleRefresh);
     return () => window.removeEventListener("refreshPositions", handleRefresh);
-  }, [account?.address]);
+  }, [queryClient, walletAddress]);
 
   const sortedPositions = useMemo(() => sortByValueDesc(positions), [positions]);
   const totalValue = useMemo(
@@ -102,11 +83,28 @@ export function AptreePositions() {
     [sortedPositions]
   );
 
-  if (loading) {
+  const { data: depositHistory, isLoading: historyLoading, isFetching: historyFetching } = useAptreeDepositHistory(
+    walletAddress,
+    { assetId: USDT_FA_ADDRESS, currentValue: Number.isFinite(totalValue) ? totalValue : null },
+    { enabled: Boolean(walletAddress) }
+  );
+
+  const holdingDays = depositHistory?.pnlStats?.holdingDays ?? 0;
+  const pnlRaw = depositHistory?.pnlStats?.pnl ?? null;
+  const aprRaw = depositHistory?.pnlStats?.apr ?? null;
+  const pnlUsd = pnlRaw != null ? parseFloat(pnlRaw) : null;
+  const aprPctFromHistory = holdingDays >= 7 && aprRaw != null ? parseFloat(aprRaw) : null;
+  const performanceLoading = historyLoading || historyFetching || positionsLoading || poolsLoading;
+
+  if ((positionsLoading || poolsLoading) && sortedPositions.length === 0) {
     return <div className="py-4 text-muted-foreground">Loading positions...</div>;
   }
-  if (error) {
-    return <div className="py-4 text-red-500">{error}</div>;
+  if (positionsError) {
+    return (
+      <div className="py-4 text-red-500">
+        {positionsError instanceof Error ? positionsError.message : "Failed to load APTree positions"}
+      </div>
+    );
   }
   if (sortedPositions.length === 0) {
     return <div className="py-4 text-muted-foreground">No positions on APTree.</div>;
@@ -197,6 +195,15 @@ export function AptreePositions() {
                         <ExternalLink className="h-3 w-3" />
                       </Button>
                     )}
+                    <Button
+                      onClick={() => setShowHistoryModal(true)}
+                      size="sm"
+                      variant="outline"
+                      className="h-10 px-3"
+                      aria-label="Open deposit history"
+                    >
+                      <History className="h-4 w-4" />
+                    </Button>
                   </div>
                 </div>
               </div>
@@ -269,6 +276,15 @@ export function AptreePositions() {
                           <ExternalLink className="h-3 w-3" />
                         </Button>
                       )}
+                      <Button
+                        onClick={() => setShowHistoryModal(true)}
+                        size="sm"
+                        variant="outline"
+                        className="h-10 px-3"
+                        aria-label="Open deposit history"
+                      >
+                        <History className="h-4 w-4" />
+                      </Button>
                     </div>
                   </div>
                 </div>
@@ -277,9 +293,18 @@ export function AptreePositions() {
           );
         })}
       </ScrollArea>
-      <div className="flex items-center justify-between pt-6 pb-6">
-        <span className="text-xl">Total assets in APTree:</span>
-        <span className="text-xl text-primary font-bold">{formatCurrency(totalValue, 2)}</span>
+      <div className="pt-6 pb-6 space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-xl">Total assets in APTree:</span>
+          <span className="text-xl text-primary font-bold">{formatCurrency(totalValue, 2)}</span>
+        </div>
+        <PnlSummaryRow
+          className="pt-3 mt-2 border-t border-border"
+          pnlUsd={pnlUsd}
+          aprPct={aprPctFromHistory}
+          holdingDays={holdingDays}
+          isLoading={performanceLoading}
+        />
       </div>
 
       {selectedDepositPosition && (
@@ -310,6 +335,14 @@ export function AptreePositions() {
           priceUSD={1}
         />
       )}
+
+      <AptreeHistoryModal
+        isOpen={showHistoryModal}
+        onClose={() => setShowHistoryModal(false)}
+        address={walletAddress}
+        history={depositHistory}
+        currentValueUsd={Number.isFinite(totalValue) ? totalValue : null}
+      />
     </div>
   );
 }

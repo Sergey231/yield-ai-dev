@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
+import { getRequestOrigin } from '@/lib/utils/requestOrigin';
 import echelonMarkets from '@/lib/data/echelonMarkets.json';
+import { getBaseUrl } from '@/lib/utils/config';
 
 /**
  * @swagger
@@ -34,13 +36,12 @@ import echelonMarkets from '@/lib/data/echelonMarkets.json';
  *       500:
  *         description: Internal server error
  */
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const externalApiUrl = "https://yield-a.vercel.app/api/echelon/markets";
     console.log('Fetching from external API:', externalApiUrl);
     
-    // Get base URL from environment or use default
-    const baseUrl = process.env.NEXT_PUBLIC_API_URL || process.env.VERCEL_URL || 'http://localhost:3000';
+    const baseUrl = getBaseUrl();
     
     const response = await fetch(externalApiUrl, {
       headers: {

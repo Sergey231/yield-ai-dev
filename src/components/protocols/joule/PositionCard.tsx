@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import { PanoraPricesService } from "@/lib/services/panora/prices";
 import { TokenPrice } from "@/lib/types/panora";
 import { createDualAddressPriceMap } from "@/lib/utils/addressNormalization";
+import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
 
 interface Token {
   chainId: number;
@@ -57,6 +58,7 @@ interface Position {
 }
 
 export function PositionCard({ position, onPositionValueChange }: PositionProps) {
+  const { formatUsd, maskBalance } = usePortfolioAmountsPrivacy();
   const [tokenPrices, setTokenPrices] = useState<Record<string, string>>({});
   const [currentTotal, setCurrentTotal] = useState(0);
   const pricesService = PanoraPricesService.getInstance();
@@ -232,7 +234,7 @@ export function PositionCard({ position, onPositionValueChange }: PositionProps)
             </div>
             {position.position_name === "Loop-Position" && (
               <div className="text-sm text-muted-foreground">
-                ${calculateTotalValue().toFixed(2)}
+                {formatUsd(calculateTotalValue())}
               </div>
             )}
           </div>
@@ -263,15 +265,15 @@ export function PositionCard({ position, onPositionValueChange }: PositionProps)
                       )}
                     </div>
                     <div className={cn("text-xs", pos.type === 'borrow' ? "text-red-600/70" : "text-muted-foreground")}>
-                      ${parseFloat(pos.price).toFixed(2)}
+                      {formatUsd(parseFloat(pos.price))}
                     </div>
                   </div>
                   <div className="flex flex-col items-end">
                     <div className={cn("text-sm", pos.type === 'borrow' && "text-red-600")}>
-                      ${pos.value.toFixed(2)}
+                      {formatUsd(pos.value)}
                     </div>
                     <div className={cn("text-xs", pos.type === 'borrow' ? "text-red-600/70" : "text-muted-foreground")}>
-                      {pos.amount.toFixed(2)}
+                      {maskBalance(pos.amount.toFixed(2))}
                     </div>
                   </div>
                 </div>
@@ -303,15 +305,15 @@ export function PositionCard({ position, onPositionValueChange }: PositionProps)
                       )}
                     </div>
                     <div className={cn("text-xs", pos.type === 'borrow' ? "text-red-600/70" : "text-muted-foreground")}>
-                      ${parseFloat(pos.price).toFixed(2)}
+                      {formatUsd(parseFloat(pos.price))}
                     </div>
                   </div>
                   <div className="flex flex-col items-end">
                     <div className={cn("text-sm", pos.type === 'borrow' && "text-red-600")}>
-                      ${pos.value.toFixed(2)}
+                      {formatUsd(pos.value)}
                     </div>
                     <div className={cn("text-xs", pos.type === 'borrow' ? "text-red-600/70" : "text-muted-foreground")}>
-                      {pos.amount.toFixed(2)}
+                      {maskBalance(pos.amount.toFixed(2))}
                     </div>
                   </div>
                 </div>

@@ -3,21 +3,17 @@
  */
 
 /**
- * Get the base URL for API calls
- * Priority: NEXT_PUBLIC_API_URL > VERCEL_URL > localhost:3000
+ * Base URL for same-origin server-side API calls (no NEXT_PUBLIC_*).
+ * Priority: VERCEL_URL (preview + production) > APP_URL (optional, e.g. non-default local port) > localhost:3000
  */
 export function getBaseUrl(): string {
-  // Check for explicit API URL first
-  if (process.env.NEXT_PUBLIC_API_URL) {
-    return process.env.NEXT_PUBLIC_API_URL;
-  }
-  
-  // Check for Vercel URL (automatically set by Vercel)
   if (process.env.VERCEL_URL) {
     return `https://${process.env.VERCEL_URL}`;
   }
-  
-  // Fallback to localhost for development
+  const appUrl = process.env.APP_URL?.trim();
+  if (appUrl) {
+    return appUrl.replace(/\/$/, '');
+  }
   return 'http://localhost:3000';
 }
 

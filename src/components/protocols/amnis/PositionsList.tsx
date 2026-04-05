@@ -9,6 +9,7 @@ import { ExternalLink, Plus, ChevronDown, ChevronRight } from 'lucide-react';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { useCollapsible } from "@/contexts/CollapsibleContext";
+import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { cn } from "@/lib/utils";
 
@@ -171,6 +172,7 @@ export const PositionsList: React.FC<SidebarPositionsListProps & { refreshKey?: 
   onPositionsCheckComplete,
   refreshKey,
 }) => {
+  const { formatUsd, maskBalance } = usePortfolioAmountsPrivacy();
   const { account } = useWallet();
   const { isExpanded, toggleSection } = useCollapsible();
   const [positions, setPositions] = useState<any[]>([]);
@@ -246,7 +248,7 @@ export const PositionsList: React.FC<SidebarPositionsListProps & { refreshKey?: 
             <CardTitle className="text-lg">Amnis Finance</CardTitle>
           </div>
           <div className="flex items-center gap-2">
-            <div className="text-lg">${totalValue.toFixed(2)}</div>
+            <div className="text-lg">{formatUsd(totalValue)}</div>
             <ChevronDown className={cn(
               "h-5 w-5 transition-transform",
               isExpanded('amnis') ? "transform rotate-0" : "transform -rotate-90"
@@ -279,14 +281,18 @@ export const PositionsList: React.FC<SidebarPositionsListProps & { refreshKey?: 
                             <Badge variant="secondary">Staking</Badge>
                           </div>
                           <div className="text-xs text-muted-foreground">
-                            ${(position.usdValue / parseFloat(position.stakedAmount)).toFixed(3)}
+                            {formatUsd(
+                              parseFloat(position.stakedAmount) > 0
+                                ? position.usdValue / parseFloat(position.stakedAmount)
+                                : 0
+                            )}
                           </div>
                         </div>
                     </div>
                     <div className="text-right">
-                      <div className="text-sm font-medium">${(position.usdValue || 0).toFixed(2)}</div>
+                      <div className="text-sm font-medium">{formatUsd(position.usdValue || 0)}</div>
                       <div className="text-xs text-muted-foreground">
-                        {parseFloat(position.stakedAmount).toFixed(2)}
+                        {maskBalance(parseFloat(position.stakedAmount).toFixed(2))}
                       </div>
                     </div>
                   </div>

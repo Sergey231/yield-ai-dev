@@ -1,4 +1,5 @@
 import { normalizeAddress } from '@/lib/utils/addressNormalization';
+import { getBaseUrl } from '@/lib/utils/config';
 
 /**
  * Token Info with all available data
@@ -69,9 +70,7 @@ export class TokenInfoService {
     // Fetch from API
     try {
       // Determine base URL (server-side needs full URL)
-      const baseUrl = typeof window === 'undefined' 
-        ? (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000')
-        : '';
+      const baseUrl = typeof window === 'undefined' ? getBaseUrl() : '';
       const apiUrl = `${baseUrl}/api/tokens/info?address=${encodeURIComponent(address)}`;
       
       const response = await fetch(apiUrl);

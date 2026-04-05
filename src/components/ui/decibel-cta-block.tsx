@@ -223,18 +223,19 @@ export function DecibelCTABlock() {
           </div>
           <div className="shrink-0">
             {!address && (
-              <p className="text-sm text-muted-foreground">Connect Aptos wallet to register</p>
+              <p className="text-sm text-muted-foreground">Connect Aptos or Solana wallet to register</p>
             )}
             {address && checking && (
               <p className="text-sm text-muted-foreground">Checking…</p>
             )}
-            {address && !checking && needsRegister && (
+            {address && !checking && !hasSubaccount && (
               <Button
                 size="sm"
-                onClick={handleRegister}
-                disabled={registering}
+                className="bg-black text-white hover:bg-black/90"
+                onClick={needsRegister ? handleRegister : () => window.open('https://app.decibel.trade/', '_blank')}
+                disabled={needsRegister ? registering : false}
               >
-                {registering ? 'Registering…' : 'Register on Decibel Mainnet'}
+                {needsRegister && registering ? 'Registering…' : 'Register'}
               </Button>
             )}
             {address && !checking && hasSubaccount && approvedMaxFeeBps === null && (
@@ -258,9 +259,6 @@ export function DecibelCTABlock() {
               >
                 Deposit
               </Button>
-            )}
-            {address && !checking && canRegister === false && !hasSubaccount && (
-              <p className="text-sm text-muted-foreground">Registration temporarily unavailable</p>
             )}
           </div>
         </div>

@@ -2,6 +2,8 @@
  * Domain and environment utilities for better resource loading
  */
 
+import { getBaseUrl } from '@/lib/utils/config';
+
 /**
  * Check if we're on the main domain (yieldai.app)
  */
@@ -47,7 +49,7 @@ export function getOptimizedImageUrl(src: string, fallback?: string): string {
  */
 export function getOptimizedBaseUrl(): string {
   if (typeof window === 'undefined') {
-    return process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+    return getBaseUrl();
   }
   
   const origin = window.location.origin;

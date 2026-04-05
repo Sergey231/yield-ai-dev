@@ -491,7 +491,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 **Disclaimer**: This application is for educational and informational purposes. DeFi investments carry significant risks. Always do your own research and never invest more than you can afford to lose.
 
-## Public API
+## Public API   
 
 See Public Wallet API usage guide:
 

@@ -43,7 +43,7 @@ function CctpRedeemTestPageContent() {
   const [solscanData, setSolscanData] = useState<string>("");
   const [isComputingFromSolscan, setIsComputingFromSolscan] = useState<boolean>(false);
   const [computedFromSolscan, setComputedFromSolscan] = useState<any>(null);
-  const [aptosRecipientAddress, setAptosRecipientAddress] = useState<string>(""); // Aptos address for mintRecipient (optional, from WormholeScan)
+  const [aptosRecipientAddress, setAptosRecipientAddress] = useState<string>(""); // Aptos address for mintRecipient (optional)
 
   // Read query parameters and auto-fill fields
   useEffect(() => {
@@ -69,12 +69,7 @@ function CctpRedeemTestPageContent() {
 
     try {
       // Check multiple possible localStorage keys
-      const possibleKeys = [
-        'wormhole-connect:transactions:inprogress',
-        'wormhole-connect:transactions',
-        'wormhole:transactions',
-        'cctp_transfers',
-      ];
+      const possibleKeys = ['cctp_transfers'];
 
       let cctpMessage = null;
       let transferData = null;
@@ -112,9 +107,7 @@ function CctpRedeemTestPageContent() {
           // Search through transfers for CCTP message
           for (const transfer of transfers) {
             // Check different possible paths to CCTP message
-            // Note: In Wormhole SDK, message is at receipt.attestation.attestation.message
             const messagePaths = [
-              transfer.receipt?.attestation?.attestation?.message, // Correct path for Wormhole SDK
               transfer.receipt?.attestation?.message,
               transfer.attestation?.attestation?.message,
               transfer.attestation?.message,
@@ -151,11 +144,7 @@ function CctpRedeemTestPageContent() {
       // If still not found, list all localStorage keys for debugging
       if (!cctpMessage) {
         const allKeys = Object.keys(localStorage);
-        const relevantKeys = allKeys.filter(key => 
-          key.toLowerCase().includes('wormhole') || 
-          key.toLowerCase().includes('cctp') || 
-          key.toLowerCase().includes('transfer')
-        );
+        const relevantKeys = allKeys.filter((key) => key.toLowerCase().includes('cctp') || key.toLowerCase().includes('transfer'));
         
         console.log('[CCTP Redeem Test] Available localStorage keys:', allKeys);
         console.log('[CCTP Redeem Test] Relevant keys:', relevantKeys);
@@ -190,7 +179,7 @@ function CctpRedeemTestPageContent() {
           `CCTP message not found in localStorage. ` +
           `Checked keys: ${possibleKeys.join(', ')}. ` +
           `Found relevant keys: ${relevantKeys.join(', ')}. ` +
-          `Make sure you have completed a CCTP transfer on /bridge2 page. ` +
+          `Make sure you have completed a CCTP transfer on /bridge page. ` +
           `Check console for debug info.`
         );
       }
@@ -428,12 +417,12 @@ function CctpRedeemTestPageContent() {
       }
 
       // IMPORTANT: mintRecipient in Solscan is a Solana public key, but in CCTP message it MUST be Aptos address!
-      // Use aptosRecipientAddress if provided (from WormholeScan toAddress), otherwise try to use Solana pubkey bytes
-      // But this might be wrong! Better to get Aptos address from WormholeScan or transaction details.
+      // Use aptosRecipientAddress if provided, otherwise try to use Solana pubkey bytes.
+      // This might be wrong; prefer passing the real Aptos recipient address.
       const mintRecipientAptosAddress = aptosRecipientAddress.trim() || null;
       
       if (!mintRecipientAptosAddress && !mintRecipientSolscan) {
-        throw new Error("Missing mintRecipient. Please provide Aptos recipient address (from WormholeScan toAddress field) in the field below, or include mintRecipient in Solscan data.");
+        throw new Error("Missing mintRecipient. Please provide Aptos recipient address in the field below, or include mintRecipient in Solscan data.");
       }
 
       // Import Solana web3.js for public key conversion
@@ -519,7 +508,7 @@ function CctpRedeemTestPageContent() {
         console.log('[CCTP Redeem Test] Using provided Aptos address for mintRecipient:', mintRecipientAptosAddress);
       } else if (mintRecipientSolscan) {
         // Fallback: try to use Solana pubkey bytes (WARNING: this might be wrong!)
-        console.warn('[CCTP Redeem Test] WARNING: Using Solana public key bytes as Aptos address. This might be incorrect! Please provide Aptos address from WormholeScan.');
+        console.warn('[CCTP Redeem Test] WARNING: Using Solana public key bytes as Aptos address. This might be incorrect! Provide the Aptos recipient address.');
         mintRecipientAddressObj = solanaPubkeyToAddressObj(mintRecipientSolscan);
       } else {
         throw new Error("mintRecipient is required. Please provide Aptos recipient address.");
@@ -889,7 +878,7 @@ function CctpRedeemTestPageContent() {
               />
               <div>
                 <Label htmlFor="aptosRecipientAddress">
-                  Aptos Recipient Address (from WormholeScan toAddress) <span className="text-red-600">*Recommended*</span>
+                  Aptos Recipient Address <span className="text-red-600">*Recommended*</span>
                 </Label>
                 <Input
                   id="aptosRecipientAddress"
@@ -902,7 +891,7 @@ function CctpRedeemTestPageContent() {
                 <p className="text-[11px] text-muted-foreground mt-1">
                   <b>Важно:</b> В Solscan mintRecipient - это Solana public key, но в CCTP message нужен Aptos address!
                   <br />
-                  Скопируйте <code>toAddress</code> из WormholeScan (например: <code>0xbaae4e8fcd07785903c2031523c42b42d92a3f83e5aad3a88bc3200f0ff22b30</code>)
+                  Скопируйте адрес получателя (например: <code>0xbaae4e8fcd07785903c2031523c42b42d92a3f83e5aad3a88bc3200f0ff22b30</code>)
                   <br />
                   Или используйте <code>recipient</code> из txDetails в localStorage (например: <code>0xe58a37f1c2b89c0f729abfc348b92735cf712bb167d52f70c8f44fdd75de75e1</code>)
                 </p>
@@ -976,9 +965,9 @@ function CctpRedeemTestPageContent() {
           <div className="bg-green-50 border-2 border-green-200 rounded-lg p-4 space-y-3">
             <h3 className="text-sm font-semibold text-green-800">Compute depositMessageHash from localStorage (Old transactions only)</h3>
             <p className="text-xs text-muted-foreground">
-              <b>Только для старых транзакций:</b> Если транзакция была выполнена через Wormhole SDK и сохранена в localStorage.
+              <b>Только для старых транзакций:</b> Если транзакция была сохранена в localStorage.
               <br />
-              Читает CCTP message из localStorage (key: <code>wormhole-connect:transactions:inprogress</code>) 
+              Читает CCTP message из localStorage
               и вычисляет depositMessageHash используя keccak256.
               <br />
               <b>Примечание:</b> Если ваша транзакция не в localStorage (например, nonce 635280, 635528), используйте метод выше (Solscan Data).

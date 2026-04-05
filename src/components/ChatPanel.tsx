@@ -63,11 +63,10 @@ export default function ChatPanel() {
   }, [totalAssetsStore, walletTotal]);
 
   const handlePortfolioTracker = () => {
-    if (account?.address) {
-      // If wallet is connected, use tracker route (address resolved from wallet connection)
+    // Tracker: любой подключённый Aptos или Solana; иначе — страница ввода адреса
+    if (hasAnyWallet) {
       router.push('/portfolio/tracker');
     } else {
-      // If no wallet connected, go to portfolio input page
       router.push('/portfolio');
     }
   };

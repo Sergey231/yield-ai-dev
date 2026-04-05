@@ -1,10 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { ProtocolCard } from "@/shared/ProtocolCard";
 import { PositionBadge } from "@/shared/ProtocolCard/types";
 import { formatNumber } from "@/lib/utils/numberFormat";
+import { queryKeys } from "@/lib/query/queryKeys";
+import { useAptreePools, useAptreePositions } from "@/lib/query/hooks/protocols/aptree";
 
 interface PositionsListProps {
   address?: string;
@@ -38,75 +41,68 @@ export function PositionsList({
   onPositionsCheckComplete,
   showManageButton = true,
 }: PositionsListProps) {
-  const [positions, setPositions] = useState<AptreePosition[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [totalValue, setTotalValue] = useState(0);
-  const [localRefreshKey, setLocalRefreshKey] = useState(0);
+  const queryClient = useQueryClient();
   const protocol = getProtocolByName("APTree");
   const onValueRef = useRef(onPositionsValueChange);
   const onCompleteRef = useRef(onPositionsCheckComplete);
   onValueRef.current = onPositionsValueChange;
   onCompleteRef.current = onPositionsCheckComplete;
 
-  useEffect(() => {
-    let cancelled = false;
+  const {
+    data: positions = [],
+    isPending: positionsPending,
+    isFetching: positionsFetching,
+    error: positionsError,
+  } = useAptreePositions(address, {
+    refetchOnMount: refreshKey != null ? "always" : undefined,
+  });
 
-    async function load() {
-      if (!cancelled) setLoading(true);
-      if (!address) {
-        setPositions([]);
-        setTotalValue(0);
-        onValueRef.current?.(0);
-        onCompleteRef.current?.();
-        if (!cancelled) setLoading(false);
-        return;
-      }
-
-      try {
-        const res = await fetch(
-          `/api/protocols/aptree/userPositions?address=${encodeURIComponent(address)}`
-        );
-        const data = await res.json().catch(() => null);
-        const positions = Array.isArray(data?.data) ? data.data : [];
-        const total = positions.reduce((sum: number, p: { value?: string | number }) => {
-          const v = typeof p?.value === 'number' ? p.value : Number(p?.value || 0);
-          return sum + (Number.isFinite(v) ? v : 0);
-        }, 0);
-        if (!cancelled) {
-          setPositions(positions);
-          setTotalValue(total);
-          onValueRef.current?.(total);
-        }
-      } catch {
-        if (!cancelled) {
-          setPositions([]);
-          setTotalValue(0);
-          onValueRef.current?.(0);
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-          onCompleteRef.current?.();
-        }
-      }
-    }
-
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [address, refreshKey, localRefreshKey]);
+  const { data: pools = [] } = useAptreePools({
+    refetchOnMount: refreshKey != null ? "always" : undefined,
+  });
 
   useEffect(() => {
     const handleRefresh: EventListener = (evt) => {
       const event = evt as CustomEvent<{ protocol?: string }>;
       if (event?.detail?.protocol === "aptree") {
-        setLocalRefreshKey((k) => k + 1);
+        if (address) {
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.protocols.aptree.userPositions(address),
+          });
+        }
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.protocols.aptree.pools(),
+        });
       }
     };
     window.addEventListener("refreshPositions", handleRefresh);
     return () => window.removeEventListener("refreshPositions", handleRefresh);
-  }, []);
+  }, [address, queryClient]);
+
+  useEffect(() => {
+    if (!positionsFetching) {
+      onCompleteRef.current?.();
+    }
+  }, [positionsFetching]);
+
+  const aprPct = useMemo(() => {
+    const firstPool = pools?.[0];
+    const aprRaw = Number(firstPool?.apr);
+    return Number.isFinite(aprRaw) ? aprRaw * 100 : null;
+  }, [pools]);
+
+  const totalValue = useMemo(
+    () =>
+      positions.reduce((sum, p) => {
+        const v = Number(p?.value ?? 0);
+        return sum + (Number.isFinite(v) ? v : 0);
+      }, 0),
+    [positions]
+  );
+
+  useEffect(() => {
+    onValueRef.current?.(totalValue);
+  }, [totalValue]);
 
   const protocolPositions = useMemo(
     () =>
@@ -132,19 +128,24 @@ export function PositionsList({
             badge: PositionBadge.Supply,
             subLabel: formatNumber(amount, 2),
             price,
+            apr: aprPct != null ? aprPct.toFixed(2) : undefined,
           };
         })
         .sort((a, b) => b.value - a.value),
-    [positions]
+    [positions, aprPct]
   );
 
   if (!protocol) {
     return null;
   }
 
-  // Do not pre-render loading skeleton for APTree:
-  // render the card only when real positions exist.
-  if (loading || positions.length === 0) {
+  if (positionsError) {
+    return null;
+  }
+
+  const hasPositions = positions.length > 0;
+  // Hide only after we know the wallet has no APTree position (not while the first fetch is in flight).
+  if (!hasPositions && !positionsPending) {
     return null;
   }
 
@@ -153,7 +154,7 @@ export function PositionsList({
       protocol={protocol}
       totalValue={totalValue}
       positions={protocolPositions}
-      isLoading={false}
+      isLoading={positionsPending && !hasPositions}
       showManageButton={showManageButton}
     />
   );

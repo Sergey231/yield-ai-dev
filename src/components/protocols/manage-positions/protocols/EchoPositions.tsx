@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useWallet } from '@aptos-labs/wallet-adapter-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/shared/Badge/Badge';
@@ -8,24 +9,8 @@ import { cn } from '@/lib/utils';
 import { formatCurrency, formatNumber } from '@/lib/utils/numberFormat';
 import { ProtocolIcon } from '@/shared/ProtocolIcon/ProtocolIcon';
 import tokenList from '@/lib/data/tokenList.json';
-
-interface EchoPosition {
-  positionId: string;
-  aTokenAddress: string;
-  aTokenSymbol: string;
-  underlyingAddress: string;
-  symbol: string;
-  name: string;
-  decimals: number;
-  logoUrl: string | null;
-  amountRaw: string;
-  amount: number;
-  priceUSD: number;
-  valueUSD: number;
-  type?: 'supply' | 'borrow';
-  apy?: number;
-  apyFormatted?: string;
-}
+import { useEchoPositions, type EchoPosition } from '@/lib/query/hooks/protocols/echo';
+import { queryKeys } from '@/lib/query/queryKeys';
 
 const tokensData = (tokenList as { data: { data: Array<{ tokenAddress?: string; faAddress?: string; symbol?: string; logoUrl?: string }> } }).data.data;
 
@@ -147,50 +132,28 @@ function sortByValueDesc(items: EchoPosition[]): EchoPosition[] {
 
 export function EchoPositions() {
   const { account } = useWallet();
-  const [positions, setPositions] = useState<EchoPosition[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const loadPositions = async () => {
-    if (!account?.address) {
-      setPositions([]);
-      return;
-    }
-    try {
-      setLoading(true);
-      setError(null);
-      const response = await fetch(`/api/protocols/echo/userPositions?address=${account.address}`);
-      if (!response.ok) throw new Error('Failed to fetch');
-      const data = await response.json();
-      if (data.success && Array.isArray(data.data)) {
-        setPositions(sortByValueDesc(data.data));
-      } else {
-        setPositions([]);
-      }
-    } catch (err) {
-      console.error('Error loading Echo positions:', err);
-      setError('Failed to load positions');
-      setPositions([]);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const queryClient = useQueryClient();
+  const walletAddress = account?.address?.toString();
+  const {
+    data: positions = [],
+    isLoading: loading,
+    error,
+  } = useEchoPositions(walletAddress, { refetchOnMount: 'always' });
 
   useEffect(() => {
-    loadPositions();
-    const handleRefresh: EventListener = (evt) => {
-      const event = evt as CustomEvent<{ protocol: string; data?: EchoPosition[] }>;
+    const handleRefresh = (evt: Event) => {
+      const event = evt as CustomEvent<{ protocol: string }>;
       if (event?.detail?.protocol === 'echo') {
-        if (event.detail.data && Array.isArray(event.detail.data)) {
-          setPositions(sortByValueDesc(event.detail.data));
-        } else {
-          void loadPositions();
+        if (walletAddress) {
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.protocols.echo.userPositions(walletAddress),
+          });
         }
       }
     };
     window.addEventListener('refreshPositions', handleRefresh);
     return () => window.removeEventListener('refreshPositions', handleRefresh);
-  }, [account?.address]);
+  }, [walletAddress, queryClient]);
 
   const sortedPositions = useMemo(() => sortByValueDesc(positions), [positions]);
 
@@ -198,7 +161,7 @@ export function EchoPositions() {
     return <div className="py-4 text-muted-foreground">Loading positions...</div>;
   }
   if (error) {
-    return <div className="py-4 text-red-500">{error}</div>;
+    return <div className="py-4 text-red-500">Failed to load positions</div>;
   }
   if (sortedPositions.length === 0) {
     return (

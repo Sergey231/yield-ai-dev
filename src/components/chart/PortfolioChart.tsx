@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { PieChart, PieChartDatum } from '@/shared/PieChart/PieChart';
 import { Legend } from '@/shared/Legend/Legend';
-import { formatCurrency } from '@/lib/utils/numberFormat';
+import { usePortfolioAmountsPrivacy } from '@/contexts/PortfolioAmountsPrivacyContext';
 import { Skeleton } from '@/components/ui/skeleton';
 
-// Тип данных для сектора: имя и значение в долларах
-type SectorDatum = { name: string; value: number }
+// Тип данных для сектора: имя и значение в долларах (опционально свой цвет — см. PieChartDatum)
+type SectorDatum = { name: string; value: number; color?: string };
 
 interface PortfolioChartProps {
   data: SectorDatum[];
@@ -14,6 +14,7 @@ interface PortfolioChartProps {
 }
 
 export function PortfolioChart({ data, totalValue, isLoading = false }: PortfolioChartProps) {
+  const { formatUsd } = usePortfolioAmountsPrivacy();
   const [hoveredItem, setHoveredItem] = useState<PieChartDatum | null>(null);
 
   const allData = (data || []).filter((d) => d && d.value > 0)
@@ -25,7 +26,7 @@ export function PortfolioChart({ data, totalValue, isLoading = false }: Portfoli
   const chartData: PieChartDatum[] = allData.filter((d) => {
     const percent = sum > 0 ? (d.value / sum) * 100 : 0
     return percent >= 1
-  }).map((d) => ({ name: d.name, value: d.value }))
+  }).map((d) => ({ name: d.name, value: d.value, ...(d.color ? { color: d.color } : {}) }))
 
   // Если есть данные, показываем их (даже если идет загрузка)
   if (chartData.length > 0) {
@@ -37,7 +38,7 @@ export function PortfolioChart({ data, totalValue, isLoading = false }: Portfoli
       <div className="flex flex-col lg:flex-row items-center lg:items-center relative">
         {/* Total on mobile (on desktop it's shown in the chart center) */}
         <div className="flex items-center justify-center my-2 text-2xl font-semibold lg:hidden">
-          {formatCurrency(displayTotalValue, 2)}
+          {formatUsd(displayTotalValue, 2)}
         </div>
 
         <div className="order-1 w-64 h-64 lg:w-96 lg:h-96 focus:outline-none">
@@ -48,7 +49,8 @@ export function PortfolioChart({ data, totalValue, isLoading = false }: Portfoli
             hoveredItem={hoveredItem}
             total={totalValue || sum}
             centerLabel="Total Portfolio"
-            formatCenterValue={(value) => formatCurrency(value, 2)}
+            formatCenterValue={(value) => formatUsd(value, 2)}
+            formatTooltipValue={(value) => formatUsd(value, 2)}
           />
         </div>
 

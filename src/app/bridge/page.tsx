@@ -1631,7 +1631,7 @@ function BridgePageContent() {
           throw new Error('Transaction confirmation timeout');
         };
 
-        // Poll for attestation with exponential backoff (same logic as bridge2)
+        // Poll for attestation with exponential backoff
         const pollForAttestation = async (): Promise<void> => {
           const maxAttempts = 15;
           const initialDelay = 10000;

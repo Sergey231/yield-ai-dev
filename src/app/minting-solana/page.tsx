@@ -8,7 +8,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
 import { useWallet as useSolanaWallet, useConnection } from "@solana/wallet-adapter-react";
-import { SolanaWalletProviderWrapper } from "../bridge3/SolanaWalletProvider";
 import { SolanaWalletSelector } from "@/components/SolanaWalletSelector";
 import bs58 from "bs58";
 
@@ -1653,11 +1652,9 @@ function MintingSolanaPageContent() {
 
 export default function MintingSolanaPage() {
   return (
-    <SolanaWalletProviderWrapper>
-      <Suspense fallback={<div className="container mx-auto p-6 max-w-6xl">Loading...</div>}>
-        <MintingSolanaPageContent />
-      </Suspense>
-    </SolanaWalletProviderWrapper>
+    <Suspense fallback={<div className="container mx-auto p-6 max-w-6xl">Loading...</div>}>
+      <MintingSolanaPageContent />
+    </Suspense>
   );
 }
 

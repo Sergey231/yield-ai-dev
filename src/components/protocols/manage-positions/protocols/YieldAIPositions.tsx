@@ -1,22 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
+import { useWalletData } from "@/contexts/WalletContext";
 import Image from "next/image";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { PanoraPricesService } from "@/lib/services/panora/prices";
 import { Token } from "@/lib/types/token";
 import {
-  APTOS_COIN_TYPE,
   MOAR_ADAPTER_ADDRESS_MAINNET,
   USDC_FA_METADATA_MAINNET,
 } from "@/lib/constants/yieldAiVault";
-import type { TokenPrice } from "@/lib/types/panora";
 import { formatCurrency, formatNumber } from "@/lib/utils/numberFormat";
 import { useToast } from "@/components/ui/use-toast";
-import { getTokenList } from "@/lib/tokens/getTokenList";
 import { normalizeAddress } from "@/lib/utils/addressNormalization";
 import {
   Tooltip,
@@ -24,9 +21,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Copy, Loader2 } from "lucide-react";
+import { Copy, History, Loader2 } from "lucide-react";
 import { YieldAIDepositModal } from "@/components/ui/yield-ai-deposit-modal";
 import { YieldAIWithdrawModal } from "@/components/ui/yield-ai-withdraw-modal";
+import { YieldAiHistoryModal } from "@/components/ui/yield-ai-history-modal";
 import {
   useMoarPositions,
   useMoarPools,
@@ -35,6 +33,7 @@ import {
 } from "@/lib/query/hooks/protocols/moar";
 import { useQueryClient } from "@tanstack/react-query";
 import { queryKeys } from "@/lib/query/queryKeys";
+import { useYieldAiDepositHistory, useYieldAiSafes, useYieldAiSafeTokens } from "@/lib/query/hooks/protocols/yield-ai";
 import {
   Select,
   SelectContent,
@@ -56,20 +55,33 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { buildVaultExecuteWithdrawFullAsOwnerPayload } from "@/lib/protocols/yield-ai/vaultDeposit";
+import {
+  HEDGE_FA,
+  formatUsdcAmountForSwap,
+  hasEnoughUsdcForHedge,
+} from "@/lib/protocols/decibel/hedgePrefill";
+import { SwapModal, type SwapModalPrefill } from "@/components/ui/swap-modal";
+import { PnlSummaryRow } from "@/components/ui/pnl-summary-row";
 
-/** Re-enable when Decibel perps delegation matches executor flow (Decibel Delegation + Executor Trade UI). */
-const SHOW_EXECUTOR_TRADE_BLOCK = false;
+function envFlag(raw: string | undefined, defaultValue = false): boolean {
+  if (raw == null) return defaultValue;
+  const v = raw.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
+  return defaultValue;
+}
+
+/** Toggle Decibel delegation + executor test UI (client-side flag). */
+const SHOW_EXECUTOR_TRADE_BLOCK = envFlag(process.env.NEXT_PUBLIC_SHOW_EXECUTOR_TRADE_BLOCK, false);
 
 export function YieldAIPositions() {
   const { account, signAndSubmitTransaction } = useWallet();
+  const { tokens: walletTokens } = useWalletData();
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [safeAddresses, setSafeAddresses] = useState<string[]>([]);
-  const [tokens, setTokens] = useState<Token[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [showDepositModal, setShowDepositModal] = useState(false);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [selectedWithdrawToken, setSelectedWithdrawToken] = useState<Token | null>(null);
   const [showMoarWithdrawConfirm, setShowMoarWithdrawConfirm] = useState(false);
   const [selectedMoarWithdrawPosition, setSelectedMoarWithdrawPosition] = useState<MoarPosition | null>(null);
@@ -81,16 +93,47 @@ export function YieldAIPositions() {
   const [executorAddress, setExecutorAddress] = useState<string | null>(null);
   const [isDelegatedToExecutor, setIsDelegatedToExecutor] = useState(false);
   const [delegationStatusError, setDelegationStatusError] = useState<string | null>(null);
+  const [delegationDetails, setDelegationDetails] = useState<
+    { delegatedAccount: string; permissionType: string; expirationTimeS: number | null; isExpired: boolean }[]
+  >([]);
   const [executorAsset, setExecutorAsset] = useState<"BTC" | "APT">("BTC");
   const [executorSizeUsd, setExecutorSizeUsd] = useState<string>("10");
   const [executorSubmitting, setExecutorSubmitting] = useState(false);
+  const [executorHedgeHint, setExecutorHedgeHint] = useState<{
+    sizeUsd: number;
+    asset: "BTC" | "APT";
+  } | null>(null);
+  const [hedgeSwapOpen, setHedgeSwapOpen] = useState(false);
+  const [hedgeSwapPrefill, setHedgeSwapPrefill] = useState<SwapModalPrefill | null>(null);
+
+  const executorHedgeUsdcOk = useMemo(() => {
+    if (!executorHedgeHint) return false;
+    return hasEnoughUsdcForHedge(walletTokens, executorHedgeHint.sizeUsd);
+  }, [executorHedgeHint, walletTokens]);
+  const walletAddress = account?.address?.toString();
+  const {
+    data: safeAddresses = [],
+    isLoading: safesLoading,
+    error: safesError,
+  } = useYieldAiSafes(walletAddress, { refetchOnMount: "always" });
 
   const safeAddr = safeAddresses[0];
-  const { data: moarPositions = [] } = useMoarPositions(safeAddr, {
+
+  const {
+    data: tokens = [],
+    isLoading: safeTokensLoading,
+  } = useYieldAiSafeTokens(safeAddr, {
+    enabled: Boolean(safeAddr),
     refetchOnMount: "always",
   });
-  const { data: rewardsResponse } = useMoarRewards(safeAddr, {
+
+  const { data: moarPositions = [], isLoading: moarPositionsLoading } = useMoarPositions(safeAddr, {
     refetchOnMount: "always",
+    enabled: Boolean(safeAddr),
+  });
+  const { data: rewardsResponse, isLoading: moarRewardsLoading } = useMoarRewards(safeAddr, {
+    refetchOnMount: "always",
+    enabled: Boolean(safeAddr),
   });
   const { data: poolsResponse } = useMoarPools();
 
@@ -111,134 +154,17 @@ export function YieldAIPositions() {
     return map;
   })();
 
-  const loadData = useCallback(async () => {
-    const walletAddress = account?.address?.toString();
-    if (!walletAddress) {
-      setSafeAddresses([]);
-      setTokens([]);
-      return;
+  const reloadSafeData = useCallback(async () => {
+    // Managed positions uses cached data from sidebar when available.
+    // This method keeps the existing refreshPositions event wiring intact by invalidating queries.
+    if (!walletAddress) return;
+    queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safes(walletAddress) });
+    if (safeAddr) {
+      queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddr) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.protocols.moar.userPositions(safeAddr) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.protocols.moar.rewards(safeAddr) });
     }
-    try {
-      setLoading(true);
-      setError(null);
-      const safesRes = await fetch(
-        `/api/protocols/yield-ai/safes?owner=${encodeURIComponent(walletAddress)}`
-      );
-      const safesJson = await safesRes.json();
-      const list = safesJson?.data?.safeAddresses ?? [];
-      const addresses = Array.isArray(list) ? list : [];
-      setSafeAddresses(addresses);
-
-      if (addresses.length === 0) {
-        setTokens([]);
-        return;
-      }
-
-      const safeAddress = addresses[0];
-      const contentsRes = await fetch(
-        `/api/protocols/yield-ai/safe-contents?safeAddress=${encodeURIComponent(safeAddress)}`
-      );
-      const contentsJson = await contentsRes.json();
-      const data = contentsJson?.data;
-      const faTokens = data?.tokens ?? [];
-      const aptBalance = data?.aptBalance ?? "0";
-
-      const tokenAddresses = [
-        ...faTokens.map((t: { asset_type: string }) => t.asset_type),
-        APTOS_COIN_TYPE,
-      ].filter(Boolean);
-      const pricesService = PanoraPricesService.getInstance();
-      let prices: TokenPrice[] = [];
-      try {
-        const pr = await pricesService.getPrices(1, tokenAddresses);
-        prices = Array.isArray(pr) ? pr : (pr?.data ?? []);
-      } catch {
-        // no prices
-      }
-
-      const built: Token[] = [];
-      const tokenListAptos = getTokenList(1) as Array<{
-        faAddress?: string;
-        tokenAddress?: string | null;
-        symbol?: string;
-        logoUrl?: string;
-      }>;
-      const resolveLogo = (addressOrType: string, symbol: string) => {
-        const addr = addressOrType.includes("::")
-          ? addressOrType.split("::")[0]
-          : addressOrType;
-        const norm = normalizeAddress(addr);
-        const byAddr = tokenListAptos.find(
-          (t: { faAddress?: string; tokenAddress?: string | null }) => {
-            const tFa = t.faAddress && normalizeAddress(t.faAddress);
-            const tTa = t.tokenAddress && normalizeAddress(t.tokenAddress);
-            return tFa === norm || tTa === norm;
-          }
-        );
-        if (byAddr?.logoUrl) return byAddr.logoUrl;
-        const bySymbol = tokenListAptos.find(
-          (t: { symbol?: string }) => t.symbol === symbol
-        );
-        return bySymbol?.logoUrl;
-      };
-      for (const t of faTokens) {
-        const price = prices.find(
-          (p) => p.faAddress === t.asset_type || p.tokenAddress === t.asset_type
-        );
-        const decimals = price?.decimals ?? 8;
-        const amount = parseFloat(t.amount) / Math.pow(10, decimals);
-        const usd = price ? amount * parseFloat(price.usdPrice) : 0;
-        const symbol = price?.symbol ?? t.asset_type.split("::").pop() ?? "?";
-        built.push({
-          address: t.asset_type,
-          name: price?.name ?? t.asset_type.split("::").pop() ?? "",
-          symbol,
-          decimals,
-          amount: t.amount,
-          price: price?.usdPrice ?? null,
-          value: price ? String(usd) : null,
-          logoUrl: resolveLogo(t.asset_type, symbol),
-        });
-      }
-      if (BigInt(aptBalance) > 0) {
-        const aptPrice = prices.find(
-          (p) =>
-            p.tokenAddress === APTOS_COIN_TYPE || p.faAddress === APTOS_COIN_TYPE
-        );
-        const decimals = aptPrice?.decimals ?? 8;
-        const amount = Number(aptBalance) / Math.pow(10, decimals);
-        const usd = aptPrice ? amount * parseFloat(aptPrice.usdPrice) : 0;
-        built.push({
-          address: APTOS_COIN_TYPE,
-          name: "Aptos Coin",
-          symbol: "APT",
-          decimals,
-          amount: aptBalance,
-          price: aptPrice?.usdPrice ?? null,
-          value: aptPrice ? String(usd) : null,
-          logoUrl: resolveLogo(APTOS_COIN_TYPE, "APT"),
-        });
-      }
-      built.sort((a, b) => {
-        const va = a.value ? parseFloat(a.value) : 0;
-        const vb = b.value ? parseFloat(b.value) : 0;
-        return vb - va;
-      });
-      // Only show base assets (USDC, APT); hide wrapper/supply tokens
-      const baseOnly = built.filter(
-        (t) =>
-          t.symbol === "USDC" ||
-          normalizeAddress(t.address) === normalizeAddress(USDC_FA_METADATA_MAINNET) ||
-          t.address === APTOS_COIN_TYPE
-      );
-      setTokens(baseOnly);
-    } catch {
-      setError("Failed to load AI agent safe data");
-      setTokens([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [account?.address]);
+  }, [queryClient, walletAddress, safeAddr]);
 
   const loadDecibelSubaccounts = useCallback(async () => {
     const walletAddress = account?.address?.toString();
@@ -283,6 +209,7 @@ export function YieldAIPositions() {
       setDelegationStatusError(null);
       setIsDelegatedToExecutor(false);
       setExecutorAddress(null);
+      setDelegationDetails([]);
       return;
     }
     try {
@@ -297,9 +224,11 @@ export function YieldAIPositions() {
       }
       setIsDelegatedToExecutor(Boolean(json?.isDelegatedToExecutor));
       setExecutorAddress(typeof json?.executorAddress === "string" ? json.executorAddress : null);
+      setDelegationDetails(Array.isArray(json?.data) ? json.data : []);
     } catch (err) {
       setIsDelegatedToExecutor(false);
       setExecutorAddress(null);
+      setDelegationDetails([]);
       setDelegationStatusError(
         err instanceof Error ? err.message : "Failed to load delegation status"
       );
@@ -417,6 +346,7 @@ export function YieldAIPositions() {
       }
 
       const hash = json?.data?.openTxHash as string | undefined;
+      setExecutorHedgeHint({ sizeUsd, asset: executorAsset });
       toast({
         title: "Executor short opened",
         description: hash
@@ -437,9 +367,7 @@ export function YieldAIPositions() {
     }
   };
 
-  useEffect(() => {
-    void loadData();
-  }, [loadData]);
+  // No initial fetch here: safe and token data are via useQuery (cached).
 
   useEffect(() => {
     if (!SHOW_EXECUTOR_TRADE_BLOCK) return;
@@ -456,12 +384,12 @@ export function YieldAIPositions() {
     const handleRefresh: EventListener = (evt) => {
       const event = evt as CustomEvent<{ protocol: string }>;
       if (event?.detail?.protocol === "yield-ai") {
-        void loadData();
+        void reloadSafeData();
       }
     };
     window.addEventListener("refreshPositions", handleRefresh);
     return () => window.removeEventListener("refreshPositions", handleRefresh);
-  }, [loadData]);
+  }, [reloadSafeData]);
 
   const getMoarTokenAddress = (symbol: string) => {
     if (symbol === "APT") return "0x1::aptos_coin::AptosCoin";
@@ -544,11 +472,38 @@ export function YieldAIPositions() {
     moarPositionsValue +
     totalRewardsValue;
 
-  if (loading) {
-    return <div className="py-4 text-muted-foreground">Loading safe assets...</div>;
+  const { data: depositHistory, isLoading: historyLoading, isFetching: historyFetching } = useYieldAiDepositHistory(
+    safeAddr,
+    Number.isFinite(totalValue) ? totalValue : null,
+    { enabled: Boolean(safeAddr) }
+  );
+
+  const holdingDays = depositHistory?.pnlStats?.holdingDays ?? 0;
+  const pnlRaw = depositHistory?.pnlStats?.pnl ?? null;
+  const aprRaw = depositHistory?.pnlStats?.apr ?? null;
+  const netDepositsRaw = depositHistory?.netDeposits ?? null;
+
+  const pnlUsd = pnlRaw != null ? parseFloat(pnlRaw) : null;
+  const aprPct = holdingDays >= 7 && aprRaw != null ? parseFloat(aprRaw) : null;
+  const netDepositsUsd = netDepositsRaw != null ? parseFloat(netDepositsRaw) : null;
+
+  const performanceLoading =
+    historyLoading ||
+    historyFetching ||
+    safesLoading ||
+    safeTokensLoading ||
+    moarPositionsLoading ||
+    moarRewardsLoading;
+
+  if (safesError) {
+    return (
+      <div className="py-4 text-red-500">
+        {safesError instanceof Error ? safesError.message : "Failed to load AI agent safes."}
+      </div>
+    );
   }
-  if (error) {
-    return <div className="py-4 text-red-500">{error}</div>;
+  if (safesLoading && safeAddresses.length === 0) {
+    return <div className="py-4 text-muted-foreground">Loading safe assets...</div>;
   }
   if (safeAddresses.length === 0) {
     return (
@@ -560,57 +515,68 @@ export function YieldAIPositions() {
 
   return (
     <div className="space-y-4 text-base">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-1.5">
-          <span className="text-sm text-muted-foreground font-medium">
-            Safe {safeAddresses[0].slice(0, 6)}...{safeAddresses[0].slice(-4)}
-          </span>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 shrink-0"
-                onClick={() => {
-                  navigator.clipboard
-                    .writeText(safeAddresses[0])
-                    .then(() =>
-                      toast({
-                        title: "Copied",
-                        description: "Safe address copied to clipboard",
-                      })
-                    )
-                    .catch(() =>
-                      toast({
-                        title: "Copy failed",
-                        variant: "destructive",
-                      })
-                    );
-                }}
-                aria-label="Copy safe address"
-              >
-                <Copy className="h-3.5 w-3.5 text-muted-foreground" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>Copy safe address</p>
-            </TooltipContent>
-          </Tooltip>
-        </div>
-        <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
-          <span className="text-sm text-muted-foreground font-normal text-right max-w-md">
-            AI agent rebalances positions every hour
-          </span>
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-3 gap-y-2">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="text-sm font-medium text-muted-foreground">
+              Safe {safeAddresses[0].slice(0, 6)}...{safeAddresses[0].slice(-4)}
+            </span>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 shrink-0"
+                  onClick={() => {
+                    navigator.clipboard
+                      .writeText(safeAddresses[0])
+                      .then(() =>
+                        toast({
+                          title: "Copied",
+                          description: "Safe address copied to clipboard",
+                        })
+                      )
+                      .catch(() =>
+                        toast({
+                          title: "Copy failed",
+                          variant: "destructive",
+                        })
+                      );
+                  }}
+                  aria-label="Copy safe address"
+                >
+                  <Copy className="h-3.5 w-3.5 text-muted-foreground" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>Copy safe address</p>
+              </TooltipContent>
+            </Tooltip>
+          </div>
           {!tokens.some(
             (t) =>
               t.symbol === "USDC" ||
               normalizeAddress(t.address) === normalizeAddress(USDC_FA_METADATA_MAINNET)
           ) && (
-            <Button size="sm" variant="default" onClick={() => setShowDepositModal(true)}>
-              Deposit USDC
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="default" onClick={() => setShowDepositModal(true)}>
+                Deposit USDC
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowHistoryModal(true)}
+                className="h-9 px-2"
+                aria-label="Open deposit history"
+              >
+                <History className="h-4 w-4" />
+              </Button>
+            </div>
           )}
         </div>
+        <p className="text-sm font-normal text-muted-foreground">
+          AI agent rebalances positions every hour
+        </p>
       </div>
 
       {SHOW_EXECUTOR_TRADE_BLOCK && (
@@ -691,6 +657,29 @@ export function YieldAIPositions() {
                 Executor: {executorAddress.slice(0, 8)}...{executorAddress.slice(-6)}
               </div>
             )}
+            {delegationDetails.length > 0 && (
+              <div className="text-xs text-muted-foreground space-y-1">
+                <div className="font-medium text-foreground/80">Active permissions</div>
+                <div className="space-y-0.5">
+                  {delegationDetails.map((d, idx) => (
+                    <div key={`${d.delegatedAccount}-${d.permissionType}-${idx}`} className="flex flex-wrap gap-2">
+                      <span className="font-mono">
+                        {d.delegatedAccount.slice(0, 8)}...{d.delegatedAccount.slice(-6)}
+                      </span>
+                      <span className={d.permissionType.toLowerCase().includes("perp") ? "text-green-600" : ""}>
+                        {d.permissionType}
+                      </span>
+                      {d.isExpired && <span className="text-destructive">expired</span>}
+                    </div>
+                  ))}
+                </div>
+                {!delegationDetails.some((d) => d.permissionType.toLowerCase().includes("perp")) && (
+                  <div className="text-destructive">
+                    Perps permission is missing. Re-delegate and then refresh status (Decibel API may lag indexing).
+                  </div>
+                )}
+              </div>
+            )}
             {decibelSubaccounts.length === 0 && (
               <div className="text-xs text-muted-foreground">
                 No Decibel subaccounts found for this wallet.
@@ -743,6 +732,44 @@ export function YieldAIPositions() {
               </Button>
             </div>
           </div>
+
+          {executorHedgeHint && (
+            <div className="rounded-lg border bg-card p-3 sm:p-4 space-y-2">
+              <div className="font-medium">Spot delta hedge</div>
+              <p className="text-sm text-muted-foreground">
+                Optional: buy spot (~{formatNumber(executorHedgeHint.sizeUsd, 2)} USDC notional) to offset this{" "}
+                {executorHedgeHint.asset} short.
+              </p>
+              {executorHedgeUsdcOk ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    const toFa =
+                      executorHedgeHint.asset === "APT" ? HEDGE_FA.APT : HEDGE_FA.WBTC;
+                    setHedgeSwapPrefill({
+                      fromFaAddress: HEDGE_FA.USDC,
+                      toFaAddress: toFa,
+                      amount: formatUsdcAmountForSwap(executorHedgeHint.sizeUsd),
+                    });
+                    setHedgeSwapOpen(true);
+                  }}
+                >
+                  Open swap (USDC → {executorHedgeHint.asset === "APT" ? "APT" : "WBTC"})
+                </Button>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Add USDC to your wallet to hedge this short.
+                </p>
+              )}
+              <div>
+                <Button type="button" variant="ghost" size="sm" onClick={() => setExecutorHedgeHint(null)}>
+                  Dismiss
+                </Button>
+              </div>
+            </div>
+          )}
         </>
       )}
 
@@ -754,6 +781,7 @@ export function YieldAIPositions() {
         )}
         {moarPositions.map((position) => {
           const value = parseFloat(position.value || "0");
+          const valueIsFinite = Number.isFinite(value);
           const decimals = position.assetInfo?.decimals ?? 8;
           const amount = parseFloat(position.balance || "0") / Math.pow(10, decimals);
           const poolAPR = poolsAPR[position.poolId];
@@ -764,65 +792,151 @@ export function YieldAIPositions() {
           );
           return (
             <div key={`moar-${position.poolId}`} className="border-b last:border-b-0">
-              <div className="p-3 sm:p-4 flex justify-between items-center gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="flex items-center -space-x-1">
-                  <div className="w-8 h-8 relative shrink-0 rounded-full bg-muted flex items-center justify-center overflow-hidden ring-2 ring-background">
-                    <Image
-                      src="/protocol_ico/moar-market-logo-primary.png"
-                      alt="MOAR"
-                      width={32}
-                      height={32}
-                      className="object-contain"
-                      unoptimized
-                    />
-                  </div>
-                  {position.assetInfo?.logoUrl && (
-                    <div className="w-8 h-8 relative shrink-0 rounded-full bg-muted flex items-center justify-center overflow-hidden ring-2 ring-background">
-                      <Image
-                        src={position.assetInfo.logoUrl}
-                        alt={position.assetInfo.symbol}
-                        width={32}
-                        height={32}
-                        className="object-contain"
-                        unoptimized
-                      />
+              <div className="p-3 sm:p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+                <div className="flex gap-3 min-w-0 flex-1">
+                  <div className="flex shrink-0 flex-col items-center gap-1.5">
+                    <div className="flex items-center -space-x-1">
+                      <div className="w-8 h-8 relative shrink-0 rounded-full bg-muted flex items-center justify-center overflow-hidden ring-2 ring-background">
+                        <Image
+                          src="/protocol_ico/moar-market-logo-primary.png"
+                          alt="MOAR"
+                          width={32}
+                          height={32}
+                          className="object-contain"
+                          unoptimized
+                        />
+                      </div>
+                      {position.assetInfo?.logoUrl && (
+                        <div className="w-8 h-8 relative shrink-0 rounded-full bg-muted flex items-center justify-center overflow-hidden ring-2 ring-background">
+                          <Image
+                            src={position.assetInfo.logoUrl}
+                            alt={position.assetInfo.symbol}
+                            width={32}
+                            height={32}
+                            className="object-contain"
+                            unoptimized
+                          />
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold">{position.assetInfo?.symbol ?? "—"}</span>
-                    <Badge
-                      variant="outline"
-                      className="bg-green-500/10 text-green-600 border-green-500/20 text-xs font-normal px-2 py-0.5 h-5"
-                    >
-                      Supply
-                    </Badge>
                   </div>
-                  {poolAPR && poolAPR.totalAPR > 0 && (
-                    <div className="text-sm text-muted-foreground">
-                      APR: {formatNumber(poolAPR.totalAPR, 2)}%
+                  <div className="min-w-0 flex flex-1 flex-col justify-center gap-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-semibold leading-tight pt-0.5 truncate">
+                          {position.assetInfo?.symbol ?? "—"}
+                        </span>
+                        <Badge
+                          variant="outline"
+                          className="bg-green-500/10 text-green-600 border-green-500/20 px-2 py-0.5 text-xs font-normal h-5"
+                        >
+                          Supply
+                        </Badge>
+                      </div>
+                      <div className="text-right shrink-0 sm:hidden">
+                        {poolAPR && poolAPR.totalAPR > 0 && (
+                          <div className="flex justify-end mb-1">
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Badge
+                                    variant="outline"
+                                    className="cursor-help bg-blue-500/10 text-blue-600 border-blue-500/20 px-2 py-0.5 text-[10px] font-normal leading-none h-5"
+                                  >
+                                    APR: {formatNumber(poolAPR.totalAPR, 2)}%
+                                  </Badge>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  <div className="space-y-1 text-xs">
+                                    <p className="font-medium">APR breakdown</p>
+                                    <p>
+                                      Interest: {formatNumber(poolAPR.interestRateComponent, 2)}%
+                                    </p>
+                                    <p>Farming: {formatNumber(poolAPR.farmingAPY, 2)}%</p>
+                                    <p className="font-semibold">
+                                      Total: {formatNumber(poolAPR.totalAPR, 2)}%
+                                    </p>
+                                  </div>
+                                </TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          </div>
+                        )}
+                        <div className="text-lg font-bold leading-tight">
+                          {valueIsFinite ? formatCurrency(value, 2) : "—"}
+                        </div>
+                        <div className="text-base font-semibold leading-tight text-muted-foreground">
+                          {formatNumber(amount, 4)}
+                        </div>
+                      </div>
                     </div>
-                  )}
+                    {amount > 0 && (
+                      <div className="sm:hidden">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={isExecutingMoarWithdrawToSafe}
+                          onClick={() => {
+                            setSelectedMoarWithdrawPosition(position);
+                            setShowMoarWithdrawConfirm(true);
+                          }}
+                          className="h-auto min-h-9 w-full whitespace-normal px-2 py-2 text-center text-[11px] leading-snug"
+                        >
+                          {isExecutingMoarWithdrawToSafe
+                            ? "Withdrawing…"
+                            : "Withdraw to AI agent wallet"}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-              <div className="text-right shrink-0">
-                <div className="text-lg font-bold">{formatCurrency(value, 2)}</div>
-                <div className="text-base text-muted-foreground font-semibold">
-                  {formatNumber(amount, 4)}
-                </div>
-                <div className="flex gap-2 mt-2 justify-end">
+                <div className="hidden shrink-0 sm:flex flex-col items-end gap-2">
+                  <div className="text-right">
+                    <div className="flex items-center justify-end gap-2 mb-1">
+                      {poolAPR && poolAPR.totalAPR > 0 && (
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Badge
+                                variant="outline"
+                                className="cursor-help bg-blue-500/10 text-blue-600 border-blue-500/20 text-xs font-normal px-2 py-0.5 h-5"
+                              >
+                                APR: {formatNumber(poolAPR.totalAPR, 2)}%
+                              </Badge>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              <div className="space-y-1 text-xs">
+                                <p className="font-medium">APR breakdown</p>
+                                <p>
+                                  Interest: {formatNumber(poolAPR.interestRateComponent, 2)}%
+                                </p>
+                                <p>Farming: {formatNumber(poolAPR.farmingAPY, 2)}%</p>
+                                <p className="font-semibold">
+                                  Total: {formatNumber(poolAPR.totalAPR, 2)}%
+                                </p>
+                              </div>
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      )}
+                      <div className="text-lg font-bold leading-tight">
+                        {valueIsFinite ? formatCurrency(value, 2) : "—"}
+                      </div>
+                    </div>
+                    <div className="text-base font-semibold leading-tight text-muted-foreground">
+                      {formatNumber(amount, 4)}
+                    </div>
+                  </div>
                   {amount > 0 && (
                     <Button
                       size="sm"
                       variant="outline"
-                      className="h-10 max-w-[min(100%,18rem)] whitespace-normal text-center leading-tight px-2 py-1.5"
                       disabled={isExecutingMoarWithdrawToSafe}
                       onClick={() => {
                         setSelectedMoarWithdrawPosition(position);
                         setShowMoarWithdrawConfirm(true);
                       }}
+                      className="h-auto max-w-[11rem] whitespace-normal px-2 py-2 text-center text-xs leading-tight"
                     >
                       {isExecutingMoarWithdrawToSafe
                         ? "Withdrawing…"
@@ -830,7 +944,6 @@ export function YieldAIPositions() {
                     </Button>
                   )}
                 </div>
-              </div>
               </div>
               {positionRewards.length > 0 && (
                 <div className="px-3 sm:px-4 pb-3 pt-0 border-t border-border">
@@ -965,6 +1078,15 @@ export function YieldAIPositions() {
                       <Button
                         size="sm"
                         variant="outline"
+                        className="h-10 px-3"
+                        onClick={() => setShowHistoryModal(true)}
+                        aria-label="Open deposit history"
+                      >
+                        <History className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
                         className="h-10"
                         onClick={() => {
                           setSelectedWithdrawToken(token);
@@ -1035,6 +1157,14 @@ export function YieldAIPositions() {
             </TooltipProvider>
           </div>
         )}
+
+        <PnlSummaryRow
+          className="pt-3 mt-2 border-t border-border"
+          pnlUsd={pnlUsd}
+          aprPct={aprPct}
+          holdingDays={holdingDays}
+          isLoading={performanceLoading}
+        />
       </div>
 
       <YieldAIDepositModal
@@ -1051,6 +1181,14 @@ export function YieldAIPositions() {
         }}
         token={selectedWithdrawToken}
         safeAddress={safeAddresses[0]}
+      />
+
+      <YieldAiHistoryModal
+        isOpen={showHistoryModal}
+        onClose={() => setShowHistoryModal(false)}
+        safeAddress={safeAddresses[0]}
+        history={depositHistory}
+        currentValueUsd={Number.isFinite(totalValue) ? totalValue : null}
       />
 
       {selectedMoarWithdrawPosition && (
@@ -1095,6 +1233,16 @@ export function YieldAIPositions() {
         </AlertDialog>
       )}
 
+      <SwapModal
+        isOpen={hedgeSwapOpen}
+        onClose={() => {
+          setHedgeSwapOpen(false);
+          setHedgeSwapPrefill(null);
+        }}
+        prefill={hedgeSwapPrefill}
+        variantTitle="Hedge short (spot)"
+        variantDescription="Swap USDC for the base asset to approximate a delta-neutral hedge (Panora gasless swap)."
+      />
     </div>
   );
 }

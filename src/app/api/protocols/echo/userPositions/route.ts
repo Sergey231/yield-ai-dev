@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { normalizeAddress } from '@/lib/utils/addressNormalization';
+import { getBaseUrl } from '@/lib/utils/config';
 import { PanoraPricesService } from '@/lib/services/panora/prices';
 import tokenList from '@/lib/data/tokenList.json';
 import { getReserveApyMetrics, EchoReserveData } from '@/lib/utils/apy';
@@ -85,10 +86,9 @@ function parseReserveData(result: unknown): EchoReserveData {
   return {};
 }
 
-async function getTokenInfo(address: string): Promise<{ symbol: string; name: string; decimals: number; logoUrl: string | null; priceUSD: number | null } | null> {
-  const baseUrl = typeof window === 'undefined' ? (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000') : '';
+async function getTokenInfo(requestOrigin: string, address: string): Promise<{ symbol: string; name: string; decimals: number; logoUrl: string | null; priceUSD: number | null } | null> {
   try {
-    const res = await fetch(`${baseUrl}/api/tokens/info?address=${encodeURIComponent(address)}`);
+    const res = await fetch(`${requestOrigin}/api/tokens/info?address=${encodeURIComponent(address)}`);
     if (!res.ok) return null;
     const data = await res.json();
     if (!data?.success || !data?.data) return null;
@@ -157,6 +157,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Address parameter is required' }, { status: 400 });
     }
 
+    const requestOrigin = new URL(request.url).origin;
     const userAddress = normalizeTokenAddress(address);
     const poolDataProvider = `${ECHO_CONTRACT}::pool_data_provider`;
     const variableTokenFactory = `${ECHO_CONTRACT}::variable_token_factory`;
@@ -280,7 +281,7 @@ export async function GET(request: NextRequest) {
         const canonical = canonicalizeEchoSymbol(symbolGuess);
         const pricingAddress = getTokenAddressFromTokenListBySymbol(canonical.symbol) ?? canonical.pricingAddressOverride ?? (resolveUnderlyingToFa(underlyingNorm, coinAssetPairs) || underlyingNorm);
 
-        const tokenInfo = await getTokenInfo(pricingAddress);
+        const tokenInfo = await getTokenInfo(requestOrigin, pricingAddress);
         const symbol = canonical.symbol;
         const decimals = canonical.decimalsOverride ?? tokenInfo?.decimals ?? 8;
         const amount = Number(scaledBalanceStr) / Math.pow(10, decimals);
@@ -317,7 +318,7 @@ export async function GET(request: NextRequest) {
         const canonical = canonicalizeEchoSymbol(symbolGuess);
         const pricingAddress = getTokenAddressFromTokenListBySymbol(canonical.symbol) ?? canonical.pricingAddressOverride ?? (resolveUnderlyingToFa(underlyingNorm, coinAssetPairs) || underlyingNorm);
 
-        const tokenInfo = await getTokenInfo(pricingAddress);
+        const tokenInfo = await getTokenInfo(requestOrigin, pricingAddress);
         const symbol = canonical.symbol;
         const decimals = canonical.decimalsOverride ?? tokenInfo?.decimals ?? 8;
         const amount = Number(scaledBalanceStr) / Math.pow(10, decimals);

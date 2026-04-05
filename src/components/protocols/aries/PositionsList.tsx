@@ -9,7 +9,8 @@ import Image from "next/image";
 import tokenList from "@/lib/data/tokenList.json";
 import { ManagePositionsButton } from "../ManagePositionsButton";
 import { useCollapsible } from "@/contexts/CollapsibleContext";
-import { formatNumber, formatCurrency } from "@/lib/utils/numberFormat";
+import { formatNumber } from "@/lib/utils/numberFormat";
+import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
 
 interface PositionsListProps {
   address?: string;
@@ -92,6 +93,7 @@ function getTokenInfo(address: string) {
 }
 
 export function PositionsList({ address, onPositionsValueChange, refreshKey, onPositionsCheckComplete, showManageButton=true }: PositionsListProps) {
+  const { formatUsd, maskBalance } = usePortfolioAmountsPrivacy();
   const { account } = useWallet();
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(false);
@@ -221,7 +223,7 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
             <CardTitle className="text-lg">Aries</CardTitle>
           </div>
           <div className="flex items-center gap-2">
-            <div className="text-lg">{formatCurrency(totalValue, 2)}</div>
+            <div className="text-lg">{formatUsd(totalValue, 2)}</div>
             <ChevronDown className={cn(
               "h-5 w-5 transition-transform",
               isExpanded('aries') ? "transform rotate-0" : "transform -rotate-90"
@@ -269,18 +271,18 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                         "text-xs",
                         isBorrow ? "text-red-400" : "text-muted-foreground"
                       )}>
-                        {formatCurrency(parseFloat(position.assetInfo.price), 2)}
+                        {formatUsd(parseFloat(position.assetInfo.price), 2)}
                       </div>
                     </div>
                     <div className="text-right">
                       <div className={cn(
                         "text-sm font-medium",
                         isBorrow && "text-red-500"
-                      )}>{formatCurrency(value, 2)}</div>
+                      )}>{formatUsd(value, 2)}</div>
                       <div className={cn(
                         "text-xs",
                         isBorrow ? "text-red-400" : "text-muted-foreground"
-                      )}>{formatNumber(amount, 4)}</div>
+                      )}>{maskBalance(formatNumber(amount, 4))}</div>
                     </div>
                   </div>
                 </div>

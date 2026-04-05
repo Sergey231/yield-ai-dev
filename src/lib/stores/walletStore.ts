@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { devtools, persist } from 'zustand/middleware';
-import { getBaseUrl } from '@/lib/utils/config';
+import { getClientBaseUrl } from '@/lib/utils/config';
 
 // Types for wallet data
 export interface WalletBalance {
@@ -166,7 +166,7 @@ export const useWalletStore = create<WalletState>()(
           
           try {
             console.log('[WalletStore] Fetching balance for address:', address);
-            const apiUrl = `${getBaseUrl()}/api/aptos/walletBalance?address=${encodeURIComponent(address)}`;
+            const apiUrl = `${getClientBaseUrl()}/api/aptos/walletBalance?address=${encodeURIComponent(address)}`;
             console.log('[WalletStore] Balance API URL:', apiUrl);
             
             const response = await fetch(apiUrl);
@@ -188,7 +188,7 @@ export const useWalletStore = create<WalletState>()(
             }
           } catch (error) {
             console.error('[WalletStore] Error fetching balance:', error);
-            console.error('[WalletStore] Address:', address, 'Base URL:', getBaseUrl());
+            console.error('[WalletStore] Address:', address, 'Base URL:', getClientBaseUrl());
             set({
               balanceLoading: false,
               balanceError: error instanceof Error ? error.message : 'Unknown error'
@@ -216,12 +216,13 @@ export const useWalletStore = create<WalletState>()(
           
           try {
             console.log('[WalletStore] Fetching positions for address:', address);
-            console.log('[WalletStore] Base URL:', getBaseUrl());
+            console.log('[WalletStore] Base URL:', getClientBaseUrl());
             
             // If NEXT_PUBLIC_DEBUG_PROTOCOLS is set (e.g. "decibel" or "decibel,thala"), use only those protocols
             const debugProtocols = typeof process.env.NEXT_PUBLIC_DEBUG_PROTOCOLS === 'string'
               ? process.env.NEXT_PUBLIC_DEBUG_PROTOCOLS.split(',').map((p) => p.trim()).filter(Boolean)
               : null;
+              
             const defaultPositionProtocols = [
               'echelon',
               'joule',
@@ -243,7 +244,7 @@ export const useWalletStore = create<WalletState>()(
             // Fetch positions for each protocol
             const promises = protocolsToFetch.map(async (protocol) => {
               try {
-                const apiUrl = `${getBaseUrl()}/api/protocols/${protocol}/userPositions?address=${encodeURIComponent(address)}`;
+                const apiUrl = `${getClientBaseUrl()}/api/protocols/${protocol}/userPositions?address=${encodeURIComponent(address)}`;
                 console.log(`[WalletStore] Fetching ${protocol} positions from:`, apiUrl);
                 
                 const response = await fetch(apiUrl);
@@ -259,7 +260,7 @@ export const useWalletStore = create<WalletState>()(
                 }
               } catch (error) {
                 console.error(`[WalletStore] Error fetching ${protocol} positions:`, error);
-                console.error(`[WalletStore] Protocol: ${protocol}, Address: ${address}, Base URL: ${getBaseUrl()}`);
+                console.error(`[WalletStore] Protocol: ${protocol}, Address: ${address}, Base URL: ${getClientBaseUrl()}`);
                 newPositions[protocol] = [];
               }
             });
@@ -310,18 +311,18 @@ export const useWalletStore = create<WalletState>()(
           
           try {
             console.log('[WalletStore] Fetching rewards for address:', address);
-            console.log('[WalletStore] Base URL:', getBaseUrl());
+            console.log('[WalletStore] Base URL:', getClientBaseUrl());
             console.log('[WalletStore] Environment check:', {
               NODE_ENV: process.env.NODE_ENV,
-              NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
-              VERCEL_URL: process.env.VERCEL_URL
+              VERCEL_URL: process.env.VERCEL_URL,
+              APP_URL: process.env.APP_URL,
             });
             
             // If NEXT_PUBLIC_DEBUG_PROTOCOLS is set, use only those protocols for rewards too
             const debugProtocols = typeof process.env.NEXT_PUBLIC_DEBUG_PROTOCOLS === 'string'
               ? process.env.NEXT_PUBLIC_DEBUG_PROTOCOLS.split(',').map((p) => p.trim()).filter(Boolean)
               : null;
-            const defaultRewardProtocols = ['echelon', 'auro', 'hyperion', 'meso', 'earnium'];
+            const defaultRewardProtocols = ['echelon', 'auro', 'hyperion', 'meso', 'earnium', 'moar'];
             const protocolsToFetch = protocols ?? (debugProtocols?.length ? debugProtocols : defaultRewardProtocols);
             const newRewards: ProtocolRewards = { ...state.rewards };
             
@@ -330,12 +331,12 @@ export const useWalletStore = create<WalletState>()(
             // Fetch rewards for each protocol
             const promises = protocolsToFetch.map(async (protocol) => {
               try {
-                const apiUrl = `${getBaseUrl()}/api/protocols/${protocol}/rewards?address=${encodeURIComponent(address)}`;
+                const apiUrl = `${getClientBaseUrl()}/api/protocols/${protocol}/rewards?address=${encodeURIComponent(address)}`;
                 console.log(`[WalletStore] Fetching ${protocol} rewards from:`, apiUrl);
                 
                 if (protocol === 'hyperion') {
                   // Hyperion rewards are embedded in positions data
-                  const hyperionUrl = `${getBaseUrl()}/api/protocols/${protocol}/userPositions?address=${encodeURIComponent(address)}`;
+                  const hyperionUrl = `${getClientBaseUrl()}/api/protocols/${protocol}/userPositions?address=${encodeURIComponent(address)}`;
                   console.log(`[WalletStore] Hyperion using positions URL:`, hyperionUrl);
                   
                   const response = await fetch(hyperionUrl);
@@ -360,7 +361,7 @@ export const useWalletStore = create<WalletState>()(
                   }
                 } else if (protocol === 'meso') {
                   // Meso rewards via dedicated API
-                  const response = await fetch(`${getBaseUrl()}/api/protocols/meso/rewards?address=${encodeURIComponent(address)}`);
+                  const response = await fetch(`${getClientBaseUrl()}/api/protocols/meso/rewards?address=${encodeURIComponent(address)}`);
                   
                   if (response.ok) {
                     const data = await response.json();
@@ -374,7 +375,7 @@ export const useWalletStore = create<WalletState>()(
                   }
                 } else if (protocol === 'earnium') {
                   // Earnium rewards via dedicated API
-                  const response = await fetch(`${getBaseUrl()}/api/protocols/earnium/rewards?address=${encodeURIComponent(address)}`);
+                  const response = await fetch(`${getClientBaseUrl()}/api/protocols/earnium/rewards?address=${encodeURIComponent(address)}`);
                   
                   if (response.ok) {
                     const data = await response.json();
@@ -440,7 +441,7 @@ export const useWalletStore = create<WalletState>()(
                 }
               } catch (error) {
                 console.error(`[WalletStore] Error fetching ${protocol} rewards:`, error);
-                console.error(`[WalletStore] Protocol: ${protocol}, Address: ${address}, Base URL: ${getBaseUrl()}`);
+                console.error(`[WalletStore] Protocol: ${protocol}, Address: ${address}, Base URL: ${getClientBaseUrl()}`);
                 
                 // Log more details about the error
                 if (error instanceof Error) {

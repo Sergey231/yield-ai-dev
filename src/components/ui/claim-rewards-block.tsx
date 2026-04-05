@@ -27,13 +27,13 @@ export function ClaimRewardsBlock({ summary, onClaim, loading = false, className
   return (
     <Card className={cn('mb-6 border-success/20 hover:shadow-md transition-shadow', className)}>
       <CardContent className="p-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-success/10 rounded-full">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="p-2 bg-success/10 rounded-full shrink-0">
               <Gift className="h-5 w-5 text-success" />
             </div>
-            <div>
-              <h3 className="text-lg font-semibold text-success">
+            <div className="min-w-0">
+              <h3 className="text-lg font-semibold text-success truncate">
                 Claim Rewards
               </h3>
               <p className="text-sm text-success dark:text-success/80">
@@ -44,7 +44,7 @@ export function ClaimRewardsBlock({ summary, onClaim, loading = false, className
           <Button
             onClick={onClaim}
             disabled={loading}
-            className="bg-success text-success-foreground hover:bg-success/90"
+            className="bg-success text-success-foreground hover:bg-success/90 shrink-0"
           >
             {loading ? 'Loading...' : 'Claim All'}
           </Button>

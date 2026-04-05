@@ -3,6 +3,8 @@ import { normalizeAddress, toCanonicalAddress } from "@/lib/utils/addressNormali
 import { buildConfigureUserSettingsPayload } from "@/lib/protocols/decibel/configureUserSettings";
 import { buildOpenMarketOrderPayload, type DecibelMarketConfig } from "@/lib/protocols/decibel/closePosition";
 import { getDecibelExecutorAccount, submitExecutorEntryFunction } from "@/lib/protocols/decibel/executorSubmit";
+import { Aptos, AptosConfig, Network } from "@aptos-labs/ts-sdk";
+import { PACKAGE_MAINNET, PACKAGE_TESTNET } from "@/lib/protocols/decibel/closePosition";
 
 type DelegationDto = {
   delegated_account?: string;
@@ -13,6 +15,7 @@ type DelegationDto = {
 const DECIBEL_API_KEY = process.env.DECIBEL_API_KEY;
 const DECIBEL_API_BASE_URL =
   process.env.DECIBEL_API_BASE_URL || "https://api.testnet.aptoslabs.com/decibel";
+const APTOS_API_KEY = process.env.APTOS_API_KEY;
 
 const DEFAULT_MIN_SIZE_USD = 10;
 const DEFAULT_MAX_SIZE_USD = 100;
@@ -59,6 +62,48 @@ async function fetchDecibel(path: string) {
     throw new Error(msg);
   }
   return data;
+}
+
+function getAptosClientFromDecibelBaseUrl(): { aptos: Aptos; network: "mainnet" | "testnet"; isTestnet: boolean } {
+  const isTestnet = DECIBEL_API_BASE_URL.includes("testnet");
+  const network = isTestnet ? "testnet" : "mainnet";
+  const aptosNetwork = isTestnet ? Network.TESTNET : Network.MAINNET;
+  const config = new AptosConfig({
+    network: aptosNetwork,
+    ...(APTOS_API_KEY && { clientConfig: { HEADERS: { Authorization: `Bearer ${APTOS_API_KEY}` } } }),
+  });
+  return { aptos: new Aptos(config), network, isTestnet };
+}
+
+function hasPerpsDelegationOnChain(params: {
+  subaccountResource: unknown;
+  executorAddress: string;
+}): boolean {
+  const { subaccountResource, executorAddress } = params;
+  const exec = normalizeAddress(executorAddress);
+  if (!subaccountResource || typeof subaccountResource !== "object") return false;
+  // Aptos TS SDK returns the resource "data" directly for getAccountResource, while other callers
+  // may pass a { data } wrapper. Support both shapes.
+  const root: any =
+    (subaccountResource as any)?.delegated_permissions ? subaccountResource : (subaccountResource as any)?.data;
+  if (!root || typeof root !== "object") return false;
+
+  const delegatedPermissions = (root as any)?.delegated_permissions;
+  const entries = delegatedPermissions?.root?.children?.entries;
+  if (!Array.isArray(entries)) return false;
+
+  const normalizeKey = (k: unknown) => (typeof k === "string" ? normalizeAddress(toCanonicalAddress(k)) : "");
+
+  const leaf = entries.find((e: any) => normalizeKey(e?.key) === exec)?.value;
+  const permsEntries = leaf?.value?.perms?.entries;
+  if (!Array.isArray(permsEntries)) return false;
+
+  return permsEntries.some((pe: any) => {
+    const v = pe?.key?.__variant__;
+    if (typeof v !== "string") return false;
+    const s = v.toLowerCase();
+    return s.includes("perp") && s.includes("trade");
+  });
 }
 
 function resolveMarketForAsset(
@@ -160,7 +205,7 @@ export async function POST(request: NextRequest) {
     const delegations = (await fetchDecibel(
       `/api/v1/delegations?subaccount=${encodeURIComponent(canonicalSubaccount)}`
     )) as DelegationDto[];
-    const hasDelegation = (Array.isArray(delegations) ? delegations : []).some((item) => {
+    const apiHasPerpsDelegation = (Array.isArray(delegations) ? delegations : []).some((item) => {
       const delegated = item.delegated_account ? toCanonicalAddress(item.delegated_account) : "";
       const notExpired =
         typeof item.expiration_time_s === "number"
@@ -177,9 +222,43 @@ export async function POST(request: NextRequest) {
         canTradePerps
       );
     });
+    let hasDelegation = apiHasPerpsDelegation;
+    let chainHasPerpsDelegation: boolean | null = null;
+
+    // Decibel API can lag indexing; fall back to on-chain state if API doesn't show perps delegation yet.
+    if (!hasDelegation) {
+      const { aptos, isTestnet } = getAptosClientFromDecibelBaseUrl();
+      const pkg = isTestnet ? PACKAGE_TESTNET : PACKAGE_MAINNET;
+      try {
+        const subRes = await aptos.getAccountResource({
+          accountAddress: canonicalSubaccount,
+          resourceType: `${pkg}::dex_accounts::Subaccount`,
+        });
+        chainHasPerpsDelegation = hasPerpsDelegationOnChain({
+          subaccountResource: subRes,
+          executorAddress,
+        });
+        hasDelegation = chainHasPerpsDelegation;
+      } catch {
+        chainHasPerpsDelegation = null;
+      }
+    }
     if (!hasDelegation) {
       return NextResponse.json(
-        { success: false, error: "No active delegation to executor for this subaccount" },
+        {
+          success: false,
+          error: "No active delegation to executor for this subaccount",
+          debug: {
+            executorAddress,
+            apiHasPerpsDelegation,
+            chainHasPerpsDelegation,
+            apiDelegations: (Array.isArray(delegations) ? delegations : []).map((d) => ({
+              delegated_account: d.delegated_account ?? null,
+              permission_type: d.permission_type ?? null,
+              expiration_time_s: d.expiration_time_s ?? null,
+            })),
+          },
+        },
         { status: 403 }
       );
     }
@@ -206,8 +285,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const isTestnet = DECIBEL_API_BASE_URL.includes("testnet");
-    const network = isTestnet ? "testnet" : "mainnet";
+    const { network, isTestnet } = getAptosClientFromDecibelBaseUrl();
 
     const configurePayload = buildConfigureUserSettingsPayload({
       subaccountAddr: canonicalSubaccount,

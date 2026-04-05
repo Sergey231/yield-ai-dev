@@ -44,7 +44,7 @@ export type SolanaToAptosBridgeTmpOptions = {
 
 /**
  * Executes Solana -> Aptos bridge transfer
- * Uses CCTP depositForBurn on Solana (without Wormhole SDK)
+ * Uses CCTP depositForBurn on Solana
  * Default: connected wallet signs & pays fee.
  * Tmp mode: tmpKeypair as owner, feePayerKeypair pays fee (no wallet adapter).
  */

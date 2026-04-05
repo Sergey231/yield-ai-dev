@@ -12,7 +12,7 @@ import { ClaimableRewardsSummary } from '@/lib/stores/walletStore';
 import { useClaimRewards } from '@/lib/hooks/useClaimRewards';
 import { useWalletStore } from '@/lib/stores/walletStore';
 import { ToastAction } from '@/components/ui/toast';
-import { getBaseUrl } from '@/lib/utils/config';
+import { getClientBaseUrl } from '@/lib/utils/config';
 import { ClaimSuccessModal } from '@/components/ui/claim-success-modal';
 
 interface ClaimAllRewardsModalProps {
@@ -259,7 +259,7 @@ export function ClaimAllRewardsModal({ isOpen, onClose, summary, positions }: Cl
     // Load Moar rewards to get farming_identifier and reward_id data
     let moarRewards: any[] = [];
     try {
-      const response = await fetch(`${getBaseUrl()}/api/protocols/moar/rewards?address=${account.address}`);
+      const response = await fetch(`${getClientBaseUrl()}/api/protocols/moar/rewards?address=${account.address}`);
       const data = await response.json();
       
       console.log('[ClaimAll] Moar rewards API response:', data);
@@ -382,7 +382,7 @@ export function ClaimAllRewardsModal({ isOpen, onClose, summary, positions }: Cl
     // Load Earnium rewards to get pool indices
     let earniumRewards: any[] = [];
     try {
-      const response = await fetch(`${getBaseUrl()}/api/protocols/earnium/rewards?address=${account.address}`);
+      const response = await fetch(`${getClientBaseUrl()}/api/protocols/earnium/rewards?address=${account.address}`);
       const data = await response.json();
       
       console.log('[ClaimAll] Earnium rewards API response:', data);
@@ -674,7 +674,7 @@ export function ClaimAllRewardsModal({ isOpen, onClose, summary, positions }: Cl
     // Load Echelon rewards directly from API
     let echelonRewards: any[] = [];
     try {
-      const response = await fetch(`${getBaseUrl()}/api/protocols/echelon/rewards?address=${account.address}`);
+      const response = await fetch(`${getClientBaseUrl()}/api/protocols/echelon/rewards?address=${account.address}`);
       const data = await response.json();
       
       if (data.success && Array.isArray(data.data)) {

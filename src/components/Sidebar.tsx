@@ -29,6 +29,7 @@ import { PositionsList as EchoPositionsList } from "./protocols/echo/PositionsLi
 import { PositionsList as DecibelPositionsList } from "./protocols/decibel/PositionsList";
 import { PositionsList as AptreePositionsList } from "./protocols/aptree/PositionsList";
 import { PositionsList as JupiterPositionsList } from "./protocols/jupiter/PositionsList";
+import { PositionsList as KaminoPositionsList } from "./protocols/kamino/PositionsList";
 import { PositionsList as YieldAIPositionsList } from "./protocols/yield-ai/PositionsList";
 import { useSolanaPortfolio } from "@/hooks/useSolanaPortfolio";
 import { ProtocolIcon } from "@/shared/ProtocolIcon/ProtocolIcon";
@@ -64,6 +65,7 @@ export default function Sidebar() {
   useWallet(); // Keep adapter state synced
   const {
     address: solanaAddress,
+    protocolsAddress: solanaProtocolsAddress,
     tokens: solanaTokens,
     totalValueUsd: solanaTotalValue,
     isLoading: isSolanaLoading,
@@ -88,13 +90,15 @@ export default function Sidebar() {
   const [decibelMainnetValue, setDecibelMainnetValue] = useState(0);
   const [aptreeValue, setAptreeValue] = useState(0);
   const [yieldAIValue, setYieldAIValue] = useState(0);
+  const [jupiterValue, setJupiterValue] = useState(0);
+  const [kaminoValue, setKaminoValue] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [checkingProtocols, setCheckingProtocols] = useState<string[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
 
   const setTotalAssetsStore = useWalletStore((s) => s.setTotalAssets);
 
-  const allProtocolNames = [
+  const APTOS_PROTOCOL_NAMES = [
     "Hyperion",
     "Echelon",
     "Aries",
@@ -112,6 +116,7 @@ export default function Sidebar() {
     "APTree",
     "AI agent",
   ];
+  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino"];
 
   // When set (e.g. "decibel" or "decibel,thala"), only these protocols are shown in the positions list
   const debugProtocolKeys =
@@ -122,8 +127,12 @@ export default function Sidebar() {
       : null;
 
   const resetChecking = useCallback(() => {
-    setCheckingProtocols(allProtocolNames);
-  }, []);
+    setCheckingProtocols(
+      solanaProtocolsAddress
+        ? [...APTOS_PROTOCOL_NAMES, ...SOLANA_PROTOCOL_NAMES]
+        : [...APTOS_PROTOCOL_NAMES]
+    );
+  }, [solanaProtocolsAddress]);
 
   const loadPortfolio = useCallback(async () => {
     if (!account?.address) {
@@ -180,6 +189,8 @@ export default function Sidebar() {
     setDecibelMainnetValue(0);
     setAptreeValue(0);
     setYieldAIValue(0);
+    setJupiterValue(0);
+    setKaminoValue(0);
     resetChecking();
     setRefreshKey((k) => k + 1);
   }, [loadPortfolio, resetChecking]);
@@ -192,7 +203,13 @@ export default function Sidebar() {
     } else {
       setCheckingProtocols([]);
     }
-  }, [loadPortfolio]);
+  }, [loadPortfolio, account?.address, resetChecking]);
+
+  useEffect(() => {
+    if (!account?.address) return;
+    // Keep checking list in sync when Solana wallet connects/disconnects
+    resetChecking();
+  }, [account?.address, solanaProtocolsAddress, resetChecking]);
 
   const handleHyperionValueChange = useCallback((value: number) => {
     setHyperionValue(Number.isFinite(value) ? value : 0);
@@ -255,6 +272,14 @@ export default function Sidebar() {
     setYieldAIValue(Number.isFinite(value) ? value : 0);
   }, []);
 
+  const handleJupiterValueChange = useCallback((value: number) => {
+    setJupiterValue(Number.isFinite(value) ? value : 0);
+  }, []);
+
+  const handleKaminoValueChange = useCallback((value: number) => {
+    setKaminoValue(Number.isFinite(value) ? value : 0);
+  }, []);
+
   // Считаем сумму по кошельку
   const walletTotal = tokens.reduce((sum, token) => {
     const value = token.value ? parseFloat(token.value) : 0;
@@ -299,8 +324,10 @@ export default function Sidebar() {
     if (account?.address) {
       await handleRefresh();
     }
-    await refreshSolana();
-  }, [account?.address, handleRefresh, refreshSolana]);
+    if (solanaAddress) {
+      await refreshSolana();
+    }
+  }, [account?.address, handleRefresh, refreshSolana, solanaAddress]);
 
   return (
     <CollapsibleProvider>
@@ -388,7 +415,8 @@ export default function Sidebar() {
                     <div className="flex items-center gap-1">
                       {checkingProtocols.map((name) => {
                         const proto = getProtocolByName(name);
-                        const logo = proto?.logoUrl || "/favicon.ico";
+                        const logo =
+                          name === "Kamino" ? "/protocol_ico/kamino.png" : proto?.logoUrl || "/favicon.ico";
                         return (
                           <ProtocolIcon
                             key={name}
@@ -481,8 +509,43 @@ export default function Sidebar() {
                   onRefresh={refreshSolana}
                   isRefreshing={isSolanaLoading}
                   hideSmallAssets={hideSmallAssets}
+                  onHideSmallAssetsChange={setHideSmallAssets}
                 />
-                    <JupiterPositionsList address={solanaAddress} />
+                {(
+                  [
+                    {
+                      name: "Jupiter" as const,
+                      value: jupiterValue,
+                      component: (
+                        <JupiterPositionsList
+                          key="Jupiter"
+                          address={solanaProtocolsAddress ?? undefined}
+                          onPositionsValueChange={handleJupiterValueChange}
+                          onPositionsCheckComplete={() =>
+                            setCheckingProtocols((prev) => prev.filter((p) => p !== "Jupiter"))
+                          }
+                        />
+                      ),
+                    },
+                    {
+                      name: "Kamino" as const,
+                      value: kaminoValue,
+                      component: (
+                        <KaminoPositionsList
+                          key="Kamino"
+                          address={solanaProtocolsAddress ?? undefined}
+                          onPositionsValueChange={handleKaminoValueChange}
+                          onPositionsCheckComplete={() =>
+                            setCheckingProtocols((prev) => prev.filter((p) => p !== "Kamino"))
+                          }
+                        />
+                      ),
+                    },
+                  ] as const
+                )
+                  .slice()
+                  .sort((a, b) => b.value - a.value)
+                  .map((x) => x.component)}
                 <SolanaSignMessageButton />
               </div>
             )}

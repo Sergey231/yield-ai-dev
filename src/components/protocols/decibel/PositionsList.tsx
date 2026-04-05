@@ -8,7 +8,8 @@ import Image from "next/image";
 import { useCollapsible } from "@/contexts/CollapsibleContext";
 import { ManagePositionsButton } from "../ManagePositionsButton";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
-import { formatCurrency, formatNumber } from "@/lib/utils/numberFormat";
+import { formatNumber } from "@/lib/utils/numberFormat";
+import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
 import { Info } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -32,6 +33,7 @@ export function PositionsList({
   onPositionsCheckComplete,
   showManageButton = true,
 }: PositionsListProps) {
+  const { formatUsd } = usePortfolioAmountsPrivacy();
   const [equity, setEquity] = useState<number | null>(null);
   const [positions, setPositions] = useState<{ market: string; marginUsd: number; pnl: number }[]>([]);
   const [marketNames, setMarketNames] = useState<Record<string, string>>({});
@@ -271,7 +273,7 @@ export function PositionsList({
           </div>
           <div className="flex items-center gap-2">
             <div className="text-lg whitespace-nowrap">
-              {isLoading ? "..." : formatCurrency(displayValue)}
+              {isLoading ? "..." : formatUsd(displayValue)}
             </div>
             <ChevronDown
               className={cn(
@@ -297,7 +299,7 @@ export function PositionsList({
                     </Badge>
                   </div>
                   <span className="text-sm font-medium shrink-0 ml-2">
-                    {formatCurrency(preDepositSumUsdc ?? 0, 2)}
+                    {formatUsd(preDepositSumUsdc ?? 0, 2)}
                   </span>
                 </div>
               )}
@@ -310,7 +312,7 @@ export function PositionsList({
                     </Badge>
                   </div>
                   <span className="text-sm font-medium shrink-0 ml-2">
-                    {formatCurrency(availableToTrade, 2)}
+                    {formatUsd(availableToTrade, 2)}
                   </span>
                 </div>
               )}
@@ -358,10 +360,10 @@ export function PositionsList({
                       </span>
                       <div className="text-sm shrink-0 ml-2 text-right flex items-center justify-end gap-1.5">
                         <span className={p.pnl < 0 ? "text-destructive" : p.pnl > 0 ? "text-green-600 dark:text-green-400" : "text-muted-foreground"}>
-                          ({p.pnl > 0 ? "+" : ""}{formatCurrency(p.pnl, 2)})
+                          ({p.pnl > 0 ? "+" : ""}{formatUsd(p.pnl, 2)})
                         </span>
                         <span className="font-medium">
-                          {formatCurrency(p.marginUsd, 2)}
+                          {formatUsd(p.marginUsd, 2)}
                         </span>
                       </div>
                     </div>
@@ -383,7 +385,7 @@ export function PositionsList({
                   <div className="text-sm font-medium truncate min-w-0">{v.name}</div>
                   <div className="text-sm font-medium shrink-0 ml-2">
                     {v.current_value_of_shares != null && v.current_value_of_shares > 0
-                      ? formatCurrency(v.current_value_of_shares, 2)
+                      ? formatUsd(v.current_value_of_shares, 2)
                       : null}
                   </div>
                 </div>

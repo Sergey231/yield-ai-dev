@@ -1,18 +1,18 @@
-import { useEffect, useState } from "react";
-import { PositionCard } from "./PositionCard";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { useEffect, useMemo, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
-import { ChevronDown } from "lucide-react";
-import { cn } from "@/lib/utils";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
-import Image from "next/image";
-import { ManagePositionsButton } from "../ManagePositionsButton";
-import { useCollapsible } from "@/contexts/CollapsibleContext";
 import { Token } from "@/lib/types/token";
 import { filterHyperionVaultTokens } from "@/lib/services/hyperion/vaultTokens";
-import { VaultTokensDisplay } from "./VaultTokensDisplay";
-import { formatNumber, formatCurrency } from "@/lib/utils/numberFormat";
+import { formatCurrency } from "@/lib/utils/numberFormat";
+import { ProtocolCard } from "@/shared/ProtocolCard";
+import {
+  useHyperionPools,
+  useHyperionPositions,
+  useHyperionVaultData,
+} from "@/lib/query/hooks/protocols/hyperion";
+import { queryKeys } from "@/lib/query/queryKeys";
+import { mapHyperionToProtocolPositions } from "./mapHyperionToProtocolPositions";
 
 interface PositionsListProps {
   address?: string;
@@ -24,205 +24,159 @@ interface PositionsListProps {
 }
 
 export function PositionsList({ address, onPositionsValueChange, walletTokens, refreshKey, onPositionsCheckComplete, showManageButton=true }: PositionsListProps) {
-
   const { account } = useWallet();
-  const [positions, setPositions] = useState<any[]>([]);
-  const [vaultTokens, setVaultTokens] = useState<Token[]>([]);
-  const [vaultData, setVaultData] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const { isExpanded, toggleSection } = useCollapsible();
+  const queryClient = useQueryClient();
+  const onValueRef = useRef(onPositionsValueChange);
+  const onCompleteRef = useRef(onPositionsCheckComplete);
+  onValueRef.current = onPositionsValueChange;
+  onCompleteRef.current = onPositionsCheckComplete;
 
   const walletAddress = address || account?.address?.toString();
   const protocol = getProtocolByName("Hyperion");
+  const vaultTokens = useMemo(
+    () => filterHyperionVaultTokens((walletTokens ?? []) as Token[]),
+    [walletTokens]
+  );
+  const vaultTokenAddresses = useMemo(
+    () => vaultTokens.map((token) => token.address),
+    [vaultTokens]
+  );
 
-  // Обрабатываем Vault токены при получении walletTokens
+  const {
+    data: positions = [],
+    isLoading: positionsLoading,
+    isFetching: positionsFetching,
+    error: positionsError,
+  } = useHyperionPositions(walletAddress);
+  const { data: pools = [] } = useHyperionPools();
+  const { data: vaultData = [], isLoading: vaultLoading } = useHyperionVaultData(
+    walletAddress,
+    vaultTokenAddresses
+  );
+
+  const totalValueWithoutVault = useMemo(
+    () =>
+      positions.reduce((sum, position) => {
+        const positionValue = parseFloat(position.value || "0");
+        const farmRewards =
+          position.farm?.unclaimed?.reduce(
+            (rewardSum: number, reward: { amountUSD?: string }) =>
+              rewardSum + parseFloat(reward.amountUSD || "0"),
+            0
+          ) || 0;
+        const feeRewards =
+          position.fees?.unclaimed?.reduce(
+            (feeSum: number, fee: { amountUSD?: string }) =>
+              feeSum + parseFloat(fee.amountUSD || "0"),
+            0
+          ) || 0;
+        return sum + positionValue + farmRewards + feeRewards;
+      }, 0),
+    [positions]
+  );
+
+  const totalVaultValue = useMemo(
+    () =>
+      vaultData.reduce((sum, vaultInfo) => sum + (vaultInfo.totalValueUSD || 0), 0),
+    [vaultData]
+  );
+  const totalHyperionValue = totalValueWithoutVault + totalVaultValue;
+
+  const totalRewardsValue = useMemo(
+    () =>
+      positions.reduce((sum, position) => {
+        const farmRewards =
+          position.farm?.unclaimed?.reduce(
+            (rewardSum: number, reward: { amountUSD?: string }) =>
+              rewardSum + parseFloat(reward.amountUSD || "0"),
+            0
+          ) || 0;
+        const feeRewards =
+          position.fees?.unclaimed?.reduce(
+            (feeSum: number, fee: { amountUSD?: string }) =>
+              feeSum + parseFloat(fee.amountUSD || "0"),
+            0
+          ) || 0;
+        return sum + farmRewards + feeRewards;
+      }, 0),
+    [positions]
+  );
+
+  const aprByPoolId = useMemo(() => {
+    const map: Record<string, number> = {};
+    pools.forEach((pool) => {
+      const poolId = pool.poolId;
+      if (!poolId) return;
+      const fee = parseFloat(pool.feeAPR || "0");
+      const farm = parseFloat(pool.farmAPR || "0");
+      map[poolId] = fee + farm;
+    });
+    return map;
+  }, [pools]);
+
+  const protocolPositions = useMemo(
+    () => mapHyperionToProtocolPositions(positions, aprByPoolId, vaultData),
+    [positions, aprByPoolId, vaultData]
+  );
+
+  const totalRewardsUsd =
+    totalRewardsValue > 0
+      ? totalRewardsValue < 1
+        ? "<$1"
+        : formatCurrency(totalRewardsValue, 2)
+      : undefined;
+
+  const isLoading = positionsLoading || vaultLoading;
+  const isFetching = positionsFetching;
+
   useEffect(() => {
-    if (walletTokens) {
-      const vaultTokensList = filterHyperionVaultTokens(walletTokens);
-      setVaultTokens(vaultTokensList);
+    if (refreshKey != null && walletAddress) {
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.hyperion.userPositions(walletAddress),
+      });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.hyperion.vaultData(walletAddress),
+      });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.hyperion.pools(),
+      });
     }
-  }, [walletTokens]);
+  }, [refreshKey, walletAddress, queryClient]);
 
   useEffect(() => {
-    async function loadPositions() {
-      if (!walletAddress) {
-        setPositions((prev) => prev); // keep previous to avoid flicker
-        onPositionsCheckComplete?.();
-        return;
-      }
-
-      try {
-        setLoading(true);
-        setError(null);
-        const response = await fetch(`/api/protocols/hyperion/userPositions?address=${walletAddress}`);
-        
-        if (!response.ok) {
-          throw new Error(`API returned status ${response.status}`);
-        }
-        
-        const data = await response.json();
-        
-        if (data.success && Array.isArray(data.data)) {
-          setPositions(data.data);
-        } else {
-          setPositions([]);
-        }
-      } catch (err) {
-        setError('Failed to load positions');
-        // keep previous positions on error
-      } finally {
-        setLoading(false);
-        onPositionsCheckComplete?.();
-      }
+    if (!isFetching) {
+      onCompleteRef.current?.();
     }
+  }, [isFetching]);
 
-    loadPositions();
-  }, [walletAddress, refreshKey]);
-
-  // Считаем общую стоимость всех позиций и наград
-  const totalValue = positions.reduce((sum, position) => {
-    const positionValue = parseFloat(position.value || "0");
-    
-    // Считаем награды из фарма
-    const farmRewards = position.farm?.unclaimed?.reduce((rewardSum: number, reward: { amountUSD: string }) => {
-      return rewardSum + parseFloat(reward.amountUSD || "0");
-    }, 0) || 0;
-    
-    // Считаем награды из комиссий
-    const feeRewards = position.fees?.unclaimed?.reduce((feeSum: number, fee: { amountUSD: string }) => {
-      return feeSum + parseFloat(fee.amountUSD || "0");
-    }, 0) || 0;
-    
-    return sum + positionValue + farmRewards + feeRewards;
-  }, 0);
-
-  // Считаем стоимость Vault токенов из данных блокчейна
-  const vaultTokensValue = vaultData.reduce((sum, vaultInfo) => {
-    return sum + (vaultInfo.totalValueUSD || 0);
-  }, 0);
-
-  // Общая стоимость (позиции + Vault токены)
-  const totalHyperionValue = totalValue + vaultTokensValue;
-
-  // Считаем общую стоимость всех позиций и наград
-  const totalRewardsValue = positions.reduce((sum, position) => {
-  
-    // Считаем награды из фарма
-    const farmRewards = position.farm?.unclaimed?.reduce((rewardSum: number, reward: { amountUSD: string }) => {
-      return rewardSum + parseFloat(reward.amountUSD || "0");
-    }, 0) || 0;
-    
-    // Считаем награды из комиссий
-    const feeRewards = position.fees?.unclaimed?.reduce((feeSum: number, fee: { amountUSD: string }) => {
-      return feeSum + parseFloat(fee.amountUSD || "0");
-    }, 0) || 0;
-    
-    return sum + farmRewards + feeRewards;
-  }, 0);
-
-  // Вызываем колбэк при изменении общей суммы позиций
   useEffect(() => {
-    onPositionsValueChange?.(totalHyperionValue);
-  }, [totalHyperionValue, onPositionsValueChange]);
+    onValueRef.current?.(totalHyperionValue);
+  }, [totalHyperionValue]);
 
-  if (loading) {
-    return null;
-  }
-
-  if (error) {
-    return <div className="text-sm text-red-500">{error}</div>;
+  if (Boolean(positionsError)) {
+    return <div className="text-sm text-red-500">Failed to load positions</div>;
   }
 
   if (!walletAddress) {
     return <div className="text-sm text-muted-foreground">Connect wallet to view positions</div>;
   }
 
-  // Не показываем секцию, если нет ни позиций, ни Vault токенов
-  if (positions.length === 0 && vaultTokens.length === 0) {
+  if (positions.length === 0 && vaultData.length === 0) {
     return null;
   }
 
-  // Сортируем позиции по убыванию общей стоимости (включая награды)
-  const sortedPositions = [...positions].sort((a, b) => {
-    const aValue = parseFloat(a.value || "0") + parseFloat(a.rewards?.value || "0");
-    const bValue = parseFloat(b.value || "0") + parseFloat(b.rewards?.value || "0");
-    return bValue - aValue;
-  });
+  if (!protocol) {
+    return null;
+  }
 
   return (
-    <Card className="w-full h-full flex flex-col">
-      <CardHeader 
-        className="py-2 cursor-pointer hover:bg-accent/50 transition-colors"
-        onClick={() => toggleSection('hyperion')}
-      >
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            {protocol && (
-              <div className="w-5 h-5 relative">
-                <Image 
-                  src={protocol.logoUrl} 
-                  alt={protocol.name}
-                  width={20}
-                  height={20}
-                  className="object-contain"
-                />
-              </div>
-            )}
-            <CardTitle className="text-lg">Hyperion</CardTitle>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="text-lg">{formatCurrency(totalHyperionValue, 2)}</div>
-            <ChevronDown className={cn(
-              "h-5 w-5 transition-transform",
-              isExpanded('hyperion') ? "transform rotate-0" : "transform -rotate-90"
-            )} />
-          </div>
-        </div>
-      </CardHeader>
-      
-      {isExpanded('hyperion') && (
-        <CardContent className="flex-1 overflow-y-auto px-3 pt-0">
-          <ScrollArea className="h-full">
-            {/* Обычные позиции в пулах */}
-            {sortedPositions.map((position, index) => (
-              <PositionCard key={`${position.assetName}-${index}`} position={position} />
-            ))}
-            
-            {/* Vault токены как подраздел */}
-            {vaultTokens.length > 0 && (
-              <div className="mt-4 pt-4">
-                <h4 className="text-sm font-medium mb-2 text-muted-foreground">Goblin Vaults Positions</h4>
-                <VaultTokensDisplay 
-                  vaultTokens={vaultTokens} 
-                  walletAddress={walletAddress}
-                  onVaultDataChange={setVaultData}
-                />
-              </div>
-            )}
-            
-            {/* Total rewards для обычных позиций */}
-            {totalRewardsValue > 0 && (
-              <div className="flex">
-                <div className="flex items-left">
-                  <div className="text-sm text-muted-foreground text-right pl-3">
-                    {"💰 Total rewards:"}
-                  </div>
-                </div>
-                <div className="flex-2 items-right">
-                  <div className="text-sm font-medium text-right">
-                    {formatCurrency(totalRewardsValue, 2)}
-                  </div>
-                </div>
-              </div>
-            )}
-			
-			{protocol && showManageButton && (
-              <ManagePositionsButton protocol={protocol} />
-            )}
-          </ScrollArea>
-        </CardContent>
-      )}
-    </Card>
+    <ProtocolCard
+      protocol={protocol}
+      totalValue={totalHyperionValue}
+      totalRewardsUsd={totalRewardsUsd}
+      positions={protocolPositions}
+      isLoading={isLoading && positions.length === 0 && vaultData.length === 0}
+      showManageButton={showManageButton}
+    />
   );
-} 
+}

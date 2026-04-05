@@ -1,14 +1,17 @@
 "use client";
 import { PortfolioPageCard } from "./portfolio/PortfolioPageCard";
 import { PortfolioPageSkeleton } from "./portfolio/PortfolioPageSkeleton";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { AptosPortfolioService } from "@/lib/services/aptos/portfolio";
 import { Token } from "@/lib/types/token";
 import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { PortfolioChart } from './chart/PortfolioChart';
-import {  ArrowLeft, Wallet, Copy, ExternalLink } from 'lucide-react';
+import { ArrowLeft, Wallet, ImageDown } from 'lucide-react';
+import { cn } from "@/lib/utils";
 import { CollapsibleProvider } from "@/contexts/CollapsibleContext";
+import { PortfolioAmountsPrivacyProvider } from "@/contexts/PortfolioAmountsPrivacyContext";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { PositionsList as HyperionPositionsList } from "./protocols/hyperion/PositionsList";
 import { PositionsList as EchelonPositionsList } from "./protocols/echelon/PositionsList";
@@ -26,16 +29,19 @@ import { PositionsList as EchoPositionsList } from "./protocols/echo/PositionsLi
 import { PositionsList as DecibelPositionsList } from "./protocols/decibel/PositionsList";
 import { PositionsList as AptreePositionsList } from "./protocols/aptree/PositionsList";
 import { PositionsList as JupiterPositionsList } from "./protocols/jupiter/PositionsList";
+import { PositionsList as KaminoPositionsList } from "./protocols/kamino/PositionsList";
 import { PositionsList as YieldAIPositionsList } from "./protocols/yield-ai/PositionsList";
 import { CardTitle } from '@/components/ui/card';
-import { useAptosAddressResolver } from '@/lib/hooks/useAptosAddressResolver';
+import { usePortfolioAddressResolver } from '@/lib/hooks/usePortfolioAddressResolver';
 import { YieldCalculatorModal } from '@/components/ui/yield-calculator-modal';
 import { useWalletStore } from "@/lib/stores/walletStore";
 import { ProtocolIcon } from "@/shared/ProtocolIcon/ProtocolIcon";
 import { SolanaWalletCard } from "./portfolio/SolanaWalletCard";
+import { PortfolioWalletAddressBar } from "./portfolio/PortfolioWalletAddressBar";
 import { SolanaSignMessageButton } from "./SolanaSignMessageButton";
 import { useSolanaPortfolio } from "@/hooks/useSolanaPortfolio";
 import { useAptosNativeRestore } from "@/hooks/useAptosNativeRestore";
+import { getTokenUsdValue } from "@/lib/utils/tokenUsdValue";
 
 
 export default function PortfolioPage() {
@@ -55,13 +61,6 @@ export default function PortfolioPage() {
 
   const [tokens, setTokens] = useState<Token[]>([]);
   const { address: connectedAptosAddress } = useAptosNativeRestore();
-  const {
-    address: solanaAddress,
-    tokens: solanaTokens,
-    totalValueUsd: solanaTotalValue,
-    isLoading: isSolanaLoading,
-    refresh: refreshSolana,
-  } = useSolanaPortfolio();
   const [hyperionValue, setHyperionValue] = useState(0);
   const [echelonValue, setEchelonValue] = useState(0);
   const [ariesValue, setAriesValue] = useState(0);
@@ -79,6 +78,7 @@ export default function PortfolioPage() {
   const [decibelMainnetValue, setDecibelMainnetValue] = useState(0);
   const [aptreeValue, setAptreeValue] = useState(0);
   const [jupiterValue, setJupiterValue] = useState(0);
+  const [kaminoValue, setKaminoValue] = useState(0);
   const [yieldAIValue, setYieldAIValue] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [checkingProtocols, setCheckingProtocols] = useState<string[]>([]);
@@ -96,12 +96,149 @@ export default function PortfolioPage() {
   const isTrackerMode = requestedAddress.toLowerCase() === "tracker";
   const input = isTrackerMode ? (connectedAptosAddress || "") : requestedAddress;
 
-  const { resolvedAddress, resolvedName, isLoading, error } = useAptosAddressResolver(input);
+  const [aptosResolveInput, setAptosResolveInput] = useState(input);
+  useEffect(() => {
+    setAptosResolveInput(input);
+  }, [input]);
 
-  // Определяем, нужно ли показывать скелетон
-  const isInitialLoading = isLoading || isRefreshing;
+  const [aptosDraft, setAptosDraft] = useState("");
+  const [solanaManual, setSolanaManual] = useState<string | null>(null);
+  const [solanaDraft, setSolanaDraft] = useState("");
+  const [solanaFieldError, setSolanaFieldError] = useState("");
 
-  const allProtocolNames = [
+  useEffect(() => {
+    setSolanaManual(null);
+    setSolanaDraft("");
+    setSolanaFieldError("");
+    setAptosDraft("");
+  }, [input, requestedAddress]);
+
+  const allowEmptyAptosResolver = isTrackerMode && !aptosResolveInput.trim();
+
+  /** Solana-from-aptos-line only when the page slug is that same value (shared /portfolio/:address). */
+  const acceptSolanaFromAptosInput =
+    !isTrackerMode &&
+    requestedAddress.trim() !== "" &&
+    requestedAddress.trim() === aptosResolveInput.trim();
+
+  const {
+    aptosAddress: resolvedAptosAddress,
+    solanaUrlAddress,
+    aptosAnsLabel,
+    solanaDomainLabel,
+    isLoading: addrResolveLoading,
+    error: resolveError,
+    solanaOnlyAsAptosInput,
+  } = usePortfolioAddressResolver(aptosResolveInput, {
+    allowEmpty: allowEmptyAptosResolver,
+    acceptSolanaFromAptosInput,
+  });
+
+  const resolveErrorIsFromRouteSlug =
+    !isTrackerMode &&
+    requestedAddress.trim() !== "" &&
+    requestedAddress.trim() === aptosResolveInput.trim();
+
+  const aptosFieldError =
+    (solanaOnlyAsAptosInput ? "Invalid Aptos wallet address or domain format" : "") ||
+    (!resolveErrorIsFromRouteSlug && resolveError && aptosResolveInput.trim() ? resolveError : "");
+
+  const solanaHookOverride =
+    solanaManual !== null ? solanaManual : isTrackerMode ? null : solanaUrlAddress;
+
+  const {
+    address: solanaAddress,
+    protocolsAddress: solanaProtocolsAddress,
+    tokens: solanaTokens,
+    totalValueUsd: solanaTotalValue,
+    isLoading: isSolanaLoading,
+    refresh: refreshSolana,
+  } = useSolanaPortfolio({ overrideAddress: solanaHookOverride });
+
+  const applyAptosFromField = useCallback(() => {
+    const t = aptosDraft.trim();
+    if (!t) {
+      setAptosResolveInput(input);
+      return;
+    }
+    setAptosResolveInput(t);
+  }, [aptosDraft, input]);
+
+  const applySolanaFromField = useCallback(async () => {
+    setSolanaFieldError("");
+    const t = solanaDraft.trim();
+    if (!t) {
+      setSolanaManual(null);
+      setSolanaDraft("");
+      return;
+    }
+    try {
+      const res = await fetch("/api/portfolio/resolve-input", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input: t }),
+      });
+      const data = (await res.json()) as { solanaAddress?: string; aptosAddress?: string; error?: string };
+      if (!res.ok) {
+        setSolanaFieldError(
+          res.status === 404 ? "Address or domain not found" : "Invalid Solana wallet address",
+        );
+        return;
+      }
+      if (data.solanaAddress) {
+        setSolanaManual(data.solanaAddress);
+        return;
+      }
+      if (data.aptosAddress) {
+        setSolanaFieldError("Invalid Solana wallet address");
+        return;
+      }
+      setSolanaFieldError("Invalid Solana wallet address");
+    } catch {
+      setSolanaFieldError("Could not resolve");
+    }
+  }, [solanaDraft]);
+
+  const formatAddress = (addr: string) => {
+    return `${addr.slice(0, 8)}...${addr.slice(-8)}`;
+  };
+
+  const hasAnyPortfolio = !!(resolvedAptosAddress || solanaAddress);
+  const showPortfolioShell = hasAnyPortfolio || isTrackerMode;
+  const aptosBarPlaceholder =
+    resolvedAptosAddress.length >= 16 ? formatAddress(resolvedAptosAddress) : "Aptos address or .apt domain";
+  const solanaBarPlaceholder =
+    solanaAddress && solanaAddress.length >= 16 ? formatAddress(solanaAddress) : "Solana address";
+  const showChartDownload = showPortfolioShell;
+  const mobileChartRef = useRef<HTMLDivElement | null>(null);
+  const desktopChartRef = useRef<HTMLDivElement | null>(null);
+
+  const downloadPortfolioChartPng = useCallback(async () => {
+    if (typeof window === "undefined") return;
+
+    const isVisible = (node: HTMLDivElement | null) =>
+      !!node && node.offsetParent !== null && node.getClientRects().length > 0;
+
+    const node = (isVisible(desktopChartRef.current) ? desktopChartRef.current : mobileChartRef.current) ??
+      desktopChartRef.current ??
+      mobileChartRef.current;
+
+    if (!node) return;
+
+    const { toPng } = await import("html-to-image");
+    const dataUrl = await toPng(node, { cacheBust: true, pixelRatio: 2, backgroundColor: "#ffffff" });
+
+    const a = document.createElement("a");
+    const date = new Date();
+    const ymd = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    a.download = `portfolio-chart-${ymd}.png`;
+    a.href = dataUrl;
+    a.click();
+  }, []);
+
+  const isInitialLoading = addrResolveLoading || isRefreshing;
+
+  const APTOS_PROTOCOL_NAMES = [
    "Hyperion",
    "Echelon",
    "Aries",
@@ -119,17 +256,17 @@ export default function PortfolioPage() {
    "APTree",
    "AI agent",
   ];
+  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino"];
 
   const resetChecking = useCallback(() => {
-    setCheckingProtocols(allProtocolNames);
-  }, []);
-
-  const formatAddress = (addr: string) => {
-    return `${addr.slice(0, 8)}...${addr.slice(-8)}`;
-  };
+    const next: string[] = [];
+    if (resolvedAptosAddress) next.push(...APTOS_PROTOCOL_NAMES);
+    if (solanaProtocolsAddress) next.push(...SOLANA_PROTOCOL_NAMES);
+    setCheckingProtocols(next);
+  }, [resolvedAptosAddress, solanaProtocolsAddress]);
 
   const loadPortfolio = useCallback(async () => {
-    if (!resolvedAddress) {
+    if (!resolvedAptosAddress) {
       setTokens([]);
       return;
     }
@@ -137,7 +274,7 @@ export default function PortfolioPage() {
     try {
       setIsRefreshing(true);
       const portfolioService = new AptosPortfolioService();
-      const portfolio = await portfolioService.getPortfolio(resolvedAddress);
+      const portfolio = await portfolioService.getPortfolio(resolvedAptosAddress);
       setTokens(portfolio.tokens);
 
     } catch (error) {
@@ -146,11 +283,11 @@ export default function PortfolioPage() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [resolvedAddress]);
+  }, [resolvedAptosAddress]);
 
   const handleRefresh = useCallback(async () => {
     await loadPortfolio();
-    // Сбрасываем значения протоколов, чтобы они перезагрузились
+    await refreshSolana();
     setHyperionValue(0);
     setEchelonValue(0);
     setAriesValue(0);
@@ -161,31 +298,37 @@ export default function PortfolioPage() {
     setAmnisValue(0);
     setEarniumValue(0);
     setAaveValue(0);
+    setMoarValue(0);
     setThalaValue(0);
     setEchoValue(0);
     setDecibelValue(0);
     setDecibelMainnetValue(0);
     setAptreeValue(0);
     setJupiterValue(0);
+    setKaminoValue(0);
+    setYieldAIValue(0);
     resetChecking();
     setRefreshKey((k) => k + 1);
-  }, [loadPortfolio, resetChecking]);
+  }, [loadPortfolio, refreshSolana, resetChecking]);
 
   useEffect(() => {
-    loadPortfolio();
-    // Initialize checking list when account changes
-    if (resolvedAddress) {
+    void loadPortfolio();
+  }, [loadPortfolio]);
+
+  useEffect(() => {
+    if (resolvedAptosAddress || solanaProtocolsAddress) {
       resetChecking();
     } else {
       setCheckingProtocols([]);
     }
-  }, [loadPortfolio, resolvedAddress]);
+  }, [resolvedAptosAddress, solanaProtocolsAddress, resetChecking]);
 
   useEffect(() => {
-    if (!solanaAddress) {
+    if (!solanaProtocolsAddress) {
       setJupiterValue(0);
+      setKaminoValue(0);
     }
-  }, [solanaAddress]);
+  }, [solanaProtocolsAddress]);
 
   // Handle query parameter to open calculator
   useEffect(() => {
@@ -274,10 +417,14 @@ export default function PortfolioPage() {
     setJupiterValue(value);
   }, []);
 
-  // Считаем сумму по кошельку
+  const handleKaminoValueChange = useCallback((value: number) => {
+    setKaminoValue(Number.isFinite(value) ? value : 0);
+  }, []);
+
+  // Считаем сумму по кошельку (value или amount × price — как в Solana)
   const walletTotal = tokens.reduce((sum, token) => {
-    const value = token.value ? parseFloat(token.value) : 0;
-    return sum + (isNaN(value) ? 0 : value);
+    const value = getTokenUsdValue(token);
+    return sum + (Number.isFinite(value) ? value : 0);
   }, 0);
 
   // Считаем сумму по всем протоколам (Decibel: full assets when available, else pre-deposit fallback)
@@ -302,7 +449,7 @@ export default function PortfolioPage() {
 
   // Итоговая сумма
   const totalAssets = walletTotal + totalProtocolsValue;
-  const chartTotalAssets = totalAssets + (solanaTotalValue ?? 0) + jupiterValue;
+  const chartTotalAssets = totalAssets + (solanaTotalValue ?? 0) + jupiterValue + kaminoValue;
 
   useEffect(() => {
     setTotalAssetsStore(totalAssets);
@@ -328,10 +475,26 @@ export default function PortfolioPage() {
     { name: 'Decibel', value: decibelTotal },
     { name: 'APTree', value: aptreeValue },
     { name: 'Jupiter', value: jupiterValue },
+    { name: 'Kamino', value: kaminoValue, color: '#000000' },
     { name: 'AI agent', value: yieldAIValue },
   ];
 
-  // Показываем скелетон во время начальной загрузки
+  if (resolveError && resolveErrorIsFromRouteSlug && !addrResolveLoading) {
+    return (
+      <CollapsibleProvider>
+        <div className="container mx-auto px-4 py-8 max-w-lg">
+          <Button variant="ghost" onClick={() => router.push("/")} className="mb-4">
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            Back
+          </Button>
+          <div className="p-4 rounded-lg border border-red-200 bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300 dark:border-red-900">
+            {resolveError}
+          </div>
+        </div>
+      </CollapsibleProvider>
+    );
+  }
+
   if (isInitialLoading && input) {
     return (
       <CollapsibleProvider>
@@ -342,6 +505,7 @@ export default function PortfolioPage() {
 
   return (
 	<CollapsibleProvider>
+	  <PortfolioAmountsPrivacyProvider>
 	  <div className="container mx-auto px-4 py-4">
 
 	    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -365,7 +529,7 @@ export default function PortfolioPage() {
 
               <div className="min-h-screen to-slate-100 dark:from-slate-900 dark:to-slate-800">
                 <div className="flex-1 overflow-y-auto mt-1 mx-4 mb-4">
-                  {resolvedAddress ? (
+                  {showPortfolioShell ? (
                     <>
 
 					<div className="mt-2 space-y-4">
@@ -378,6 +542,7 @@ export default function PortfolioPage() {
                             <CardTitle className="text-xl pt-2 ml-2">Portfolio</CardTitle>
                           </div>
                         </div>
+                        {resolvedAptosAddress ? (
                         <Button
                           variant="outline"
                           onClick={() => setIsYieldCalcOpen(true)}
@@ -388,34 +553,61 @@ export default function PortfolioPage() {
                           </svg>
                           Yield Calculator
                         </Button>
+                        ) : null}
                       </div>
 			        </div>
 
-				    {/* Display ANS name if available */}
-				    {resolvedName && (
+				    {aptosAnsLabel ? (
 				      <div className="mt-2 px-2">
 				        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-				          <span className="font-medium">ANS Name:</span>
+				          <span className="font-medium">Aptos name:</span>
 				          <span className="font-mono bg-muted px-2 py-1 rounded text-foreground">
-				            {resolvedName}.apt
+				            {aptosAnsLabel}
 				          </span>
 				        </div>
 				      </div>
-				    )}
+				    ) : null}
+				    {solanaDomainLabel ? (
+				      <div className="mt-2 px-2">
+				        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+				          <span className="font-medium">Solana domain:</span>
+				          <span className="font-mono bg-muted px-2 py-1 rounded text-foreground">
+				            {solanaDomainLabel}
+				          </span>
+				        </div>
+				      </div>
+				    ) : null}
 
 				    <div className="block lg:hidden mb-4">
-				      <div className="flex items-center justify-center">
-				        <PortfolioChart
-				          data={chartSectors}
-				          totalValue={chartTotalAssets.toString()}
-				          isLoading={checkingProtocols.length > 0 || isRefreshing}
-				        />
-				      </div>
+				      <div className="flex flex-col items-center justify-center">
+                <div ref={mobileChartRef} className="flex items-center justify-center pr-4">
+                  <PortfolioChart
+                    data={chartSectors}
+                    totalValue={chartTotalAssets.toString()}
+                    isLoading={checkingProtocols.length > 0 || isRefreshing}
+                  />
+                </div>
+                {showChartDownload ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void downloadPortfolioChartPng()}
+                    className="mt-3 gap-2 touch-manipulation min-h-10 px-4"
+                    title="Save chart as PNG"
+                    aria-label="Save chart as PNG"
+                  >
+                    <ImageDown className="h-4 w-4 shrink-0" />
+                    <span className="text-sm font-medium">Save PNG</span>
+                  </Button>
+                ) : null}
+              </div>
 			      </div>
 
 				    <div className="flex flex-col lg:flex-row gap-4">
 				      <div className="flex-1">
                         <div className="mt-2 space-y-4">
+                          {(resolvedAptosAddress || isTrackerMode) ? (
                           <PortfolioPageCard
                             totalValue={totalAssets.toString()}
                             tokens={tokens}
@@ -423,16 +615,29 @@ export default function PortfolioPage() {
                             isRefreshing={isRefreshing}
                             hideSmallAssets={hideSmallAssets}
                             onHideSmallAssetsChange={setHideSmallAssets}
-                            walletAddress={resolvedAddress}
-                            explorerUrl={resolvedAddress ? `https://explorer.aptoslabs.com/account/${resolvedAddress}` : undefined}
+                            walletAddress={resolvedAptosAddress}
+                            explorerUrl={
+                              resolvedAptosAddress
+                                ? `https://explorer.aptoslabs.com/account/${resolvedAptosAddress}`
+                                : ""
+                            }
+                            addressBarEditable={true}
+                            addressDraft={aptosDraft}
+                            onAddressDraftChange={setAptosDraft}
+                            onAddressApply={applyAptosFromField}
+                            addressPlaceholder={aptosBarPlaceholder}
+                            addressApplyLabel="Load portfolio for this Aptos address or domain"
+                            addressFieldError={aptosFieldError}
                           />
+                          ) : null}
                           {checkingProtocols.length > 0 && (
                             <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
                               <span className="whitespace-nowrap">Checking positions on</span>
                               <div className="flex items-center gap-1">
                                 {checkingProtocols.map((name) => {
                                   const proto = getProtocolByName(name);
-                                  const logo = proto?.logoUrl || "/favicon.ico";
+                                  const logo =
+                                    name === "Kamino" ? "/protocol_ico/kamino.png" : proto?.logoUrl || "/favicon.ico";
                                   return (
                                     <ProtocolIcon
                                       key={name}
@@ -446,7 +651,7 @@ export default function PortfolioPage() {
                               </div>
                             </div>
                           )}
-                          {[
+                          {resolvedAptosAddress ? [
                             {
 					          component: HyperionPositionsList,
 					          value: hyperionValue,
@@ -548,7 +753,7 @@ export default function PortfolioPage() {
                           .map(({ component: Component, name }) => (
                             <Component
                               key={name}
-                              address={resolvedAddress ?? ""}
+                              address={resolvedAptosAddress ?? ""}
                               walletTokens={tokens}
                               refreshKey={refreshKey}
 						      showManageButton={false}
@@ -576,7 +781,7 @@ export default function PortfolioPage() {
                                 setCheckingProtocols((prev) => prev.filter((p) => p !== name))
                               }
                             />
-                          ))}
+                          )) : null}
                         </div>
 				      </div>
                     </div>
@@ -584,51 +789,66 @@ export default function PortfolioPage() {
                   ) : (
                     <div className="mt-4 p-4 bg-muted rounded-lg">
                       <p className="text-sm text-muted-foreground">
-                        Enter a valid Aptos address to view portfolio
+                        Enter a valid Aptos or Solana address or domain to view portfolio
                       </p>
                     </div>
                   )}
-                  {/* Solana должна отображаться независимо от Aptos-адреса */}
-                  {solanaAddress && (
+                  {/* Solana: поле адреса и в трекере без кошелька */}
+                  {(isTrackerMode || solanaAddress) && (
                     <div className="space-y-2 mt-6">
-                      <div className="w-full">
-                        <div className="flex h-8 items-center justify-between rounded-md border px-3 py-0">
-                          <span className="font-mono text-sm truncate">{formatAddress(solanaAddress)}</span>
-                          <div className="flex items-center gap-1">
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => window.open(`https://solscan.io/account/${solanaAddress}`, "_blank")}
-                              className="h-8 w-8 p-0"
-                              title="View on Solscan"
-                            >
-                              <ExternalLink className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => navigator.clipboard.writeText(solanaAddress)}
-                              className="h-8 w-8 p-0"
-                              title="Copy address"
-                            >
-                              <Copy className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
+                      <PortfolioWalletAddressBar
+                        resolvedAddress={solanaAddress ?? ""}
+                        explorerUrl={
+                          solanaAddress ? `https://solscan.io/account/${solanaAddress}` : ""
+                        }
+                        explorerOpenLabel="View on Solscan"
+                        editable={true}
+                        draft={solanaDraft}
+                        onDraftChange={setSolanaDraft}
+                        onApply={() => void applySolanaFromField()}
+                        placeholder={solanaBarPlaceholder}
+                        applyLabel="Load portfolio for this Solana address"
+                      />
+                      {solanaFieldError ? (
+                        <p className="text-sm text-destructive px-1">{solanaFieldError}</p>
+                      ) : null}
                       <SolanaWalletCard
                         tokens={solanaTokens}
                         totalValueUsd={solanaTotalValue}
                         onRefresh={refreshSolana}
                         isRefreshing={isSolanaLoading}
                         hideSmallAssets={hideSmallAssets}
+                        onHideSmallAssetsChange={setHideSmallAssets}
                       />
-                      <JupiterPositionsList
-                        address={solanaAddress}
-                        showManageButton={false}
-                        onPositionsValueChange={handleJupiterValueChange}
-                      />
-                      <SolanaSignMessageButton />
+                      {[
+                        {
+                          component: JupiterPositionsList,
+                          name: "Jupiter" as const,
+                          value: jupiterValue,
+                          onValue: handleJupiterValueChange,
+                        },
+                        {
+                          component: KaminoPositionsList,
+                          name: "Kamino" as const,
+                          value: kaminoValue,
+                          onValue: handleKaminoValueChange,
+                        },
+                      ]
+                        .sort((a, b) => b.value - a.value)
+                        .map(({ component: SolanaProtocol, name, onValue }) => (
+                          <SolanaProtocol
+                            key={name}
+                            address={solanaProtocolsAddress ?? undefined}
+                            showManageButton={false}
+                            onPositionsValueChange={onValue}
+                            onPositionsCheckComplete={() =>
+                              setCheckingProtocols((prev) => prev.filter((p) => p !== name))
+                            }
+                          />
+                        ))}
+                      {solanaManual === null && !solanaUrlAddress && solanaAddress ? (
+                        <SolanaSignMessageButton />
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -641,13 +861,36 @@ export default function PortfolioPage() {
           <div className="w-full">
 
 			<div className="hidden lg:block mb-4 mt-17">
-			  <div className="h-[500px] flex items-center justify-center to-slate-100 dark:from-slate-900 dark:to-slate-800 rounded p-8">
-				<PortfolioChart
-				  data={chartSectors}
-				  totalValue={chartTotalAssets.toString()}
-				  isLoading={checkingProtocols.length > 0 || isRefreshing}
-				/>
-		      </div>
+			  <div className="h-[500px] flex flex-col items-center justify-center to-slate-100 dark:from-slate-900 dark:to-slate-800 rounded p-8">
+          <div ref={desktopChartRef} className="flex items-center justify-center pr-4">
+            <PortfolioChart
+              data={chartSectors}
+              totalValue={chartTotalAssets.toString()}
+              isLoading={checkingProtocols.length > 0 || isRefreshing}
+            />
+          </div>
+          {showChartDownload ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void downloadPortfolioChartPng()}
+                  className={cn(
+                    "mt-2 h-4 w-4 p-0 text-muted-foreground hover:bg-transparent hover:text-foreground/60 opacity-80 transition-colors"
+                  )}
+                  aria-label="Save chart as PNG"
+                >
+                  <ImageDown className="h-3 w-3" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>Save chart as PNG</p>
+              </TooltipContent>
+            </Tooltip>
+          ) : null}
+        </div>
 
 			</div>
 
@@ -674,6 +917,7 @@ export default function PortfolioPage() {
           return Number.isFinite(depositValue) && depositValue >= 0 ? depositValue : undefined;
         })()}
       />
+	  </PortfolioAmountsPrivacyProvider>
     </CollapsibleProvider>
   );
 }

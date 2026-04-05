@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { normalizeAddress } from '@/lib/utils/addressNormalization';
+import { getBaseUrl } from '@/lib/utils/config';
 import { PanoraPricesService } from '@/lib/services/panora/prices';
 
 const THALA_FARMING_ADDRESS = '0xcb8365dc9f7ac6283169598aaad7db9c7b12f52da127007f37fa4565170ff59c';
@@ -232,7 +233,7 @@ async function getPendingRewardInfo(
   return null;
 }
 
-async function getTokenInfoFromAPIOnly(address: string): Promise<{
+async function getTokenInfoFromAPIOnly(address: string, requestOrigin: string): Promise<{
   symbol: string;
   name: string;
   decimals: number;
@@ -307,10 +308,7 @@ async function getTokenInfoFromAPIOnly(address: string): Promise<{
   // 3. Fallback: Try our internal API (which checks tokenList as last resort)
   // Only use this if external APIs failed, to avoid "Unknown" tokens
   try {
-    const baseUrl = typeof window === 'undefined' 
-      ? (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000')
-      : '';
-    const internalApiUrl = `${baseUrl}/api/tokens/info?address=${encodeURIComponent(address)}`;
+    const internalApiUrl = `${getBaseUrl()}/api/tokens/info?address=${encodeURIComponent(address)}`;
     const internalResponse = await fetch(internalApiUrl);
     
     if (internalResponse.ok) {
@@ -374,6 +372,8 @@ export async function GET(request: NextRequest) {
     if (!address) {
       return NextResponse.json({ error: 'Address parameter is required' }, { status: 400 });
     }
+
+    const requestOrigin = new URL(request.url).origin;
 
     console.log('🔍 Thala userPositions API called with address:', address);
     console.log('🔑 APTOS_API_KEY exists:', !!APTOS_API_KEY);
@@ -482,8 +482,8 @@ export async function GET(request: NextRequest) {
 
       // Get token metadata from API only (no tokenList.json)
       const [token0Info, token1Info] = await Promise.all([
-        token0Address ? getTokenInfoFromAPIOnly(token0Address) : Promise.resolve(null),
-        token1Address ? getTokenInfoFromAPIOnly(token1Address) : Promise.resolve(null)
+        token0Address ? getTokenInfoFromAPIOnly(token0Address, requestOrigin) : Promise.resolve(null),
+        token1Address ? getTokenInfoFromAPIOnly(token1Address, requestOrigin) : Promise.resolve(null)
       ]);
 
       let rawAmount0 = '0';
@@ -557,7 +557,7 @@ export async function GET(request: NextRequest) {
           
           // Get token metadata (symbol, name, decimals, logoUrl) from API
           const rewardTokenInfo = rewardMetadataAddress
-            ? await getTokenInfoFromAPIOnly(rewardMetadataAddress)
+            ? await getTokenInfoFromAPIOnly(rewardMetadataAddress, requestOrigin)
             : null;
           
           if (rewardTokenInfo) {
@@ -702,8 +702,8 @@ export async function GET(request: NextRequest) {
 
         // Get token metadata from API only (no tokenList.json)
         const [token0Info, token1Info] = await Promise.all([
-          token0Address ? getTokenInfoFromAPIOnly(token0Address) : Promise.resolve(null),
-          token1Address ? getTokenInfoFromAPIOnly(token1Address) : Promise.resolve(null)
+          token0Address ? getTokenInfoFromAPIOnly(token0Address, requestOrigin) : Promise.resolve(null),
+          token1Address ? getTokenInfoFromAPIOnly(token1Address, requestOrigin) : Promise.resolve(null)
         ]);
 
         let rawAmount0 = '0';

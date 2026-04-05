@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import Image from 'next/image';
 import { X } from 'lucide-react';
 import { useWallet } from '@aptos-labs/wallet-adapter-react';
+import { useWalletData } from '@/contexts/WalletContext';
 import {
   Dialog,
   DialogContent,
@@ -44,6 +45,25 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import {
+  HEDGE_FA,
+  buildUnwindHedgePrefillFromClosePosition,
+  formatBaseAmountForSwap,
+  formatUsdcAmountForSwap,
+  hasEnoughBaseForHedge,
+  hasEnoughUsdcForHedge,
+  hedgeBaseFaFromSymbol,
+  parseMarketBaseSymbol,
+} from '@/lib/protocols/decibel/hedgePrefill';
+import { SwapModal, type SwapModalPrefill } from '@/components/ui/swap-modal';
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 export interface DecibelOpenPositionMarket {
   marketAddr: string;
@@ -171,6 +191,7 @@ export function DecibelOpenPositionModal({
   onMarketChange,
 }: DecibelOpenPositionModalProps) {
   const { account, signAndSubmitTransaction } = useWallet();
+  const { tokens: walletTokens } = useWalletData();
   const { toast } = useToast();
   const [chartInterval, setChartInterval] = useState<string>('1h');
   const [side, setSide] = useState<'long' | 'short'>('long');
@@ -178,6 +199,17 @@ export function DecibelOpenPositionModal({
   const [leverage, setLeverage] = useState<number>(1);
   const [orderSizeUsd, setOrderSizeUsd] = useState('');
   const [openLimitPrice, setOpenLimitPrice] = useState('');
+  const [shortHedgeHint, setShortHedgeHint] = useState<{
+    sizeUsd: number;
+    baseLabel: string;
+    toFa: string;
+  } | null>(null);
+  const [hedgeSwapOpen, setHedgeSwapOpen] = useState(false);
+  const [hedgeSwapPrefill, setHedgeSwapPrefill] = useState<SwapModalPrefill | null>(null);
+  /** Swap modal copy: after opening short (buy hedge) vs from close dialog (sell spot). */
+  const [hedgeSwapFromCloseDialog, setHedgeSwapFromCloseDialog] = useState(false);
+  const [postCloseHedgePromptOpen, setPostCloseHedgePromptOpen] = useState(false);
+  const [postCloseUnwindPrefill, setPostCloseUnwindPrefill] = useState<SwapModalPrefill | null>(null);
   const [availableToTrade, setAvailableToTrade] = useState<number | null>(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [builderConfig, setBuilderConfig] = useState<{
@@ -438,6 +470,33 @@ export function DecibelOpenPositionModal({
     Number.isFinite(openLimitPriceNum) &&
     openLimitPriceNum > 0;
 
+  const modalShortHedgeUsdcOk = useMemo(() => {
+    if (!shortHedgeHint) return false;
+    return hasEnoughUsdcForHedge(walletTokens, shortHedgeHint.sizeUsd);
+  }, [shortHedgeHint, walletTokens]);
+
+  const closeShortHedgeHint = useMemo(() => {
+    const pos = closeDialogPosition;
+    if (!pos || !market || pos.size >= 0) return null;
+    const baseSym = parseMarketBaseSymbol(market.marketName);
+    const baseFa = hedgeBaseFaFromSymbol(baseSym);
+    if (!baseFa) return null;
+    const absSz = Math.abs(pos.size);
+    const baseLabel = baseSym === 'BTC' || baseSym === 'WBTC' ? 'WBTC' : baseSym;
+    const enoughBase = hasEnoughBaseForHedge(walletTokens, baseFa, absSz);
+    return { baseLabel, baseFa, absSz, enoughBase };
+  }, [closeDialogPosition, market, walletTokens]);
+
+  useEffect(() => {
+    if (!open) {
+      setShortHedgeHint(null);
+      setHedgeSwapOpen(false);
+      setHedgeSwapPrefill(null);
+      setPostCloseHedgePromptOpen(false);
+      setPostCloseUnwindPrefill(null);
+    }
+  }, [open]);
+
   const handlePlaceOrder = useCallback(async () => {
     if (
       !market ||
@@ -613,6 +672,26 @@ export function DecibelOpenPositionModal({
           </ToastAction>
         ) : undefined,
       });
+      if (
+        side === 'short' &&
+        Number.isFinite(orderSizeNum) &&
+        orderSizeNum > 0 &&
+        market
+      ) {
+        const baseSym = parseMarketBaseSymbol(market.marketName);
+        const toFa = hedgeBaseFaFromSymbol(baseSym);
+        if (toFa) {
+          setShortHedgeHint({
+            sizeUsd: orderSizeNum,
+            baseLabel: baseSym === 'BTC' || baseSym === 'WBTC' ? 'WBTC' : baseSym,
+            toFa,
+          });
+        } else {
+          setShortHedgeHint(null);
+        }
+      } else {
+        setShortHedgeHint(null);
+      }
       setOrderSizeUsd('');
       setOpenLimitPrice('');
       fetchOverview();
@@ -735,7 +814,21 @@ export function DecibelOpenPositionModal({
           </ToastAction>
         ) : undefined,
       });
+      let unwindAfterMarketClose: ReturnType<typeof buildUnwindHedgePrefillFromClosePosition> = null;
+      if (!isLimit && pos.size < 0 && market) {
+        let baseSym = parseMarketBaseSymbol(market.marketName);
+        if (!baseSym) {
+          const first = market.marketName.split(/[/\-_]/)[0]?.trim();
+          baseSym = first ? first.toUpperCase() : '';
+        }
+        const label = baseSym ? `${baseSym}/USD` : market.marketName;
+        unwindAfterMarketClose = buildUnwindHedgePrefillFromClosePosition(pos, label);
+      }
       setCloseDialogPosition(null);
+      if (unwindAfterMarketClose) {
+        setPostCloseUnwindPrefill(unwindAfterMarketClose.prefill);
+        setPostCloseHedgePromptOpen(true);
+      }
       fetchOverview();
       setTimeout(() => {
         fetchOverview();
@@ -1233,6 +1326,47 @@ export function DecibelOpenPositionModal({
                   )}
                 </p>
               )}
+              {shortHedgeHint && (
+                <div className="rounded-md border bg-muted/30 p-3 space-y-2 text-left">
+                  <p className="text-sm font-medium">Spot delta hedge</p>
+                  <p className="text-xs text-muted-foreground">
+                    Optional: buy ~{formatNumber(shortHedgeHint.sizeUsd, 2)} USDC notional of{' '}
+                    {shortHedgeHint.baseLabel} to offset this short.
+                  </p>
+                  {modalShortHedgeUsdcOk ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => {
+                        setHedgeSwapFromCloseDialog(false);
+                        setHedgeSwapPrefill({
+                          fromFaAddress: HEDGE_FA.USDC,
+                          toFaAddress: shortHedgeHint.toFa,
+                          amount: formatUsdcAmountForSwap(shortHedgeHint.sizeUsd),
+                        });
+                        setHedgeSwapOpen(true);
+                      }}
+                    >
+                      Open swap (USDC → {shortHedgeHint.baseLabel})
+                    </Button>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Add USDC to your wallet to hedge this short.
+                    </p>
+                  )}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="w-full"
+                    onClick={() => setShortHedgeHint(null)}
+                  >
+                    Dismiss
+                  </Button>
+                </div>
+              )}
               {/* Open positions and orders for this market (compact) */}
               {(marketPositions.length > 0 || marketOrders.length > 0 || positionsOrdersLoading) && (
                 <div className="pt-2 mt-2 border-t border-border space-y-1.5">
@@ -1334,6 +1468,7 @@ export function DecibelOpenPositionModal({
           setCloseDialogPosition(null);
           setCloseMode('market');
           setCloseLimitPrice('');
+          setHedgeSwapFromCloseDialog(false);
         }
       }}
     >
@@ -1447,6 +1582,38 @@ export function DecibelOpenPositionModal({
             </DialogDescription>
           )}
         </DialogHeader>
+        {closeShortHedgeHint && (
+          <div className="rounded-md border bg-muted/30 p-3 space-y-2">
+            <p className="text-xs text-muted-foreground">
+              If you hold spot to hedge this short, you can sell ~{formatSizeShort(closeShortHedgeHint.absSz)}{' '}
+              {closeShortHedgeHint.baseLabel} for USDC (same size as this position).
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setHedgeSwapFromCloseDialog(true);
+                  setHedgeSwapPrefill({
+                    fromFaAddress: closeShortHedgeHint.baseFa,
+                    toFaAddress: HEDGE_FA.USDC,
+                    amount: formatBaseAmountForSwap(closeShortHedgeHint.absSz),
+                  });
+                  setHedgeSwapOpen(true);
+                }}
+              >
+                Open swap
+              </Button>
+              {!closeShortHedgeHint.enoughBase && (
+                <span className="text-xs text-muted-foreground">
+                  Acquire enough {closeShortHedgeHint.baseLabel} on your wallet to sell into USDC and unwind a spot
+                  hedge.
+                </span>
+              )}
+            </div>
+          </div>
+        )}
         <DialogFooter>
           <Button
             variant="outline"
@@ -1484,6 +1651,64 @@ export function DecibelOpenPositionModal({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    <AlertDialog
+      open={postCloseHedgePromptOpen}
+      onOpenChange={(open) => {
+        setPostCloseHedgePromptOpen(open);
+        if (!open) setPostCloseUnwindPrefill(null);
+      }}
+    >
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Unwind spot hedge?</AlertDialogTitle>
+          <AlertDialogDescription>
+            Your short was closed at market. If you still hold the base asset as a spot hedge, you can swap it for USDC
+            now.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setPostCloseUnwindPrefill(null);
+              setPostCloseHedgePromptOpen(false);
+            }}
+          >
+            Not now
+          </Button>
+          <Button
+            type="button"
+            onClick={() => {
+              if (postCloseUnwindPrefill) {
+                setHedgeSwapFromCloseDialog(true);
+                setHedgeSwapPrefill(postCloseUnwindPrefill);
+                setHedgeSwapOpen(true);
+              }
+              setPostCloseUnwindPrefill(null);
+              setPostCloseHedgePromptOpen(false);
+            }}
+          >
+            Open swap
+          </Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    <SwapModal
+      isOpen={hedgeSwapOpen}
+      onClose={() => {
+        setHedgeSwapOpen(false);
+        setHedgeSwapPrefill(null);
+        setHedgeSwapFromCloseDialog(false);
+      }}
+      prefill={hedgeSwapPrefill}
+      variantTitle={hedgeSwapFromCloseDialog ? 'Unwind spot hedge' : 'Hedge short (spot)'}
+      variantDescription={
+        hedgeSwapFromCloseDialog
+          ? 'Sell base asset for USDC to align with closing your short (Panora gasless swap).'
+          : 'Swap USDC for the base asset to approximate a delta-neutral hedge (Panora gasless swap).'
+      }
+    />
     </>
   );
 }

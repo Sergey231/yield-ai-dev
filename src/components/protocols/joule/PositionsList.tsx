@@ -9,6 +9,7 @@ import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import Image from "next/image";
 import { ManagePositionsButton } from "../ManagePositionsButton";
 import { useCollapsible } from "@/contexts/CollapsibleContext";
+import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
 
 interface PositionsListProps {
   address?: string;
@@ -20,6 +21,7 @@ interface PositionsListProps {
 }
 
 export function PositionsList({ address, onPositionsValueChange, mockData, refreshKey, onPositionsCheckComplete, showManageButton=true }: PositionsListProps) {
+  const { formatUsd } = usePortfolioAmountsPrivacy();
   const { account } = useWallet();
   const [positions, setPositions] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -120,7 +122,7 @@ export function PositionsList({ address, onPositionsValueChange, mockData, refre
             <CardTitle className="text-lg">Joule</CardTitle>
           </div>
           <div className="flex items-center gap-2">
-            <div className="text-lg">${totalValue.toFixed(2)}</div>
+            <div className="text-lg">{formatUsd(totalValue)}</div>
             <ChevronDown className={cn(
               "h-5 w-5 transition-transform",
               isExpanded('joule') ? "transform rotate-0" : "transform -rotate-90"

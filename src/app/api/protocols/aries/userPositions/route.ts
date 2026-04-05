@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { getBaseUrl } from '@/lib/utils/config';
 
 /**
  * @swagger
@@ -68,8 +69,7 @@ export async function GET(request: Request) {
     }
 
     const externalApiUrl = `https://yield-a.vercel.app/api/aries/userPositions?address=${address}`;
-    // Get base URL from environment or use default
-    const baseUrl = process.env.NEXT_PUBLIC_API_URL || process.env.VERCEL_URL || 'http://localhost:3000';
+    const baseUrl = getBaseUrl();
     
     const response = await fetch(externalApiUrl, {
       headers: {

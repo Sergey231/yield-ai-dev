@@ -1,4 +1,5 @@
 import { TokenPrice } from '@/lib/types/panora';
+import { getClientBaseUrl } from '@/lib/utils/config';
 
 interface CachedPrices {
   data: TokenPrice[];
@@ -48,18 +49,29 @@ export class PanoraPricesService {
         queryParams.append('tokenAddress', addresses.join(','));
       }
 
-      const baseUrl = process.env.NEXT_PUBLIC_API_URL;
-      if (!baseUrl) {
-        throw new Error('NEXT_PUBLIC_API_URL is not set');
+      let data;
+      if (typeof window === 'undefined') {
+        const panoraUrl = process.env.PANORA_API_URL || 'https://api.panora.exchange';
+        const response = await fetch(`${panoraUrl}/prices?${queryParams.toString()}`, {
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': process.env.PANORA_API_KEY || '',
+          }
+        });
+        if (!response.ok) {
+          throw new Error(`Failed to fetch prices from Panora: ${response.statusText}`);
+        }
+        const panoraData = await response.json();
+        data = { data: panoraData };
+      } else {
+        const baseUrl = getClientBaseUrl();
+        const response = await fetch(`${baseUrl}/api/panora/tokenPrices?${queryParams.toString()}`);
+        
+        if (!response.ok) {
+          throw new Error(`Failed to fetch prices from local API: ${response.statusText}`);
+        }
+        data = await response.json();
       }
-
-      const response = await fetch(`${baseUrl}/api/panora/tokenPrices?${queryParams.toString()}`);
-      
-      if (!response.ok) {
-        throw new Error('Failed to fetch prices');
-      }
-
-      const data = await response.json();
       console.log('Panora API response:', data);
       
       // Cache result

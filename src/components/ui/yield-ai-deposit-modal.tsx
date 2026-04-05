@@ -23,9 +23,11 @@ import { normalizeAddress } from "@/lib/utils/addressNormalization";
 import { USDC_FA_METADATA_MAINNET } from "@/lib/constants/yieldAiVault";
 import { buildVaultDepositPayload } from "@/lib/protocols/yield-ai/vaultDeposit";
 import { showTransactionSuccessToast } from "@/components/ui/transaction-toast";
+import { useToast } from "@/components/ui/use-toast";
 
 const USDC_LOGO = "https://assets.panora.exchange/tokens/aptos/USDC.svg";
 const USDC_DECIMALS = 6;
+const MIN_DEPOSIT_USDC = 0.1;
 
 interface YieldAIDepositModalProps {
   isOpen: boolean;
@@ -47,6 +49,7 @@ export function YieldAIDepositModal({
 }: YieldAIDepositModalProps) {
   const { account, signAndSubmitTransaction } = useWallet();
   const { tokens: walletTokens, refreshPortfolio } = useWalletData();
+  const { toast } = useToast();
   const protocol = getProtocolByName("AI agent");
   const [isLoading, setIsLoading] = useState(false);
 
@@ -83,6 +86,9 @@ export function YieldAIDepositModal({
     decimals,
   });
 
+  const minDepositBaseUnits = BigInt(Math.round(MIN_DEPOSIT_USDC * Math.pow(10, decimals)));
+  const isBelowMinimum = amount > BigInt(0) && amount < minDepositBaseUnits;
+
   useEffect(() => {
     if (isOpen) {
       refreshPortfolio?.();
@@ -90,7 +96,7 @@ export function YieldAIDepositModal({
   }, [isOpen, refreshPortfolio]);
 
   const handleDeposit = async () => {
-    if (!isValid || amount === BigInt(0)) return;
+    if (!isValid || amount === BigInt(0) || isBelowMinimum) return;
     try {
       setIsLoading(true);
       if (onDeposit) {
@@ -119,6 +125,10 @@ export function YieldAIDepositModal({
         showTransactionSuccessToast({
           hash: result.hash,
           title: "Deposit to safe successful!",
+        });
+        toast({
+          title: "Thanks for your deposit",
+          description: "The AI agent will rebalance your funds every hour.",
         });
         window.dispatchEvent(
           new CustomEvent("refreshPositions", { detail: { protocol: "yield-ai" } })
@@ -228,6 +238,12 @@ export function YieldAIDepositModal({
             </p>
           )}
 
+          {isBelowMinimum && (
+            <p className="text-sm text-red-500">
+              Minimum deposit is {MIN_DEPOSIT_USDC} {symbol}.
+            </p>
+          )}
+
           <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={setHalf}>
               Half
@@ -255,6 +271,7 @@ export function YieldAIDepositModal({
               !isValid ||
               isLoading ||
               amount === BigInt(0) ||
+              isBelowMinimum ||
               (!onDeposit && (!safeAddress || !signAndSubmitTransaction))
             }
           >

@@ -11,6 +11,7 @@ import { ManagePositionsButton } from "../ManagePositionsButton";
 import { useCollapsible } from "@/contexts/CollapsibleContext";
 import tokenList from "@/lib/data/tokenList.json";
 import { getMesoTokenByAddress } from "@/lib/protocols/meso/tokens";
+import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
 
 interface PositionsListProps {
   address?: string;
@@ -102,6 +103,7 @@ function getTokenInfo(tokenAddress: string) {
 }
 
 export function PositionsList({ address, onPositionsValueChange, refreshKey, onPositionsCheckComplete, showManageButton=true }: PositionsListProps) {
+  const { formatUsd, maskBalance } = usePortfolioAmountsPrivacy();
   const { account } = useWallet();
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(false);
@@ -215,7 +217,7 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
             <CardTitle className="text-lg">Meso Finance</CardTitle>
           </div>
           <div className="flex items-center gap-2">
-            <div className="text-lg">${(totalValue + (rewards?.totalUsd || 0)).toFixed(2)}</div>
+            <div className="text-lg">{formatUsd(totalValue + (rewards?.totalUsd || 0))}</div>
             <ChevronDown className={cn(
               "h-5 w-5 transition-transform",
               isExpanded('meso') ? "transform rotate-0" : "transform -rotate-90"
@@ -260,18 +262,20 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                             </div>
                           )}
                         </div>
-                       <div className="text-xs text-muted-foreground">${amount > 0 ? (value / amount).toFixed(2) : '0.00'}</div>
+                       <div className="text-xs text-muted-foreground">
+                         {formatUsd(amount > 0 ? value / amount : 0)}
+                       </div>
                       </div>
                     </div>
                     <div className="text-right">
                       <div className={cn(
                         "text-sm font-medium",
                         position.type === 'debt' && "text-red-500"
-                      )}>${value.toFixed(2)}</div>
+                      )}>{formatUsd(value)}</div>
                       <div className={cn(
                         "text-xs",
                         position.type === 'debt' ? "text-red-400" : "text-muted-foreground"
-                      )}>{amount.toFixed(4)}</div>
+                      )}>{maskBalance(amount.toFixed(4))}</div>
                     </div>
                   </div>
                 </div>
@@ -285,7 +289,7 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                   <TooltipTrigger asChild>
                     <div className="flex items-center justify-between pt-2 border-t border-gray-200 cursor-help">
                       <span className="text-sm text-muted-foreground">💰 Total rewards:</span>
-                      <span className="text-sm font-medium">${rewards.totalUsd.toFixed(2)}</span>
+                      <span className="text-sm font-medium">{formatUsd(rewards.totalUsd)}</span>
                     </div>
                   </TooltipTrigger>
                   <TooltipContent>
@@ -295,7 +299,7 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                         .sort((a, b) => b.usdValue - a.usdValue)
                         .map((r, idx) => (
                           <div key={idx} className="text-xs">
-                            {r.symbol}: {r.amount.toFixed(6)} (${r.usdValue.toFixed(2)})
+                            {r.symbol}: {maskBalance(r.amount.toFixed(6))} ({formatUsd(r.usdValue)})
                           </div>
                         ))}
                     </div>

@@ -10,13 +10,12 @@ import {
   USDC_DEPOSIT_THRESHOLD_BASE_UNITS,
   APT_SWAP_RESERVE_OCTAS,
   USDC_DEPOSIT_RESERVE_BASE_UNITS,
-  APT_REWARD_ID,
-  APT_FARMING_IDENTIFIER,
   SWAP_FEE_TIER,
   SWAP_AMOUNT_OUT_MIN,
   SWAP_SQRT_PRICE_LIMIT,
   SWAP_DEADLINE_SECONDS,
 } from "@/lib/constants/yieldAiVault";
+import { fetchMoarAptRewardsAboveThreshold } from "@/lib/protocols/moar/moarRewardsForWorker";
 import {
   executeClaimApt,
   executeSwapAptToUsdc,
@@ -54,7 +53,7 @@ function toBigIntSafe(v: any): bigint {
     if (typeof v === "number") return BigInt(Math.trunc(v));
     return BigInt(String(v));
   } catch {
-    return 0n;
+    return BigInt(0);
   }
 }
 
@@ -209,7 +208,15 @@ export type YieldAiVaultCronRunResult = {
   maxSafesProcessedPerRun: number;
   maxTxPerRun: number;
   processedSafes: number;
+  /** Total executed or dry-run simulated vault txs (claim + swap + deposit). */
   txCount: number;
+  /** Breakdown of `txCount` (same for dry run and live). */
+  txCountByKind: {
+    claim: number;
+    swap: number;
+    deposit: number;
+  };
+  /** Distinct safes successfully claimed (live only; dry run keeps 0). */
   claimedSafes: number;
   swappedSafes: number;
   depositedSafes: number;
@@ -261,6 +268,9 @@ export async function runYieldAiVaultCronPass(options: {
 
   let processedSafes = 0;
   let txCount = 0;
+  let txCountClaim = 0;
+  let txCountSwap = 0;
+  let txCountDeposit = 0;
   let claimedSafes = 0;
   let swappedSafes = 0;
   let depositedSafes = 0;
@@ -298,38 +308,57 @@ export async function runYieldAiVaultCronPass(options: {
       let aptBalance = item.aptBalance;
       let usdcBalance = item.usdcBalance;
 
-      // Step A: claim APT
-      if (aptBalance > APT_CLAIM_THRESHOLD_OCTAS && txCount < maxTxPerRun) {
+      // Step A: claim Moar APT farming rewards only (claimable > 0.1 APT per line), via GET /api/protocols/moar/rewards
+      const aptClaimLines = await fetchMoarAptRewardsAboveThreshold(
+        safeAddress,
+        APT_CLAIM_THRESHOLD_OCTAS
+      );
+      if (aptClaimLines.length > 0) {
+        console.log("[Yield AI] Moar APT rewards eligible for claim:", {
+          runId,
+          safeAddress,
+          lines: aptClaimLines.length,
+        });
+      }
+      for (const line of aptClaimLines) {
+        if (txCount >= maxTxPerRun) break;
         try {
-          console.log("[Yield AI] claim attempt:", { runId, safeAddress });
+          console.log("[Yield AI] claim attempt (Moar APT):", {
+            runId,
+            safeAddress,
+            reward_id: line.reward_id,
+            farming_identifier: line.farming_identifier,
+            claimable_amount: line.claimable_amount,
+          });
           const result = await executeClaimApt({
             safeAddress,
             adapterAddress: MOAR_ADAPTER_ADDRESS_MAINNET,
-            rewardId: APT_REWARD_ID,
-            farmingIdentifier: APT_FARMING_IDENTIFIER,
+            rewardId: line.reward_id,
+            farmingIdentifier: line.farming_identifier,
             dryRun,
           });
-
           txCount += 1;
+          txCountClaim += 1;
           if (!dryRun && result.hash) txHashes.claim.push(result.hash);
           if (!dryRun) claimedSafes += 1;
-
-          // Re-read APT after claim to decide swap amount.
-          aptBalance = await getAptBalanceBaseUnits(safeAddress);
         } catch (e) {
-          console.error("[Yield AI] claim failed, skipping safe:", {
+          console.error("[Yield AI] claim failed for reward line (continuing):", {
             runId,
             safeAddress,
+            reward_id: line.reward_id,
+            farming_identifier: line.farming_identifier,
             error: e instanceof Error ? e.message : String(e),
           });
-          continue; // Skip to next safe
         }
+      }
+      if (aptClaimLines.length > 0) {
+        aptBalance = await getAptBalanceBaseUnits(safeAddress);
       }
 
       // Step B: swap APT -> USDC
       if (aptBalance > APT_CLAIM_THRESHOLD_OCTAS && txCount < maxTxPerRun) {
-        const amountIn = aptBalance > aptSwapReserve ? aptBalance - aptSwapReserve : 0n;
-        if (amountIn > 0n) {
+        const amountIn = aptBalance > aptSwapReserve ? aptBalance - aptSwapReserve : BigInt(0);
+        if (amountIn > BigInt(0)) {
           try {
             console.log("[Yield AI] swap attempt:", { runId, safeAddress, amountIn });
             const deadline = BigInt(Math.floor(Date.now() / 1000)) + SWAP_DEADLINE_SECONDS;
@@ -346,6 +375,7 @@ export async function runYieldAiVaultCronPass(options: {
             });
 
             txCount += 1;
+            txCountSwap += 1;
             if (!dryRun && result.hash) txHashes.swap.push(result.hash);
             if (!dryRun) swappedSafes += 1;
 
@@ -365,8 +395,8 @@ export async function runYieldAiVaultCronPass(options: {
       // Step C: deposit into Moar
       if (usdcBalance > USDC_DEPOSIT_THRESHOLD_BASE_UNITS && txCount < maxTxPerRun) {
         const amountToDeposit =
-          usdcBalance > usdcDepositReserve ? usdcBalance - usdcDepositReserve : 0n;
-        if (amountToDeposit > 0n) {
+          usdcBalance > usdcDepositReserve ? usdcBalance - usdcDepositReserve : BigInt(0);
+        if (amountToDeposit > BigInt(0)) {
           try {
             console.log("[Yield AI] deposit attempt:", { runId, safeAddress, amountToDeposit });
 
@@ -377,6 +407,7 @@ export async function runYieldAiVaultCronPass(options: {
             });
 
             txCount += 1;
+            txCountDeposit += 1;
             if (!dryRun && result.hash) txHashes.deposit.push(result.hash);
             if (!dryRun) depositedSafes += 1;
           } catch (e) {
@@ -398,6 +429,7 @@ export async function runYieldAiVaultCronPass(options: {
     durationMs: endedAtUnixMs - startedAtUnixMs,
     processedSafes,
     txCount,
+    txCountByKind: { claim: txCountClaim, swap: txCountSwap, deposit: txCountDeposit },
     claimedSafes,
     swappedSafes,
     depositedSafes,
@@ -412,6 +444,11 @@ export async function runYieldAiVaultCronPass(options: {
     maxTxPerRun,
     processedSafes,
     txCount,
+    txCountByKind: {
+      claim: txCountClaim,
+      swap: txCountSwap,
+      deposit: txCountDeposit,
+    },
     claimedSafes,
     swappedSafes,
     depositedSafes,

@@ -125,6 +125,8 @@ export const queryKeys = {
       pools: () => ['protocols', 'hyperion', 'pools'] as const,
       userPositions: (address: string) =>
         ['protocols', 'hyperion', 'userPositions', address] as const,
+      rewards: (address: string) =>
+        ['protocols', 'hyperion', 'rewards', address] as const,
       vaultData: (address: string) =>
         ['protocols', 'hyperion', 'vaultData', address] as const,
     },
@@ -176,6 +178,30 @@ export const queryKeys = {
     },
 
     /**
+     * Yield AI protocol specific queries
+     */
+    yieldAi: {
+      safes: (owner: string) => ['protocols', 'yield-ai', 'safes', owner] as const,
+      safeContents: (safeAddress: string) =>
+        ['protocols', 'yield-ai', 'safeContents', safeAddress] as const,
+      safeTokens: (safeAddress: string) =>
+        ['protocols', 'yield-ai', 'safeTokens', safeAddress] as const,
+      depositHistory: (safeAddress: string, currentValue?: number | null) =>
+        ['protocols', 'yield-ai', 'depositHistory', safeAddress, currentValue ?? null] as const,
+    },
+
+    /**
+     * APTree protocol specific queries
+     */
+    aptree: {
+      pools: () => ['protocols', 'aptree', 'pools'] as const,
+      userPositions: (address: string) =>
+        ['protocols', 'aptree', 'userPositions', address] as const,
+      depositHistory: (address: string, assetId?: string, currentValue?: number | null) =>
+        ['protocols', 'aptree', 'depositHistory', address, assetId ?? null, currentValue ?? null] as const,
+    },
+
+    /**
      * Tapp protocol specific queries
      */
     tapp: {
@@ -210,6 +236,17 @@ export const queryKeys = {
     },
 
     /**
+     * Echelon protocol specific queries
+     */
+    echelon: {
+      pools: () => ['protocols', 'echelon', 'pools'] as const,
+      userPositions: (address: string) =>
+        ['protocols', 'echelon', 'userPositions', address] as const,
+      rewards: (address: string) =>
+        ['protocols', 'echelon', 'rewards', address] as const,
+    },
+
+    /**
      * Joule protocol specific queries
      */
     joule: {
@@ -237,8 +274,29 @@ export const queryKeys = {
      * Echo protocol specific queries
      */
     echo: {
+      pools: () => ['protocols', 'echo', 'pools'] as const,
       userPositions: (address: string) =>
         ['protocols', 'echo', 'userPositions', address] as const,
+    },
+
+    /**
+     * Jupiter (Solana) protocol specific queries
+     */
+    jupiter: {
+      pools: () => ['protocols', 'jupiter', 'pools'] as const,
+      userPositions: (address: string) =>
+        ['protocols', 'jupiter', 'userPositions', address] as const,
+    },
+
+    /**
+     * Kamino (Solana) protocol specific queries
+     */
+    kamino: {
+      pools: () => ['protocols', 'kamino', 'pools'] as const,
+      userPositions: (address: string) =>
+        ['protocols', 'kamino', 'userPositions', address] as const,
+      rewards: (address: string) =>
+        ['protocols', 'kamino', 'rewards', address] as const,
     },
   },
 

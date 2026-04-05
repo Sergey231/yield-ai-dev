@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef, memo, useMemo } from "react";
+import { useEffect, useState, memo, useMemo } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { useToast } from "@/components/ui/use-toast";
@@ -14,12 +15,14 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Badge } from "@/components/ui/badge";
 import { Info } from "lucide-react";
 import { filterHyperionVaultTokens, getVaultTokenMapping } from '@/lib/services/hyperion/vaultTokens';
-import { VaultCalculator, VaultData } from '@/lib/services/hyperion/vaultCalculator';
+import { VaultData } from '@/lib/services/hyperion/vaultCalculator';
 import { VaultPosition } from "./VaultPosition";
 import { Token } from '@/lib/types/token';
 import { AptosPortfolioService } from '@/lib/services/aptos/portfolio';
 import { useWithdraw } from "@/lib/hooks/useWithdraw";
 import { ProtocolKey } from "@/lib/transactions/types";
+import { queryKeys } from "@/lib/query/queryKeys";
+import { useHyperionPositions, useHyperionVaultData } from "@/lib/query/hooks/protocols/hyperion";
 
 interface HyperionPositionProps {
   position: any;
@@ -35,6 +38,7 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
   const [loadingPoolDetails, setLoadingPoolDetails] = useState(false);
   const [poolAPR, setPoolAPR] = useState({ feeAPR: 0, farmAPR: 0 });
   const { signAndSubmitTransaction, account } = useWallet();
+  const queryClient = useQueryClient();
   const { toast } = useToast();
 
   // Добавляем уникальный идентификатор компонента
@@ -99,6 +103,13 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
             View in Explorer
           </ToastAction>
         ),
+      });
+      const walletAddress = account.address.toString();
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.hyperion.userPositions(walletAddress),
+      });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.hyperion.rewards(walletAddress),
       });
     } catch (error) {
       toast({ title: "Error", description: "Failed to claim rewards", variant: "destructive" });
@@ -193,6 +204,16 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
             View in Explorer
           </ToastAction>
         ),
+      });
+      const walletAddress = account.address.toString();
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.hyperion.userPositions(walletAddress),
+      });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.hyperion.rewards(walletAddress),
+      });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.hyperion.pools(),
       });
       // Обновляем позиции после успеха
       setTimeout(() => {
@@ -538,134 +559,83 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
 
 export function HyperionPositions() {
   const { account } = useWallet();
-  const [positions, setPositions] = useState<any[]>([]);
+  const queryClient = useQueryClient();
   const [vaultTokens, setVaultTokens] = useState<Token[]>([]);
-  const [vaultData, setVaultData] = useState<VaultData[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [refreshNonce, setRefreshNonce] = useState(0);
   const [showClaimAllModal, setShowClaimAllModal] = useState(false);
   const [showVaultWithdrawModal, setShowVaultWithdrawModal] = useState(false);
   const [selectedVaultToken, setSelectedVaultToken] = useState<Token | null>(null);
   const [selectedVaultData, setSelectedVaultData] = useState<VaultData | null>(null);
   const { withdraw, isLoading: isWithdrawing } = useWithdraw();
+  const walletAddress = account?.address?.toString();
+  const {
+    data: rawPositions = [],
+    isLoading: positionsLoading,
+    error: positionsError,
+  } = useHyperionPositions(walletAddress, { refetchOnMount: 'always' });
 
-  const loadPositions = async () => {
-    console.log('[HyperionPositions] loadPositions called');
-    if (!account?.address) {
-      console.log('[HyperionPositions] No account address');
-      setPositions([]);
+  const vaultTokenAddresses = useMemo(
+    () => vaultTokens.map((token) => token.address),
+    [vaultTokens]
+  );
+  const { data: vaultData = [], isLoading: vaultLoading } = useHyperionVaultData(
+    walletAddress,
+    vaultTokenAddresses,
+    { refetchOnMount: 'always' }
+  );
+
+  const positions = useMemo(() => {
+    const seenIds = new Set<string>();
+    const uniquePositions = rawPositions.filter((position) => {
+      const positionId = position.position?.objectId;
+      if (!positionId || seenIds.has(positionId)) {
+        return false;
+      }
+      seenIds.add(positionId);
+      return true;
+    });
+    return [...uniquePositions].sort((a, b) => {
+      const valueA = parseFloat(a.value || "0");
+      const valueB = parseFloat(b.value || "0");
+      return valueB - valueA;
+    });
+  }, [rawPositions]);
+
+  useEffect(() => {
+    if (!walletAddress) {
       setVaultTokens([]);
-      setVaultData([]);
       return;
     }
 
-    try {
-      setLoading(true);
-      setError(null);
-      
-      // Загружаем обычные позиции
-      console.log('[HyperionPositions] Fetching:', `/api/protocols/hyperion/userPositions?address=${account.address}`);
-      const response = await fetch(`/api/protocols/hyperion/userPositions?address=${account.address}`);
-      console.log('[HyperionPositions] Response status:', response.status);
-      if (!response.ok) {
-        throw new Error(`API returned status ${response.status}`);
+    let cancelled = false;
+    const loadWalletVaultTokens = async () => {
+      try {
+        const portfolioService = new AptosPortfolioService();
+        const walletData = await portfolioService.getPortfolio(walletAddress);
+        if (cancelled) return;
+        const tokens = Array.isArray(walletData.tokens) ? walletData.tokens : [];
+        setVaultTokens(filterHyperionVaultTokens(tokens));
+      } catch {
+        if (!cancelled) setVaultTokens([]);
       }
-      const data = await response.json();
-      console.log('[HyperionPositions] Response data:', data);
-      if (data.success && Array.isArray(data.data)) {
-        // Проверяем дубликаты
-        const positionIds = data.data.map((p: any) => p.position?.objectId);
-        const duplicates = positionIds.filter((id: string, index: number) => positionIds.indexOf(id) !== index);
-        console.log('HyperionPositions: Raw data analysis', {
-          total: data.data.length,
-          positionIds: positionIds,
-          duplicates: duplicates,
-          hasDuplicates: duplicates.length > 0
-        });
-        // Удаляем дубликаты по positionId с более строгой проверкой
-        const seenIds = new Set<string>();
-        const uniquePositions = data.data.filter((position: any) => {
-          const positionId = position.position?.objectId;
-          if (!positionId || seenIds.has(positionId)) {
-            return false;
-          }
-          seenIds.add(positionId);
-          return true;
-        });
-        console.log('HyperionPositions: After deduplication', {
-          total: data.data.length,
-          unique: uniquePositions.length,
-          duplicates: data.data.length - uniquePositions.length,
-          uniquePositionIds: uniquePositions.map((p: any) => p.position?.objectId)
-        });
-        // Сортируем позиции по сумме ликвидности
-        const sortedPositions = [...uniquePositions].sort((a, b) => {
-          const valueA = parseFloat(a.value || "0");
-          const valueB = parseFloat(b.value || "0");
-          return valueB - valueA;
-        });
-        setPositions(sortedPositions);
-      } else {
-        console.log('[HyperionPositions] No valid data, setting positions to []');
-        setPositions([]);
-      }
+    };
 
-      // Загружаем токены кошелька для поиска Vault токенов
-      console.log('[HyperionPositions] Fetching wallet tokens for Vault detection');
-      const portfolioService = new AptosPortfolioService();
-      const walletData = await portfolioService.getPortfolio(account.address.toString());
-      console.log('[HyperionPositions] Wallet data received:', walletData);
-      if (walletData.tokens && Array.isArray(walletData.tokens)) {
-        console.log('[HyperionPositions] Total tokens found:', walletData.tokens.length);
-        const vaultTokensList = filterHyperionVaultTokens(walletData.tokens);
-        setVaultTokens(vaultTokensList);
-        console.log('[HyperionPositions] Vault tokens found:', vaultTokensList.length);
-        console.log('[HyperionPositions] Vault token addresses:', vaultTokensList.map(t => t.address));
-
-        // Загружаем данные Vault токенов
-        if (vaultTokensList.length > 0) {
-          const calculator = new VaultCalculator();
-          const vaultTokenAddresses = vaultTokensList.map(token => token.address);
-          const vaultDataResult = await calculator.getAllVaultData(vaultTokenAddresses, account.address.toString());
-          setVaultData(vaultDataResult);
-          console.log('[HyperionPositions] Vault data loaded:', vaultDataResult);
-        }
-      }
-
-    } catch (err) {
-      console.error('[HyperionPositions] Error loading positions:', err);
-      setError('Failed to load positions');
-      setPositions([]);
-      setVaultTokens([]);
-      setVaultData([]);
-    } finally {
-      setLoading(false);
-      console.log('[HyperionPositions] Loading set to false');
-    }
-  };
-
-  // Мемоизируем функцию loadPositions
-  const memoizedLoadPositions = useCallback(loadPositions, [account?.address]);
+    loadWalletVaultTokens();
+    return () => {
+      cancelled = true;
+    };
+  }, [walletAddress, refreshNonce]);
 
   useEffect(() => {
-    memoizedLoadPositions();
-
-    // Добавляем обработчик события обновления
-    const handleRefresh = (event: CustomEvent) => {
-      if (event.detail.protocol === 'hyperion') {
-        // Если есть данные в событии, используем их, иначе загружаем заново
-        if (event.detail.data && Array.isArray(event.detail.data)) {
-          // Сортируем позиции при обновлении
-          const sortedPositions = [...event.detail.data].sort((a, b) => {
-            const valueA = parseFloat(a.value || "0");
-            const valueB = parseFloat(b.value || "0");
-            return valueB - valueA;
-          });
-          setPositions(sortedPositions);
-        } else {
-          // Если данных нет, загружаем позиции заново
-          memoizedLoadPositions();
-        }
+    const handleRefresh = (event: CustomEvent<{ protocol?: string }>) => {
+      if (event.detail?.protocol === 'hyperion' && walletAddress) {
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.protocols.hyperion.userPositions(walletAddress),
+        });
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.protocols.hyperion.vaultData(walletAddress),
+        });
+        setRefreshNonce((x) => x + 1);
       }
     };
 
@@ -673,7 +643,7 @@ export function HyperionPositions() {
     return () => {
       window.removeEventListener('refreshPositions', handleRefresh as EventListener);
     };
-  }, [memoizedLoadPositions]);
+  }, [walletAddress, queryClient]);
 
   // Считаем позиции с наградами
   const positionsWithRewards = positions.filter(position => {
@@ -684,10 +654,10 @@ export function HyperionPositions() {
 
   // Считаем общую сумму rewards
   const totalRewards = positions.reduce((sum, position) => {
-    const farmRewards = position.farm?.unclaimed?.reduce((rewardSum: number, reward: { amountUSD: string }) => {
+    const farmRewards = position.farm?.unclaimed?.reduce((rewardSum: number, reward: { amountUSD?: string }) => {
       return rewardSum + parseFloat(reward.amountUSD || "0");
     }, 0) || 0;
-    const feeRewards = position.fees?.unclaimed?.reduce((feeSum: number, fee: { amountUSD: string }) => {
+    const feeRewards = position.fees?.unclaimed?.reduce((feeSum: number, fee: { amountUSD?: string }) => {
       return feeSum + parseFloat(fee.amountUSD || "0");
     }, 0) || 0;
     return sum + farmRewards + feeRewards;
@@ -696,21 +666,21 @@ export function HyperionPositions() {
   // Считаем общую сумму (позиции + награды + Vault токены)
   const totalValue = positions.reduce((sum, position) => {
     const positionValue = parseFloat(position.value || "0");
-    const farmRewards = position.farm?.unclaimed?.reduce((rewardSum: number, reward: { amountUSD: string }) => {
+    const farmRewards = position.farm?.unclaimed?.reduce((rewardSum: number, reward: { amountUSD?: string }) => {
       return rewardSum + parseFloat(reward.amountUSD || "0");
     }, 0) || 0;
-    const feeRewards = position.fees?.unclaimed?.reduce((feeSum: number, fee: { amountUSD: string }) => {
+    const feeRewards = position.fees?.unclaimed?.reduce((feeSum: number, fee: { amountUSD?: string }) => {
       return feeSum + parseFloat(fee.amountUSD || "0");
     }, 0) || 0;
     return sum + positionValue + farmRewards + feeRewards;
   }, 0) + vaultData.reduce((sum, vaultInfo) => sum + (vaultInfo.totalValueUSD || 0), 0);
 
-  if (loading) {
+  if (positionsLoading || vaultLoading) {
     return <div>Loading positions...</div>;
   }
 
-  if (error) {
-    return <div className="text-red-500">{error}</div>;
+  if (positionsError) {
+    return <div className="text-red-500">Failed to load positions</div>;
   }
 
   if (positions.length === 0 && vaultData.length === 0) {
@@ -759,8 +729,23 @@ export function HyperionPositions() {
       setSelectedVaultData(null);
 
       // Обновляем позиции после успешного withdraw
+      const walletAddress = account.address.toString();
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.hyperion.userPositions(walletAddress),
+      });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.hyperion.vaultData(walletAddress),
+      });
       setTimeout(() => {
-        memoizedLoadPositions();
+        if (walletAddress) {
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.protocols.hyperion.userPositions(walletAddress),
+          });
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.protocols.hyperion.vaultData(walletAddress),
+          });
+          setRefreshNonce((x) => x + 1);
+        }
       }, 2000);
     } catch (error) {
       console.error('[HyperionPositions] Vault Withdraw error:', error);

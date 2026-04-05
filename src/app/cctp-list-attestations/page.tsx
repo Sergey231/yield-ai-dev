@@ -678,13 +678,13 @@ export default function CctpListAttestationsPage() {
     }
   }, [searchParams]);
 
-  // Try to get depositMessageHash from localStorage (Wormhole SDK saves transfer data there)
+  // Try to get depositMessageHash from localStorage (legacy tooling may have saved it there)
   const getDepositMessageHashFromLocalStorage = (txSignature: string): string | null => {
     try {
       const storageKeys = Object.keys(localStorage);
       
       for (const key of storageKeys) {
-        if (key.includes('transfer') || key.includes('wormhole') || key.includes('cctp')) {
+        if (key.includes('transfer') || key.includes('cctp')) {
           try {
             const data = JSON.parse(localStorage.getItem(key) || '[]');
             const transfers = Array.isArray(data) ? data : [data];
@@ -703,7 +703,6 @@ export default function CctpListAttestationsPage() {
                 
                 // Note: receipt.attestation.id.hash is the attestation hash, not message hash
                 // We would need to compute depositMessageHash from receipt.attestation.attestation.message
-                // Note: In Wormhole SDK, message is at receipt.attestation.attestation.message
                 const cctpMessage = transfer.receipt?.attestation?.attestation?.message || 
                                    transfer.receipt?.attestation?.message;
                 
@@ -881,7 +880,7 @@ export default function CctpListAttestationsPage() {
     if (solanaTxSignature.trim() && !messageHash) {
       setIsLoading(true);
       
-      // First, try to get from localStorage (Wormhole SDK saves it there)
+      // First, try to get from localStorage (legacy tooling may have saved it there)
       let extractedHash = getDepositMessageHashFromLocalStorage(solanaTxSignature.trim());
       
       // If not in localStorage, try to extract from transaction logs
@@ -927,7 +926,7 @@ export default function CctpListAttestationsPage() {
         toast({
           variant: "default",
           title: "Could not extract depositMessageHash",
-          description: "depositMessageHash не найден в логах транзакции. Попробуйте получить его из localStorage данных Wormhole SDK или введите вручную, если знаете.",
+          description: "depositMessageHash не найден в логах транзакции. Попробуйте получить его из localStorage или введите вручную, если знаете.",
         });
         return;
       }
@@ -1080,7 +1079,7 @@ export default function CctpListAttestationsPage() {
                     className="font-mono text-xs"
                   />
                   <p className="text-[11px] text-muted-foreground mt-1">
-                    Можно найти в логах Solana транзакции на Solscan или получить из Wormhole SDK.
+                    Можно найти в логах Solana транзакции на Solscan или получить из сохранённых данных localStorage (если они есть).
                   </p>
                 </div>
               </div>
@@ -1214,7 +1213,7 @@ export default function CctpListAttestationsPage() {
               <br />
               &nbsp;&nbsp;2. Найдите в логах запись с "message hash" или hex-строку (64 символа)
               <br />
-              &nbsp;&nbsp;3. Или используйте Wormhole SDK для извлечения messageHash из transfer объекта
+              &nbsp;&nbsp;3. Или извлеките messageHash из сохранённого transfer объекта (если он у вас есть локально)
             </p>
             <p className="text-red-500">
               • Используй этот экран только локально, не храни тут боевой API key в проде.

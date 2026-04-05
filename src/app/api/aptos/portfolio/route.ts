@@ -6,7 +6,7 @@ import { TokenPrice } from '@/lib/types/panora';
 import tokenList from '@/lib/data/tokenList.json';
 import protocolsList from '@/lib/data/protocolsList.json';
 import { normalizeAddress } from '@/lib/utils/addressNormalization';
-
+import { getRequestOrigin } from '@/lib/utils/requestOrigin';
 interface PortfolioToken {
   address: string;
   name: string;
@@ -277,6 +277,8 @@ export async function GET(request: Request) {
       );
     }
 
+    const baseUrl = getRequestOrigin(request);
+
     console.log('Getting complete portfolio for address:', address);
     console.log('APTOS_API_KEY exists:', !!process.env.APTOS_API_KEY);
     
@@ -439,9 +441,6 @@ export async function GET(request: Request) {
 
     let protocolsValue = 0;
 
-    // Get base URL from environment or use default
-    const baseUrl = process.env.NEXT_PUBLIC_API_URL || process.env.VERCEL_URL || 'http://localhost:3000';
-    
     // Fetch positions from all protocols using correct port
     try {
       // Hyperion

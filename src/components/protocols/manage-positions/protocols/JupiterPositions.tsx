@@ -16,11 +16,16 @@ import {
   NATIVE_MINT,
 } from "@solana/spl-token";
 import { useToast } from "@/components/ui/use-toast";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { ToastAction } from "@/components/ui/toast";
 import { JupiterDepositModal } from "@/components/ui/jupiter-deposit-modal";
 import { JupiterWithdrawModal } from "@/components/ui/jupiter-withdraw-modal";
 import { getSolanaWalletAddress } from "@/lib/wallet/getSolanaWalletAddress";
 import { useWallet as useAptosWallet } from "@aptos-labs/wallet-adapter-react";
+import { getPreferredJupiterTokenIcon } from "@/lib/services/solana/jupiterTokenIcons";
+import { useQueryClient } from "@tanstack/react-query";
+import { queryKeys } from "@/lib/query/queryKeys";
+import { useJupiterPositions } from "@/lib/query/hooks/protocols/jupiter/useJupiterPositions";
 
 type JupiterPosition = {
   token?: {
@@ -88,6 +93,22 @@ function isWalletNotSelected(error: unknown): boolean {
   return name.includes("walletnotselected") || message.includes("walletnotselected") || message.includes("wallet not selected");
 }
 
+function isUserRejected(error: unknown): boolean {
+  if (!error) return false;
+  const msg = getErrorMessage(error).toLowerCase();
+  // Common wallet rejection strings (Phantom/Solflare/Trust).
+  return (
+    msg.includes("user rejected") ||
+    msg.includes("rejected the request") ||
+    msg.includes("request rejected") ||
+    msg.includes("user declined") ||
+    msg.includes("declined") ||
+    msg.includes("denied") ||
+    msg.includes("canceled") ||
+    msg.includes("cancelled")
+  );
+}
+
 function decodeBase64Tx(base64Tx: string): Uint8Array {
   const decoded = atob(base64Tx);
   return Uint8Array.from(decoded, (char) => char.charCodeAt(0));
@@ -143,19 +164,26 @@ function sortByValueDesc(items: JupiterPosition[]): JupiterPosition[] {
 }
 
 export function JupiterPositions() {
-  const { address: solanaAddress, tokens: solanaTokens, refresh: refreshSolana } = useSolanaPortfolio();
+  const {
+    address: solanaAddress,
+    protocolsAddress: solanaProtocolsAddress,
+    tokens: solanaTokens,
+    refresh: refreshSolana,
+  } = useSolanaPortfolio();
   const { wallet: aptosWallet } = useAptosWallet();
   const {
     publicKey,
     signTransaction,
     sendTransaction,
     connecting: solanaConnecting,
+    disconnecting: solanaDisconnecting,
     wallet: solanaWallet,
     wallets: solanaWallets,
     select: selectSolanaWallet,
     connect: connectSolanaWallet,
   } = useSolanaWallet();
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [positions, setPositions] = useState<JupiterPosition[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -209,48 +237,39 @@ export function JupiterPositions() {
     );
   }, []);
 
+  const jupiterPositionsQuery = useJupiterPositions(solanaProtocolsAddress ?? undefined, {
+    refetchOnMount: "always",
+  });
+
   useEffect(() => {
-    let cancelled = false;
+    // Keep local state shape for the rest of the component, but source data from TanStack Query.
+    const list = Array.isArray(jupiterPositionsQuery.data) ? jupiterPositionsQuery.data : [];
+    setPositions(sortByValueDesc(list));
+  }, [jupiterPositionsQuery.data]);
 
-    async function load() {
-      if (!solanaAddress) {
-        setPositions([]);
-        return;
-      }
-      try {
-        setLoading(true);
-        setError(null);
-        const res = await fetch(`/api/protocols/jupiter/userPositions?address=${encodeURIComponent(solanaAddress)}`);
-        const data = await res.json().catch(() => null);
-        const list = Array.isArray(data?.data) ? data.data : [];
-        if (!cancelled) {
-          setPositions(sortByValueDesc(list));
-        }
-      } catch {
-        if (!cancelled) {
-          setError("Failed to load Jupiter positions");
-          setPositions([]);
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
+  useEffect(() => {
+    if (!solanaProtocolsAddress) {
+      setPositions([]);
+      setLoading(false);
+      setError(null);
+      return;
     }
+    setLoading(jupiterPositionsQuery.isFetching);
+    setError(jupiterPositionsQuery.isError ? "Failed to load Jupiter positions" : null);
+  }, [solanaProtocolsAddress, jupiterPositionsQuery.isFetching, jupiterPositionsQuery.isError]);
 
-    load();
+  useEffect(() => {
+    if (!solanaProtocolsAddress) return;
     const handleRefresh: EventListener = (evt) => {
       const event = evt as CustomEvent<{ protocol?: string }>;
-      if (event?.detail?.protocol === "jupiter") {
-        void load();
-      }
+      if (event?.detail?.protocol !== "jupiter") return;
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.jupiter.userPositions(solanaProtocolsAddress),
+      });
     };
     window.addEventListener("refreshPositions", handleRefresh);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("refreshPositions", handleRefresh);
-    };
-  }, [solanaAddress]);
+    return () => window.removeEventListener("refreshPositions", handleRefresh);
+  }, [solanaProtocolsAddress, queryClient]);
 
   const totalValue = useMemo(
     () =>
@@ -285,6 +304,7 @@ export function JupiterPositions() {
   }, [selectedMeta.mint, solanaTokens]);
 
   const onDepositClick = (position: JupiterPosition) => {
+    void refreshSolana();
     setSelectedPosition(position);
     setIsDepositOpen(true);
   };
@@ -295,6 +315,7 @@ export function JupiterPositions() {
   };
 
   const onWithdrawClick = (position: JupiterPosition) => {
+    void refreshSolana();
     setSelectedPosition(position);
     setIsWithdrawOpen(true);
   };
@@ -628,6 +649,9 @@ export function JupiterPositions() {
             preflightCommitment: "confirmed",
           });
         } catch (sendError) {
+          if (isUserRejected(sendError)) {
+            throw sendError instanceof Error ? sendError : new Error(getErrorMessage(sendError));
+          }
           if (isWalletNotSelected(sendError)) {
             let recovered = false;
             for (let attempt = 0; attempt < 2 && !recovered; attempt++) {
@@ -676,6 +700,9 @@ export function JupiterPositions() {
                   break;
                 }
               } catch (retryError) {
+                if (isUserRejected(retryError)) {
+                  throw retryError instanceof Error ? retryError : new Error(getErrorMessage(retryError));
+                }
                 if (!isWalletNotSelected(retryError)) {
                   throw retryError instanceof Error ? retryError : new Error(getErrorMessage(retryError));
                 }
@@ -753,6 +780,7 @@ export function JupiterPositions() {
         toast({
           title: "Transaction cancelled",
           description: "Request was rejected in wallet.",
+          variant: "destructive",
         });
         return;
       }
@@ -920,6 +948,9 @@ export function JupiterPositions() {
             preflightCommitment: "confirmed",
           });
         } catch (sendError) {
+          if (isUserRejected(sendError)) {
+            throw sendError instanceof Error ? sendError : new Error(getErrorMessage(sendError));
+          }
           if (isWalletNotSelected(sendError)) {
             let recovered = false;
             for (let attempt = 0; attempt < 2 && !recovered; attempt++) {
@@ -968,6 +999,9 @@ export function JupiterPositions() {
                   break;
                 }
               } catch (retryError) {
+                if (isUserRejected(retryError)) {
+                  throw retryError instanceof Error ? retryError : new Error(getErrorMessage(retryError));
+                }
                 if (!isWalletNotSelected(retryError)) {
                   throw retryError instanceof Error ? retryError : new Error(getErrorMessage(retryError));
                 }
@@ -1111,8 +1145,16 @@ export function JupiterPositions() {
     }
   };
 
-  if (!solanaAddress) {
-    return <div className="py-4 text-muted-foreground">Connect Solana wallet to view Jupiter positions.</div>;
+  if (!solanaProtocolsAddress) {
+    const waiting =
+      solanaConnecting ||
+      solanaDisconnecting ||
+      (!!solanaAddress && !solanaProtocolsAddress);
+    return (
+      <div className="py-4 text-muted-foreground">
+        {waiting ? "Loading wallet session…" : "Connect Solana wallet to view Jupiter positions."}
+      </div>
+    );
   }
   if (loading) {
     return <div className="py-4 text-muted-foreground">Loading positions...</div>;
@@ -1125,19 +1167,22 @@ export function JupiterPositions() {
   }
 
   return (
-    <div className="space-y-4 text-base">
-      <div className="mb-4">
-          {positions.map((position, idx) => {
+    <div className="w-full min-w-0 max-w-full space-y-4 text-base">
+      <ScrollArea className="w-full min-w-0 max-w-full">
+        {positions.map((position, idx) => {
             const symbol = position?.token?.asset?.uiSymbol || position?.token?.asset?.symbol || "Unknown";
             const decimals = toNumber(position?.token?.asset?.decimals, 0);
             const amount = toNumber(position?.underlyingAssets, 0) / Math.pow(10, decimals || 0);
             const price = toNumber(position?.token?.asset?.price, 0);
             const value = amount * price;
-            const logoUrl = position?.token?.asset?.logoUrl;
+            const logoUrl = getPreferredJupiterTokenIcon(symbol, position?.token?.asset?.logoUrl);
             const aprPct = toNumber(position?.token?.totalRate, 0) / 100;
 
             return (
-              <div key={`jupiter-${idx}`} className="p-3 sm:p-4 border-b last:border-b-0">
+              <div
+                key={`jupiter-${idx}`}
+                className="box-border w-full min-w-0 max-w-full overflow-hidden border-b p-3 last:border-b-0 sm:p-4"
+              >
               <div className="hidden sm:flex justify-between items-center">
                 <div className="flex items-center gap-3">
                   <div className="w-8 h-8 relative">
@@ -1180,53 +1225,57 @@ export function JupiterPositions() {
                 </div>
               </div>
 
-              <div className="block sm:hidden space-y-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 relative">
-                      {logoUrl ? (
-                        <Image src={logoUrl} alt={symbol} width={32} height={32} className="object-contain" unoptimized />
-                      ) : null}
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <div className="text-base font-semibold">{symbol}</div>
-                        <Badge
-                          variant="outline"
-                          className="bg-green-500/10 text-green-600 border-green-500/20 text-xs font-normal px-1.5 py-0.5 h-4"
-                        >
-                          Supply
-                        </Badge>
-                      </div>
-                      <div className="text-sm text-muted-foreground">{formatCurrency(price, 4)}</div>
-                    </div>
+              <div className="block sm:hidden w-full min-w-0 max-w-full space-y-3">
+                <div className="flex w-full min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-2">
+                  <div className="relative h-8 w-8 shrink-0">
+                    {logoUrl ? (
+                      <Image src={logoUrl} alt={symbol} width={32} height={32} className="object-contain" unoptimized />
+                    ) : null}
                   </div>
-                  <div className="text-right">
-                    <div className="flex items-center justify-end gap-2 mb-1">
-                      <Badge
-                        variant="outline"
-                        className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-xs font-normal px-1.5 py-0.5 h-4"
-                      >
-                        APR: {formatNumber(aprPct, 2)}%
-                      </Badge>
-                      <div className="text-base font-semibold text-right w-24">{formatCurrency(value, 2)}</div>
-                    </div>
-                    <div className="text-sm text-muted-foreground">{formatNumber(amount, 4)}</div>
-                    <div className="flex gap-2 mt-2 justify-end">
-                      <Button onClick={() => onDepositClick(position)} size="sm" variant="default" className="h-10">
-                        Deposit
-                      </Button>
-                      <Button onClick={() => onWithdrawClick(position)} size="sm" variant="outline" className="h-10">
-                        Withdraw
-                      </Button>
-                    </div>
+                  <div className="min-w-0 max-w-full break-words text-base font-semibold [overflow-wrap:anywhere]">
+                    {symbol}
                   </div>
+                  <Badge
+                    variant="outline"
+                    className="h-4 shrink-0 border-green-500/20 bg-green-500/10 px-1.5 py-0.5 text-xs font-normal text-green-600"
+                  >
+                    Supply
+                  </Badge>
+                  <Badge
+                    variant="outline"
+                    className="h-4 shrink-0 border-blue-500/20 bg-blue-500/10 px-1.5 py-0.5 text-xs font-normal text-blue-600"
+                  >
+                    APR: {formatNumber(aprPct, 2)}%
+                  </Badge>
+                  <span className="text-sm text-muted-foreground">{formatCurrency(price, 4)}</span>
+                  <span className="text-base font-semibold">{formatCurrency(value, 2)}</span>
+                  <span className="min-w-0 max-w-full break-all text-sm text-muted-foreground">
+                    {formatNumber(amount, 6)}
+                  </span>
+                </div>
+                <div className="flex w-full min-w-0 max-w-full flex-col gap-2">
+                  <Button
+                    onClick={() => onDepositClick(position)}
+                    size="sm"
+                    variant="default"
+                    className="box-border h-10 w-full min-w-0 max-w-full"
+                  >
+                    Deposit
+                  </Button>
+                  <Button
+                    onClick={() => onWithdrawClick(position)}
+                    size="sm"
+                    variant="outline"
+                    className="box-border h-10 w-full min-w-0 max-w-full"
+                  >
+                    Withdraw
+                  </Button>
                 </div>
               </div>
               </div>
             );
           })}
-      </div>
+      </ScrollArea>
       <div className="flex items-center justify-between pt-6 pb-6">
         <span className="text-xl">Total assets in Jupiter:</span>
         <span className="text-xl text-primary font-bold">{formatCurrency(totalValue, 2)}</span>
@@ -1239,7 +1288,10 @@ export function JupiterPositions() {
         isLoading={isDepositing}
         token={{
           symbol: selectedMeta.symbol,
-          logoUrl: selectedPosition?.token?.asset?.logoUrl,
+          logoUrl: getPreferredJupiterTokenIcon(
+            selectedMeta.symbol,
+            selectedPosition?.token?.asset?.logoUrl
+          ),
           availableAmount: selectedWalletAmount,
           apy: toNumber(selectedPosition?.token?.totalRate, 0) / 100,
           priceUsd: toNumber(selectedPosition?.token?.asset?.price, 0),
@@ -1253,7 +1305,10 @@ export function JupiterPositions() {
         isLoading={isWithdrawing}
         token={{
           symbol: selectedMeta.symbol,
-          logoUrl: selectedPosition?.token?.asset?.logoUrl,
+          logoUrl: getPreferredJupiterTokenIcon(
+            selectedMeta.symbol,
+            selectedPosition?.token?.asset?.logoUrl
+          ),
           suppliedAmount: selectedMeta.amount,
         }}
       />

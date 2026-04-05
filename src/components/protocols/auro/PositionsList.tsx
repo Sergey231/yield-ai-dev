@@ -7,12 +7,12 @@ import { ChevronDown } from "lucide-react";
 import { ManagePositionsButton } from "../ManagePositionsButton";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { useCollapsible } from "@/contexts/CollapsibleContext";
-import { formatCurrency } from "@/lib/utils/numberFormat";
 import tokenList from "@/lib/data/tokenList.json";
 import { Tooltip, TooltipProvider, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { PanoraPricesService } from "@/lib/services/panora/prices";
 import { createDualAddressPriceMap } from "@/lib/utils/addressNormalization";
 import { ProtocolClosureNotice } from "@/components/ui/protocol-closure-notice";
+import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
 
 interface PositionsListProps {
   address?: string;
@@ -23,6 +23,7 @@ interface PositionsListProps {
 }
 
 export function PositionsList({ address, onPositionsValueChange, refreshKey, onPositionsCheckComplete, showManageButton=true }: PositionsListProps) {
+  const { formatUsd, maskBalance } = usePortfolioAmountsPrivacy();
   const { account } = useWallet();
   const [positions, setPositions] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -394,7 +395,7 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
             <ProtocolClosureNotice protocolKey="auro" stopPropagation />
           </div>
           <div className="flex items-center gap-2">
-            <div className="text-lg">{formatCurrency(totalValue(), 2)}</div>
+            <div className="text-lg">{formatUsd(totalValue(), 2)}</div>
             <ChevronDown className={cn(
               "h-5 w-5 transition-transform",
               isExpanded('auro') ? "transform rotate-0" : "transform -rotate-90"
@@ -435,12 +436,14 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                             Supply
                           </span>
                         </div>
-                        <div className="text-xs text-muted-foreground">${collateralPrice}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {collateralPrice === "N/A" ? "N/A" : formatUsd(parseFloat(collateralPrice))}
+                        </div>
                       </div>
                     </div>
                     <div className="text-right ml-4">
-                      <div className="text-sm font-medium">${value}</div>
-                      <div className="text-xs text-muted-foreground">{collateral}</div>
+                      <div className="text-sm font-medium">{formatUsd(parseFloat(value))}</div>
+                      <div className="text-xs text-muted-foreground">{maskBalance(String(collateral))}</div>
                     </div>
                   </div>
                   {/* Debt строка — всегда на новой строке, как borrow в Echelon */}
@@ -462,12 +465,19 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                               Borrow
                             </span>
                           </div>
-                          <div className="text-xs text-muted-foreground">${debtPrice}</div>
+                          <div className="text-xs text-muted-foreground">{formatUsd(parseFloat(debtPrice))}</div>
                         </div>
                       </div>
                       <div className="text-right ml-4">
-                        <div className="text-sm font-medium">${(parseFloat(debt) * parseFloat(getTokenPrice("0x534e4c3dc0f038dab1a8259e89301c4da58779a5d482fb354a41c08147e6b9ec"))).toFixed(2)}</div>
-                        <div className="text-xs text-muted-foreground">{debt} {debtSymbol}</div>
+                        <div className="text-sm font-medium">
+                          {formatUsd(
+                            parseFloat(debt) *
+                              parseFloat(getTokenPrice("0x534e4c3dc0f038dab1a8259e89301c4da58779a5d482fb354a41c08147e6b9ec"))
+                          )}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {maskBalance(`${debt} ${debtSymbol}`)}
+                        </div>
                       </div>
                     </div>
                   )}
@@ -481,7 +491,7 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                   <TooltipTrigger asChild>
                     <div className="flex items-center justify-between pt-2 border-t border-gray-200 cursor-help">
                       <span className="text-sm text-muted-foreground">💰 Total rewards:</span>
-                      <span className="text-sm font-medium">${totalRewardsValue.toFixed(2)}</span>
+                      <span className="text-sm font-medium">{formatUsd(totalRewardsValue)}</span>
                     </div>
                   </TooltipTrigger>
                   <TooltipContent className="bg-popover text-popover-foreground border-border max-w-xs">
@@ -500,8 +510,8 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                               )}
                               <span>{tokenInfo.symbol}</span>
                               <span className="text-gray-400">Supply</span>
-                              <span>{amount.toFixed(6)}</span>
-                              <span className="text-muted-foreground">${value}</span>
+                              <span>{maskBalance(amount.toFixed(6))}</span>
+                              <span className="text-muted-foreground">{formatUsd(parseFloat(value))}</span>
                             </div>
                           );
                         });
@@ -517,8 +527,8 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                               )}
                               <span>{tokenInfo.symbol}</span>
                               <span className="text-blue-400">Borrow</span>
-                              <span>{amount.toFixed(6)}</span>
-                              <span className="text-muted-foreground">${value}</span>
+                              <span>{maskBalance(amount.toFixed(6))}</span>
+                              <span className="text-muted-foreground">{formatUsd(parseFloat(value))}</span>
                             </div>
                           );
                         });

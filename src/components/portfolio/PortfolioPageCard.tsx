@@ -3,7 +3,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { TokenList } from "@/components/portfolio/TokenList";
 import { Token } from "@/lib/types/token";
 import { useState } from "react";
-import { ChevronDown, RefreshCw, Copy, ExternalLink } from "lucide-react";
+import { ChevronDown, RefreshCw, Eye, EyeOff } from "lucide-react";
+import { PortfolioWalletAddressBar } from "@/components/portfolio/PortfolioWalletAddressBar";
 import { cn } from "@/lib/utils";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -13,7 +14,8 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useDragDrop } from "@/contexts/DragDropContext";
 import { DragData } from "@/types/dragDrop";
-import { formatNumber, formatCurrency } from "@/lib/utils/numberFormat";
+import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
+import { getTokenUsdValue } from "@/lib/utils/tokenUsdValue";
 
 interface PortfolioPageCardProps {
   totalValue: string;
@@ -24,6 +26,13 @@ interface PortfolioPageCardProps {
   onHideSmallAssetsChange?: (value: boolean) => void;
   walletAddress?: string;
   explorerUrl?: string;
+  addressBarEditable?: boolean;
+  addressDraft?: string;
+  onAddressDraftChange?: (v: string) => void;
+  onAddressApply?: () => void;
+  addressPlaceholder?: string;
+  addressApplyLabel?: string;
+  addressFieldError?: string;
 }
 
 export function PortfolioPageCard({
@@ -35,7 +44,15 @@ export function PortfolioPageCard({
   onHideSmallAssetsChange,
   walletAddress,
   explorerUrl,
+  addressBarEditable = false,
+  addressDraft = "",
+  onAddressDraftChange,
+  onAddressApply,
+  addressPlaceholder = "",
+  addressApplyLabel,
+  addressFieldError,
 }: PortfolioPageCardProps) {
+  const { amountsHidden, toggleAmountsHidden, formatUsd } = usePortfolioAmountsPrivacy();
   const { isExpanded, toggleSection } = useCollapsible();
   const [internalHideSmallAssets, setInternalHideSmallAssets] = useState(true);
   const { state, validateDrop, handleDrop } = useDragDrop();
@@ -43,22 +60,19 @@ export function PortfolioPageCard({
   const setHideSmallAssets = onHideSmallAssetsChange ?? setInternalHideSmallAssets;
 
   const filteredTokens = effectiveHideSmallAssets
-    ? tokens.filter(token => {
-        const value = token.value ? parseFloat(token.value) : 0;
-        return !isNaN(value) && value >= 1;
+    ? tokens.filter((token) => {
+        const value = getTokenUsdValue(token);
+        return Number.isFinite(value) && value >= 1;
       })
     : tokens;
 
   const hiddenCount = tokens.length - filteredTokens.length;
 
-  // Подсчет суммы для Wallet
+  // Подсчет суммы для Wallet (согласовано с Solana: value или amount × price)
   const walletTotal = tokens.reduce((sum, token) => {
-    const value = token.value ? parseFloat(token.value) : 0;
-    return sum + (isNaN(value) ? 0 : value);
+    const value = getTokenUsdValue(token);
+    return sum + (Number.isFinite(value) ? value : 0);
   }, 0);
-
-  // Преобразуем totalValue в число для отображения
-  const displayTotalValue = parseFloat(totalValue) || 0;
 
   // Drag and drop handlers
   const handleDragOver = (e: React.DragEvent) => {
@@ -111,6 +125,28 @@ export function PortfolioPageCard({
           <Label htmlFor="hideSmallAssets" className="text-sm">Hide assets {'<'}1$</Label>
         </div>
         <div className="flex items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={toggleAmountsHidden}
+                className="h-4 w-4 p-0 text-muted-foreground hover:bg-transparent hover:text-foreground/60 opacity-80 transition-colors"
+                aria-pressed={amountsHidden}
+                aria-label={amountsHidden ? "Show amounts" : "Hide amounts"}
+              >
+                {amountsHidden ? (
+                  <EyeOff className="h-3 w-3" />
+                ) : (
+                  <Eye className="h-3 w-3" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>{amountsHidden ? "Show amounts" : "Hide amounts (share layout without balances)"}</p>
+            </TooltipContent>
+          </Tooltip>
           {onRefresh && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -135,33 +171,22 @@ export function PortfolioPageCard({
           <CollapsibleControls />
         </div>
       </div>
-      {walletAddress && (
+      {(walletAddress || addressBarEditable) && (
         <div className="w-full mb-2">
-          <div className="flex h-8 items-center justify-between rounded-md border px-3 py-0">
-            <span className="font-mono text-sm truncate">{formatAddress(walletAddress)}</span>
-            <div className="flex items-center gap-1">
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  if (explorerUrl) window.open(explorerUrl, "_blank");
-                }}
-                className="h-8 w-8 p-0"
-                title="View in explorer"
-              >
-                <ExternalLink className="h-4 w-4" />
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => navigator.clipboard.writeText(walletAddress)}
-                className="h-8 w-8 p-0"
-                title="Copy address"
-              >
-                <Copy className="h-4 w-4" />
-              </Button>
-            </div>
-          </div>
+          <PortfolioWalletAddressBar
+            resolvedAddress={walletAddress ?? ""}
+            explorerUrl={explorerUrl ?? ""}
+            explorerOpenLabel="View in Aptos Explorer"
+            editable={!!addressBarEditable}
+            draft={addressDraft}
+            onDraftChange={onAddressDraftChange ?? (() => {})}
+            onApply={onAddressApply ?? (() => {})}
+            placeholder={addressPlaceholder}
+            applyLabel={addressApplyLabel}
+          />
+          {addressFieldError ? (
+            <p className="text-sm text-destructive px-1 mt-1">{addressFieldError}</p>
+          ) : null}
         </div>
       )}
       <Card 
@@ -180,7 +205,7 @@ export function PortfolioPageCard({
               Aptos Wallet
             </CardTitle>
             <div className="flex items-center gap-2">
-              <span className="text-lg">{formatCurrency(walletTotal, 2)}</span>
+              <span className="text-lg">{formatUsd(walletTotal, 2)}</span>
               <ChevronDown className={cn(
                 "h-5 w-5 transition-transform",
                 isExpanded('wallet') ? "transform rotate-0" : "transform -rotate-90"
@@ -192,12 +217,24 @@ export function PortfolioPageCard({
         {isExpanded('wallet') && (
           <CardContent className="flex-1 overflow-y-auto px-3 pt-0">
             <ScrollArea className="h-full">
-              <TokenList tokens={filteredTokens} />
-              {hiddenCount > 0 && (
-                <div className="text-xs text-muted-foreground py-1 text-right">
+              {filteredTokens.length > 0 ? <TokenList tokens={filteredTokens} /> : null}
+              {effectiveHideSmallAssets && hiddenCount > 0 ? (
+                <div
+                  className="text-xs text-muted-foreground py-1 text-right cursor-pointer hover:text-foreground transition-colors"
+                  onClick={() => setHideSmallAssets(false)}
+                  title="Click to show hidden assets"
+                >
                   {hiddenCount} assets hidden
                 </div>
-              )}
+              ) : !effectiveHideSmallAssets && tokens.length > 0 ? (
+                <div
+                  className="text-xs text-muted-foreground py-1 text-right cursor-pointer hover:text-foreground transition-colors"
+                  onClick={() => setHideSmallAssets(true)}
+                  title="Click to hide small assets"
+                >
+                  Hide assets {'<'}1$
+                </div>
+              ) : null}
             </ScrollArea>
           </CardContent>
         )}

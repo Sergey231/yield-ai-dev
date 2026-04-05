@@ -3,10 +3,12 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/components/ui/use-toast";
 import { ToastAction } from "@/components/ui/toast";
 import { CheckCircle, AlertCircle } from "lucide-react";
 import tokenList from "@/lib/data/tokenList.json";
+import { queryKeys } from "@/lib/query/queryKeys";
 
 interface EchelonReward {
   token: string;
@@ -34,6 +36,7 @@ interface ClaimAllRewardsEchelonModalProps {
 
 export function ClaimAllRewardsEchelonModal({ isOpen, onClose, rewards, tokenPrices = {} }: ClaimAllRewardsEchelonModalProps) {
   const { signAndSubmitTransaction, account } = useWallet();
+  const queryClient = useQueryClient();
   const { toast } = useToast();
   const [isClaiming, setIsClaiming] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -302,6 +305,15 @@ export function ClaimAllRewardsEchelonModal({ isOpen, onClose, rewards, tokenPri
 
     // Обновляем позиции
     setTimeout(() => {
+      const addr = account?.address?.toString();
+      if (addr) {
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.protocols.echelon.userPositions(addr),
+        });
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.protocols.echelon.rewards(addr),
+        });
+      }
       window.dispatchEvent(new CustomEvent('refreshPositions', { detail: { protocol: 'echelon' } }));
     }, 2000);
   };

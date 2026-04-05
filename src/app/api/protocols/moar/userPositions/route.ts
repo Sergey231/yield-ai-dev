@@ -136,14 +136,12 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Step 3: Get fresh prices from Panora API
+    // Step 3: Get prices from Panora API
     let prices: Record<string, string> = {};
     if (tokenAddresses.size > 0) {
       try {
         console.log('💰 Fetching prices for', tokenAddresses.size, 'tokens from Panora API');
         const pricesService = PanoraPricesService.getInstance();
-        // Force refresh prices by clearing cache first
-        pricesService.clearCache();
         const pricesResponse = await pricesService.getPrices(1, Array.from(tokenAddresses));
         // Panora returns { data: TokenPrice[], status }; our wrapper may return { data: that } — normalize to array
         const raw = pricesResponse?.data ?? pricesResponse;

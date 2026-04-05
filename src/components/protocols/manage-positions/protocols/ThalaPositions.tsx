@@ -1,53 +1,16 @@
 'use client';
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/components/ui/use-toast";
-import { ToastAction } from "@/components/ui/toast";
 import { formatNumber, formatCurrency } from "@/lib/utils/numberFormat";
 import { ClaimSuccessModal } from '@/components/ui/claim-success-modal';
 import { ExternalLink } from "lucide-react";
-
-interface ThalaTokenAmount {
-  address: string;
-  symbol: string;
-  name: string;
-  decimals: number;
-  logoUrl?: string | null;
-  amountRaw: string;
-  amount: number;
-  priceUSD: number;
-  valueUSD: number;
-}
-
-interface ThalaRewardItem {
-  tokenAddress: string;
-  symbol: string;
-  name: string;
-  decimals: number;
-  logoUrl?: string | null;
-  amountRaw: string;
-  amount: number;
-  priceUSD: number;
-  valueUSD: number;
-}
-
-interface ThalaPosition {
-  positionId: string;
-  positionAddress: string;
-  staked: boolean;
-  apr?: number; // percent (e.g. 5 = 5%)
-  poolAddress: string;
-  token0: ThalaTokenAmount;
-  token1: ThalaTokenAmount;
-  inRange: boolean;
-  rewards: ThalaRewardItem[];
-  positionValueUSD: number;
-  rewardsValueUSD: number;
-  totalValueUSD: number;
-}
+import { queryKeys } from "@/lib/query/queryKeys";
+import { useThalaPositions, type ThalaPosition } from "@/lib/query/hooks/protocols/thala";
 
 interface ThalaPositionProps {
   position: ThalaPosition;
@@ -71,6 +34,7 @@ function ThalaPositionCard({ position, index, onClaimSuccess }: ThalaPositionPro
   const [isClaiming, setIsClaiming] = useState(false);
   const { signAndSubmitTransaction, account } = useWallet();
   const { toast } = useToast();
+  const queryClient = useQueryClient();
 
   const tokenEntries = [
     {
@@ -91,7 +55,7 @@ function ThalaPositionCard({ position, index, onClaimSuccess }: ThalaPositionPro
     try {
       setIsClaiming(true);
       const THALA_FARMING_ADDRESS = "0xcb8365dc9f7ac6283169598aaad7db9c7b12f52da127007f37fa4565170ff59c";
-      
+
       const claimedRewardsList: Array<{
         symbol: string;
         amount: number;
@@ -106,8 +70,8 @@ function ThalaPositionCard({ position, index, onClaimSuccess }: ThalaPositionPro
           function: `${THALA_FARMING_ADDRESS}::farming::claim_token_reward_entry` as `${string}::${string}::${string}`,
           typeArguments: [],
           functionArguments: [
-            position.positionAddress, // position address
-            reward.tokenAddress // reward token object address
+            position.positionAddress,
+            reward.tokenAddress
           ]
         };
 
@@ -118,7 +82,6 @@ function ThalaPositionCard({ position, index, onClaimSuccess }: ThalaPositionPro
 
         lastTransactionHash = response.hash;
 
-        // Add claimed reward to list (only first token for swap)
         if (claimedRewardsList.length === 0) {
           claimedRewardsList.push({
             symbol: reward.symbol,
@@ -130,17 +93,15 @@ function ThalaPositionCard({ position, index, onClaimSuccess }: ThalaPositionPro
         }
       }
 
-      // Call parent callback to show success modal
       if (onClaimSuccess && lastTransactionHash && claimedRewardsList.length > 0) {
         setTimeout(() => {
           onClaimSuccess(claimedRewardsList, lastTransactionHash);
         }, 250);
       }
 
-      // Refresh positions after claiming
-      setTimeout(() => {
-        window.dispatchEvent(new CustomEvent('refreshPositions', { detail: { protocol: 'thala' } }));
-      }, 2000);
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.thala.userPositions(account.address.toString()),
+      });
     } catch (error) {
       console.error('Error claiming Thala rewards:', error);
       toast({ title: "Error", description: "Failed to claim rewards", variant: "destructive" });
@@ -309,9 +270,8 @@ function ThalaPositionCard({ position, index, onClaimSuccess }: ThalaPositionPro
 
 export function ThalaPositions() {
   const { account } = useWallet();
-  const [positions, setPositions] = useState<ThalaPosition[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const walletAddress = account?.address?.toString();
   const [showClaimSuccessModal, setShowClaimSuccessModal] = useState(false);
   const [claimedRewards, setClaimedRewards] = useState<Array<{
     symbol: string;
@@ -322,48 +282,27 @@ export function ThalaPositions() {
   }>>([]);
   const [claimTransactionHash, setClaimTransactionHash] = useState<string | undefined>();
 
-  const loadPositions = async () => {
-    if (!account?.address) {
-      setPositions([]);
-      return;
-    }
+  const {
+    data: positionsData = [],
+    isLoading,
+    error,
+  } = useThalaPositions(walletAddress, {
+    refetchOnMount: 'always',
+  });
 
-    try {
-      setLoading(true);
-      setError(null);
-      const response = await fetch(`/api/protocols/thala/userPositions?address=${account.address}`);
-
-      if (!response.ok) {
-        throw new Error(`API returned status ${response.status}`);
-      }
-
-      const rawData = await response.json();
-      if (rawData.success && Array.isArray(rawData.data)) {
-        const sortedPositions = [...rawData.data].sort((a, b) => (b.positionValueUSD || 0) - (a.positionValueUSD || 0));
-        setPositions(sortedPositions);
-      } else {
-        setPositions([]);
-      }
-    } catch (err) {
-      console.error('Error loading Thala positions:', err);
-      setError('Failed to load positions');
-      setPositions([]);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const positions = useMemo(
+    () =>
+      [...positionsData].sort((a, b) => (b.positionValueUSD || 0) - (a.positionValueUSD || 0)),
+    [positionsData]
+  );
 
   useEffect(() => {
-    loadPositions();
-
     const handleRefresh: EventListener = (evt) => {
-      const event = evt as CustomEvent<any>;
-      if (event?.detail?.protocol === 'thala') {
-        if (event.detail.data && Array.isArray(event.detail.data)) {
-          setPositions(event.detail.data);
-        } else {
-          void loadPositions();
-        }
+      const event = evt as CustomEvent<{ protocol?: string }>;
+      if (event?.detail?.protocol === 'thala' && walletAddress) {
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.protocols.thala.userPositions(walletAddress),
+        });
       }
     };
 
@@ -371,14 +310,14 @@ export function ThalaPositions() {
     return () => {
       window.removeEventListener('refreshPositions', handleRefresh);
     };
-  }, [account?.address]);
+  }, [walletAddress, queryClient]);
 
-  if (loading) {
+  if (isLoading) {
     return <div>Loading positions...</div>;
   }
 
   if (error) {
-    return <div className="text-red-500">{error}</div>;
+    return <div className="text-red-500">Failed to load positions</div>;
   }
 
   if (positions.length === 0) {
@@ -392,9 +331,9 @@ export function ThalaPositions() {
     <div className="w-full mb-6 py-2">
       <div className="space-y-4 text-base">
         {positions.map((position, index) => (
-          <ThalaPositionCard 
-            key={`${position.positionId}-${index}`} 
-            position={position} 
+          <ThalaPositionCard
+            key={`${position.positionId}-${index}`}
+            position={position}
             index={index}
             onClaimSuccess={(rewards, hash) => {
               setClaimedRewards(rewards);
@@ -404,7 +343,6 @@ export function ThalaPositions() {
           />
         ))}
         <div className="pt-6 pb-6">
-          {/* Desktop layout */}
           <div className="hidden md:block">
             <div className="flex items-center justify-between">
               <span className="text-xl">Total assets in Thala:</span>
@@ -421,7 +359,6 @@ export function ThalaPositions() {
               </div>
             )}
           </div>
-          {/* Mobile layout */}
           <div className="md:hidden space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-lg">Total assets in Thala:</span>

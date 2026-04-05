@@ -443,7 +443,7 @@
     "key": "jupiter",
     "category": "Lending",
     "url": "https://jup.ag/lend",
-    "logoUrl": "https://jup.ag/favicon.ico",
+    "logoUrl": "/protocol_ico/jupiter.png",
     "description": "Jupiter Lend protocol on Solana.",
     "depositType": "native",
     "depositUrl": "https://jup.ag/lend",
@@ -451,6 +451,23 @@
     "managedType": "native",
     "socialMedia": {
       "twitter": "https://x.com/JupiterExchange"
+    },
+    "airdrop": "",
+    "contractAddresses": []
+  },
+  {
+    "name": "Kamino",
+    "key": "kamino",
+    "category": "Lending",
+    "url": "https://kamino.com/lend",
+    "logoUrl": "/protocol_ico/kamino.png",
+    "description": "Kamino lending markets on Solana.",
+    "depositType": "external",
+    "depositUrl": "https://kamino.com/lend",
+    "isDepositEnabled": true,
+    "managedType": "native",
+    "socialMedia": {
+      "twitter": "https://x.com/KaminoFinance"
     },
     "airdrop": "",
     "contractAddresses": []

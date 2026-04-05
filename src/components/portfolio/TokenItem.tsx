@@ -7,7 +7,8 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { useState, useEffect, useMemo } from "react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { formatNumber, formatCurrency } from "@/lib/utils/numberFormat";
+import { formatNumber } from "@/lib/utils/numberFormat";
+import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
 import { normalizeAddress } from "@/lib/utils/addressNormalization";
 
 interface TokenItemProps {
@@ -20,10 +21,11 @@ interface TokenItemProps {
 
 export function TokenItem({ token, stakingAprs = {}, disableDrag = false, rightBadge }: TokenItemProps) {
   const { startDrag, endDrag, state } = useDragDrop();
+  const { formatUsd, maskBalance } = usePortfolioAmountsPrivacy();
   
   const formattedAmount = formatNumber(parseFloat(token.amount) / Math.pow(10, token.decimals), 3);
-  const formattedValue = token.value ? formatCurrency(parseFloat(token.value), 2) : 'N/A';
-  const formattedPrice = token.price ? formatCurrency(parseFloat(token.price), 2) : 'N/A';
+  const formattedValue = token.value ? formatUsd(parseFloat(token.value), 2) : 'N/A';
+  const formattedPrice = token.price ? formatUsd(parseFloat(token.price), 2) : 'N/A';
   const symbol = token.symbol || token.name || 'Unknown';
   const normalizedAddress = normalizeAddress(token.address || '').toLowerCase();
   const isAetByAddress =
@@ -212,7 +214,7 @@ export function TokenItem({ token, stakingAprs = {}, disableDrag = false, rightB
       <div className="text-sm text-right ml-2">
         <div className="font-medium whitespace-nowrap">{formattedValue}</div>
         <div className="text-xs text-muted-foreground whitespace-nowrap">
-          {formattedAmount}
+          {maskBalance(formattedAmount)}
         </div>
       </div>
     </div>

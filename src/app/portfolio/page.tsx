@@ -5,9 +5,6 @@ import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Label } from '@/components/ui/label';
-import { isValidAptosAddress, isPotentialDomainName, resolveAddressFromName } from '@/lib/utils/aptosNames';
-
 import { Wallet, Search } from 'lucide-react';
 
 export default function WalletPage() {
@@ -15,20 +12,6 @@ export default function WalletPage() {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
-
-  const validateInput = (input: string): boolean => {
-    // Check if it's a valid Aptos address
-    if (isValidAptosAddress(input)) {
-      return true;
-    }
-    
-    // Check if it's a potential domain name (contains . and doesn't start with 0x)
-    if (isPotentialDomainName(input)) {
-      return true;
-    }
-    
-    return false;
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -40,30 +23,38 @@ export default function WalletPage() {
     }
 
     const cleanInput = address.trim();
-    
-    if (!validateInput(cleanInput)) {
-      setError('Invalid Aptos wallet address or domain format');
-      return;
-    }
-
     setIsLoading(true);
     
     try {
-      let finalAddress = cleanInput;
-      
-      // If it's a domain name, resolve it to address
-      if (isPotentialDomainName(cleanInput)) {
-        const resolvedAddress = await resolveAddressFromName(cleanInput);
-        if (!resolvedAddress) {
-          setError(`Domain "${cleanInput}" not found or invalid`);
-          setIsLoading(false);
-          return;
+      const res = await fetch('/api/portfolio/resolve-input', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: cleanInput }),
+      });
+      const data = (await res.json()) as {
+        aptosAddress?: string;
+        solanaAddress?: string;
+        error?: string;
+      };
+
+      if (!res.ok) {
+        if (data.error === 'aptos_name_not_found' || data.error === 'sol_domain_not_found') {
+          setError(`Domain or name "${cleanInput}" not found`);
+        } else if (data.error === 'invalid_input') {
+          setError('Invalid Aptos or Solana wallet address or domain format');
+        } else {
+          setError('Could not resolve input');
         }
-        finalAddress = resolvedAddress;
+        return;
       }
 
-      // Navigate to wallet view page
-      router.push(`/portfolio/${finalAddress}`);
+      const slug = data.aptosAddress ?? data.solanaAddress;
+      if (!slug) {
+        setError('Could not resolve input');
+        return;
+      }
+
+      router.push(`/portfolio/${encodeURIComponent(slug)}`);
     } catch (err) {
       setError('Failed to load wallet data');
     } finally {
@@ -82,7 +73,7 @@ export default function WalletPage() {
               </div>
               <CardTitle className="text-2xl font-bold">Wallet Explorer</CardTitle>
               <CardDescription>
-                Enter an Aptos wallet address or domain name to view its balance and positions
+                Enter an Aptos or Solana wallet address or domain name to view its balance and positions
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -93,7 +84,7 @@ export default function WalletPage() {
                     <Input
                       id="address"
                       type="text"
-                      placeholder="Enter Aptos address or domain (e.g., defishow.petra.apt)..."
+                      placeholder="Enter Aptos or Solana address or domain (e.g., defishow.petra.apt)..."
                       value={address}
                       onChange={(e) => setAddress(e.target.value)}
                       className="pl-10"
@@ -119,8 +110,9 @@ export default function WalletPage() {
 
                              <div className="mt-6  text-sm text-gray-500 overflow-hidden">
                  <p className="mb-2">Examples:</p>
-                 <p>Address: 0x4ade47d86d1013af5a0e38bbbd5d745a72cf4b9fa9759f4a5f7434b15bb1fbd1</p>
-                 <p>Domain: defishow.petra.apt</p>
+                 <p>Aptos: 0x4ade47d86d1013af5a0e38bbbd5d745a72cf4b9fa9759f4a5f7434b15bb1fbd1</p>
+                 <p>Aptos domain: defishow.petra.apt</p>
+                 <p>Solana domain: bonfida.sol</p>
                </div>
             </CardContent>
           </Card>
@@ -128,4 +120,4 @@ export default function WalletPage() {
       </div>
     </div>
   );
-} 
+}

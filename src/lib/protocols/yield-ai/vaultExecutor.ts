@@ -62,17 +62,24 @@ async function buildAndSubmit(options: {
     logPrefix = "[Yield AI]",
   } = options;
 
-  const executor = getExecutorAccount();
-  const executorAddress = executor.accountAddress;
-
   if (dryRun) {
+    let senderLabel: string;
+    if (process.env.YIELD_AI_EXECUTOR_PRIVATE_KEY) {
+      senderLabel = getExecutorAccount().accountAddress.toString();
+    } else {
+      senderLabel =
+        "(dry-run: YIELD_AI_EXECUTOR_PRIVATE_KEY unset — live runs would fail at submit)";
+    }
     console.log(`${logPrefix} dryRun tx build:`, {
       function: fn,
-      sender: executorAddress.toString(),
+      sender: senderLabel,
       functionArguments,
     });
     return { hash: null as string | null, dryRun: true };
   }
+
+  const executor = getExecutorAccount();
+  const executorAddress = executor.accountAddress;
 
   const transaction = await aptos.transaction.build.simple({
     sender: executorAddress,

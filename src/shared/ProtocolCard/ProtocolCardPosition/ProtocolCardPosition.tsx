@@ -1,7 +1,8 @@
 "use client";
 
 import Image from "next/image";
-import { formatCurrency } from "@/lib/utils/numberFormat";
+import { useMemo, useState } from "react";
+import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
 import { Badge } from "@/shared/Badge/Badge";
 import type { ProtocolPosition } from "../types";
 import { PositionBadge } from "../types";
@@ -15,11 +16,32 @@ function getBadgeVariant(badge: PositionBadge): "success" | "danger" {
   return badge === PositionBadge.Active || badge === PositionBadge.Supply ? "success" : "danger";
 }
 
+function getAprBadgeText(apr?: string): string | null {
+  if (!apr) return null;
+  const normalizedApr = apr.trim();
+  if (!normalizedApr) return null;
+  return normalizedApr.endsWith("%") ? normalizedApr : `${normalizedApr}%`;
+}
+
+function initialsFromLabel(label: string): string {
+  const cleaned = (label || "").trim();
+  if (!cleaned) return "?";
+  const token = cleaned.split(/\s+/)[0] ?? cleaned;
+  const up = token.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return (up.slice(0, 4) || "?").toUpperCase();
+}
+
 export function ProtocolCardPosition({ position }: ProtocolCardPositionProps) {
+  const { formatUsd, maskBalance } = usePortfolioAmountsPrivacy();
   const isPool = Boolean(position.logoUrl && position.logoUrl2);
   const logoUrl = position.logoUrl;
+  const logoUrlFallback = position.logoUrlFallback;
   const logoUrl2 = position.logoUrl2;
   const isCollateral = position.isCollateral;
+  const aprBadgeText = getAprBadgeText(position.apr);
+  const [useFallbackLogo, setUseFallbackLogo] = useState(false);
+  const [logoFailed, setLogoFailed] = useState(false);
+  const initials = useMemo(() => initialsFromLabel(position.label), [position.label]);
 
   if (isPool && logoUrl && logoUrl2) {
     return (
@@ -36,10 +58,15 @@ export function ProtocolCardPosition({ position }: ProtocolCardPositionProps) {
                   {position.badge}
                 </Badge>
               )}
+              {aprBadgeText && (
+                <Badge variant="info" className={styles.aprBadge}>
+                  {aprBadgeText}
+                </Badge>
+              )}
             </div>
             <span className={styles.label}>{position.label}</span>
           </div>
-          <span className={styles.value}>{formatCurrency(position.value, 2)}</span>
+          <span className={styles.value}>{formatUsd(position.value, 2)}</span>
         </div>
       </div>
     );
@@ -52,7 +79,42 @@ export function ProtocolCardPosition({ position }: ProtocolCardPositionProps) {
       <div className={styles.singleRow}>
 
         <div className={styles.singleLeft}>
-          {logoUrl && <Image src={logoUrl} alt="" width={24} height={24} className={styles.logo} unoptimized />}
+          {(logoUrl || (useFallbackLogo && logoUrlFallback)) && !logoFailed ? (
+            <Image
+              src={useFallbackLogo ? (logoUrlFallback as string) : (logoUrl as string)}
+              alt=""
+              width={24}
+              height={24}
+              className={styles.logo}
+              unoptimized
+              onError={() => {
+                if (!useFallbackLogo && logoUrlFallback) {
+                  setUseFallbackLogo(true);
+                  return;
+                }
+                setLogoFailed(true);
+              }}
+            />
+          ) : (
+            <div
+              className={styles.logo}
+              style={{
+                width: 24,
+                height: 24,
+                borderRadius: 9999,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 10,
+                fontWeight: 600,
+                background: "rgba(148,163,184,0.18)",
+                color: "rgba(148,163,184,0.95)",
+              }}
+              aria-hidden
+            >
+              {initials}
+            </div>
+          )}
           <div className={styles.singleLabelBlock}>
             <div className={styles.labelAndBadge}>
               <span className={styles.label}>{position.label}</span>
@@ -69,19 +131,24 @@ export function ProtocolCardPosition({ position }: ProtocolCardPositionProps) {
                   Collateral
                 </Badge>
               )}
+              {aprBadgeText && (
+                <Badge variant="info" className={styles.aprBadge}>
+                  {aprBadgeText}
+                </Badge>
+              )}
             </div>
             {position.price != null && (
-              <span className={styles.price}>{formatCurrency(position.price, 2)}</span>
+              <span className={styles.price}>{formatUsd(position.price, 2)}</span>
             )}
           </div>
         </div>
 
         <div className={styles.rightCol}>
           <span className={isBorrow ? styles.valueBorrow : styles.value}>
-            {formatCurrency(position.value, 2)}
+            {formatUsd(position.value, 2)}
           </span>
           {position.subLabel != null && position.subLabel !== "" && (
-            <span className={styles.sublabel}>{position.subLabel}</span>
+            <span className={styles.sublabel}>{maskBalance(position.subLabel)}</span>
           )}
         </div>
 
