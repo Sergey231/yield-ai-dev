@@ -99,7 +99,12 @@ export function WebViewBridge() {
 
       const action = (element as HTMLElement).dataset.action;
       if (action) {
-        postToNative(action, basePayload);
+        let payload: Record<string, unknown> = {};
+        try {
+          const raw = (element as HTMLElement).dataset.payload;
+          if (raw) payload = JSON.parse(raw) as Record<string, unknown>;
+        } catch {}
+        postToNative(action, payload);
         return;
       }
 
@@ -133,16 +138,16 @@ export function WebViewBridge() {
           const nonce = command.payload?.nonce;
           if (typeof nonce === "string") {
             sessionNonce.current = nonce;
-            console.log("[Bridge] Session nonce received");
+            console.log("[Mobile] Session nonce received");
           }
           // emit initial route after handshake completes
           emitRouteChange();
           return;
         }
 
-        console.log("[Bridge ←RN]", command.type, command.payload ?? "");
+        console.log("[Mobile ← RN]", command.type, command.payload ?? "");
         postToNative("web_log", {
-          message: `[Bridge ←RN] ${command.type}`,
+          message: `[Mobile ← RN] ${command.type}`,
           payload: command.payload ?? null,
         });
         window.dispatchEvent(
