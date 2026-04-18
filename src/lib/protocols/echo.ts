@@ -12,7 +12,7 @@ export class EchoProtocol implements BaseProtocol {
     throw new Error('Echo Protocol deposits are handled externally');
   }
 
-  async buildWithdraw?(marketAddress: string, amountOctas: bigint, token: string, userAddress?: string): Promise<{
+  async buildWithdraw?(marketAddress: string, amountOctas: bigint | null, token: string, userAddress?: string): Promise<{
     type: 'entry_function_payload';
     function: string;
     type_arguments: string[];

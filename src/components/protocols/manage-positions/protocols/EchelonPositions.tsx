@@ -1207,6 +1207,7 @@ export function EchelonPositions() {
             closeAllModals();
           }}
           onConfirm={handleWithdrawConfirm}
+          protocol={{ name: "Echelon", logo: "/protocol_ico/echelon.png" }}
           position={{ ...selectedPosition, supply: String(selectedPosition.amount) }}
           tokenInfo={getTokenInfo(selectedPosition.coin)}
           isLoading={isWithdrawing}

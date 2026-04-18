@@ -405,7 +405,9 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger asChild>
-                            <Image src="/icon-crown.webp" alt="Premium Pool" width={12} height={12} className="object-contain cursor-help" />
+                            <span className="inline-flex cursor-help">
+                              <Image src="/icon-crown.webp" alt="Premium Pool" width={12} height={12} className="object-contain" />
+                            </span>
                           </TooltipTrigger>
                           <TooltipContent className="bg-popover text-popover-foreground border-border">
                             <div className="text-xs">Premium Pool</div>

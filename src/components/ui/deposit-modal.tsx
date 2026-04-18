@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import Image from "next/image";
 import { ChevronDown, ArrowLeftRight } from "lucide-react";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
@@ -10,18 +10,9 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogFooter,
-  DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { useAmountInput } from "@/hooks/useAmountInput";
 import { calcYield } from "@/lib/utils/calcYield";
 import { useWalletData } from '@/contexts/WalletContext';
@@ -29,9 +20,11 @@ import { Token } from '@/lib/types/panora';
 import tokenList from "@/lib/data/tokenList.json";
 import { useDeposit } from "@/lib/hooks/useDeposit";
 import { ProtocolKey } from "@/lib/transactions/types";
+import type { ExecuteDepositOptions } from "@/lib/transactions/DepositTransaction";
 import { Loader2 } from "lucide-react";
-import { Label } from "@/components/ui/label";
 import { SwapAndDepositModal } from "./swap-and-deposit-modal";
+import { cn } from "@/lib/utils";
+import { TokenAmountInput } from "@/shared/DepositAmountInput";
 
 interface DepositModalProps {
   isOpen: boolean;
@@ -56,7 +49,11 @@ interface DepositModalProps {
   };
   priceUSD: number;
   poolAddress?: string;
+  /** When depositing into the Yield AI vault (`protocol.key === 'yield-ai'`). */
+  yieldAiSafeAddress?: string;
 }
+
+const MIN_DEPOSIT_YIELD_AI_USDC = 0.1;
 
 export function DepositModal({
   isOpen,
@@ -66,12 +63,14 @@ export function DepositModal({
   tokenOut,
   priceUSD,
   poolAddress,
+  yieldAiSafeAddress,
 }: DepositModalProps) {
   const { tokens, refreshPortfolio } = useWalletData();
   const [isLoading, setIsLoading] = useState(false);
   const { deposit, isLoading: isDepositLoading } = useDeposit();
   const [isYieldExpanded, setIsYieldExpanded] = useState(false);
   const [isSwapModalOpen, setIsSwapModalOpen] = useState(false);
+  const amountInputRef = useRef<HTMLInputElement>(null);
   const { account, signAndSubmitTransaction } = useWallet();
 
   const [resolvedTokenIn, setResolvedTokenIn] = useState(tokenIn);
@@ -124,18 +123,18 @@ export function DepositModal({
       if (!addr || !addr.startsWith('0x')) return addr;
       return '0x' + addr.slice(2).replace(/^0+/, '') || '0x0';
     };
-    
+
     const normalizedAddress = normalizeAddress(address);
-    
+
     return (tokenList.data.data as Token[]).find(token => {
       const normalizedTokenAddress = normalizeAddress(token.tokenAddress || '');
       const normalizedFaAddress = normalizeAddress(token.faAddress || '');
-      
-      return normalizedTokenAddress === normalizedAddress || 
+
+      return normalizedTokenAddress === normalizedAddress ||
              normalizedFaAddress === normalizedAddress;
     });
   };
-  
+
   // Находим текущий токен в кошельке по адресу
   const currentToken = useMemo(() => {
     const normalizeAddress = (addr: string) => {
@@ -161,10 +160,10 @@ export function DepositModal({
         normalizedFaAddress === normalizedTokenInAddress;
     });
   }, [tokens, tokenIn.address]);
-  
+
   // Используем реальный баланс из кошелька
   const walletBalance = currentToken ? BigInt(currentToken.amount) : BigInt(0);
-  
+
   const {
     amount,
     amountString,
@@ -177,33 +176,46 @@ export function DepositModal({
     decimals: resolvedTokenIn.decimals,
   });
 
+  const formatTokenAmount = (value: bigint, decimals: number) => {
+    if (decimals <= 0) return value.toString();
+    const negative = value < 0n;
+    const v = negative ? -value : value;
+    const s = v.toString();
+    const whole = s.length > decimals ? s.slice(0, -decimals) : '0';
+    const fracRaw = s.length > decimals ? s.slice(-decimals) : s.padStart(decimals, '0');
+    const frac = fracRaw.replace(/0+$/, '');
+    const out = frac ? `${whole}.${frac}` : whole;
+    return negative ? `-${out}` : out;
+  };
 
   // Символы для токенов
-  const tokenInfo = useMemo(() => 
+  const tokenInfo = useMemo(() =>
     tokenIn.address ? getTokenInfo(tokenIn.address) : undefined,
     [tokenIn.address]
   );
-  
-  const displaySymbol = useMemo(() => 
+
+  const displaySymbol = useMemo(() =>
     tokenInfo?.symbol || resolvedTokenIn.symbol,
     [tokenInfo?.symbol, resolvedTokenIn.symbol]
   );
-  
-  const tokenOutInfo = useMemo(() => 
-    tokenOut.address ? getTokenInfo(tokenOut.address) : undefined,
-    [tokenOut.address]
-  );
-  
-  const displayTokenOutSymbol = useMemo(() => 
-    tokenOutInfo?.symbol || tokenOut.symbol,
-    [tokenOutInfo?.symbol, tokenOut.symbol]
-  );
 
   // Доходность
-  const yieldResult = useMemo(() => 
+  const yieldResult = useMemo(() =>
     calcYield(protocol.apy, amount, resolvedTokenIn.decimals),
     [protocol.apy, amount, resolvedTokenIn.decimals]
   );
+
+  const minYieldAiDepositBaseUnits = useMemo(() => {
+    if (protocol.key !== "yield-ai") return BigInt(0);
+    return BigInt(
+      Math.round(MIN_DEPOSIT_YIELD_AI_USDC * Math.pow(10, resolvedTokenIn.decimals))
+    );
+  }, [protocol.key, resolvedTokenIn.decimals]);
+
+  const isYieldAiBelowMinimum =
+    protocol.key === "yield-ai" &&
+    amount > BigInt(0) &&
+    amount < minYieldAiDepositBaseUnits;
 
   // Устанавливаем максимальное значение при открытии модального окна
   useEffect(() => {
@@ -222,7 +234,7 @@ export function DepositModal({
 
   const handleDeposit = async () => {
     if (isLoading || isDepositLoading) return; // Prevent double-clicking
-    
+
     try {
       setIsLoading(true);
       console.log('Starting deposit with:', {
@@ -242,25 +254,25 @@ export function DepositModal({
           poolAddressLength: poolAddress?.length,
           isPoolAddressValid: poolAddress && poolAddress.length > 10
         });
-        
+
         const { safeImport } = await import('@/lib/utils/safeImport');
         const { AuroProtocol } = await safeImport(() => import('@/lib/protocols/auro'));
         const auroProtocol = new AuroProtocol();
-        
+
         // Build transaction payload
         const payload = await auroProtocol.buildCreatePosition(
           poolAddress,
           amount,
           tokenIn.address
         );
-        
+
         console.log('Generated Auro create position payload:', payload);
-        
+
         // Submit transaction
         if (!account || !signAndSubmitTransaction) {
           throw new Error('Wallet not connected');
         }
-        
+
         const result = await signAndSubmitTransaction({
           data: {
             function: payload.function as `${string}::${string}::${string}`,
@@ -271,15 +283,15 @@ export function DepositModal({
             maxGasAmount: 20000,
           },
         });
-        
+
         console.log('Auro create position transaction result:', result);
-        
+
         // Check transaction status
         if (result.hash) {
           console.log('Checking transaction status for hash:', result.hash);
           const maxAttempts = 10;
           const delay = 2000;
-          
+
           for (let i = 0; i < maxAttempts; i++) {
             console.log(`Checking transaction status attempt ${i + 1}/${maxAttempts}`);
             try {
@@ -287,25 +299,25 @@ export function DepositModal({
                 `https://fullnode.mainnet.aptoslabs.com/v1/transactions/by_hash/${result.hash}`
               );
               const txData = await txResponse.json();
-              
+
               console.log('Transaction success:', txData.success);
               console.log('Transaction vm_status:', txData.vm_status);
-              
+
               if (txData.success && txData.vm_status === "Executed successfully") {
                 console.log('Transaction confirmed successfully, showing toast...');
-                showTransactionSuccessToast({ 
-                  hash: result.hash, 
-                  title: "Auro Finance position created!" 
+                showTransactionSuccessToast({
+                  hash: result.hash,
+                  title: "Auro Finance position created!"
                 });
                 console.log('Toast should be shown now');
-                
+
                 // Refresh positions
                 setTimeout(() => {
-                  window.dispatchEvent(new CustomEvent('refreshPositions', { 
+                  window.dispatchEvent(new CustomEvent('refreshPositions', {
                     detail: { protocol: 'auro' }
                   }));
                 }, 2000);
-                
+
                 onClose();
                 return;
               } else if (txData.vm_status) {
@@ -315,11 +327,11 @@ export function DepositModal({
             } catch (error) {
               console.error(`Attempt ${i + 1} failed:`, error);
             }
-            
+
             console.log(`Waiting ${delay}ms before next attempt...`);
             await new Promise(resolve => setTimeout(resolve, delay));
           }
-          
+
           console.error('Transaction status check timeout');
           throw new Error('Transaction status check timeout');
         }
@@ -328,14 +340,25 @@ export function DepositModal({
       } else {
         // Existing deposit logic for other protocols (Echelon: pass marketAddress for managed positions)
         console.log('DepositModal: Using standard deposit logic for protocol:', protocol.key);
-        await deposit(
-          protocol.key,
-          tokenIn.address,
-          amount,
-          protocol.key === 'echelon' && poolAddress ? { marketAddress: poolAddress } : undefined
-        );
+        if (protocol.key === "yield-ai") {
+          if (!yieldAiSafeAddress) {
+            throw new Error("Yield AI deposit requires a safe address");
+          }
+          if (isYieldAiBelowMinimum) {
+            throw new Error(
+              `Minimum deposit is ${MIN_DEPOSIT_YIELD_AI_USDC} ${displaySymbol}`
+            );
+          }
+        }
+        let depositOptions: ExecuteDepositOptions | undefined;
+        if (protocol.key === "echelon" && poolAddress) {
+          depositOptions = { marketAddress: poolAddress };
+        } else if (protocol.key === "yield-ai" && yieldAiSafeAddress) {
+          depositOptions = { yieldAiSafeAddress };
+        }
+        await deposit(protocol.key, tokenIn.address, amount, depositOptions);
       }
-      
+
       onClose();
     } catch (error) {
       console.error('Deposit error:', error);
@@ -347,9 +370,9 @@ export function DepositModal({
   return (
     <>
       <Dialog open={isOpen} onOpenChange={onClose}>
-        <DialogContent className="sm:max-w-[425px] p-6 rounded-2xl">
-          <DialogHeader>
-            <div className="flex items-center gap-2">
+        <DialogContent className="w-full min-w-0 max-w-[min(100vw-2rem,425px)] overflow-x-hidden rounded-2xl p-6 sm:max-w-[425px] [&>button:last-child]:right-3 [&>button:last-child]:top-3 [&>button:last-child]:size-7 [&>button:last-child>svg]:size-3.5 sm:[&>button:last-child]:right-5 sm:[&>button:last-child]:top-5 sm:[&>button:last-child]:size-7 sm:[&>button:last-child>svg]:size-3.5 [&>button:last-child]:transition-colors [&>button:last-child]:hover:bg-muted/40">
+          <DialogHeader className="min-w-0 pr-11 sm:pr-12">
+            <div className="flex min-w-0 items-center gap-2">
               <Image
                 src={protocol.logo}
                 alt={protocol.name}
@@ -358,81 +381,33 @@ export function DepositModal({
                 className="rounded-full"
                 unoptimized
               />
-              <DialogTitle>Deposit to {protocol.name}</DialogTitle>
+              <DialogTitle className="min-w-0 truncate text-base sm:text-lg">
+                Deposit to {displaySymbol} {protocol.name}
+              </DialogTitle>
             </div>
-            <DialogDescription>
-              Enter amount to deposit {displaySymbol}
-            </DialogDescription>
           </DialogHeader>
 
-          <div className="flex items-center justify-center gap-2 py-4">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 relative">
-                <Image
-                  src={resolvedTokenIn.logo}
-                  alt={displaySymbol}
-                  width={32}
-                  height={32}
-                  className="object-contain"
-                  unoptimized
-                />
-              </div>
-              <span>{displaySymbol}</span>
-            </div>
-            <span>→</span>
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 relative">
-                <Image
-                  src={tokenOut.address === tokenIn.address ? resolvedTokenIn.logo : tokenOut.logo}
-                  alt={displayTokenOutSymbol}
-                  width={32}
-                  height={32}
-                  className="object-contain"
-                  unoptimized
-                />
-              </div>
-              <span>{displayTokenOutSymbol}</span>
-            </div>
-          </div>
-
-          <div className="grid gap-4 py-4">
-            <div className="grid grid-cols-4 items-center gap-4">
-              <Label htmlFor="amount" className="text-right">
-                Amount
-              </Label>
-              <div className="col-span-3 flex items-center gap-2">
-                <Input
-                  id="amount"
-                  type="number"
-                  value={amountString}
-                  onChange={(e) => setAmountFromString(e.target.value)}
-                  className={`flex-1 ${amount > walletBalance ? 'text-red-500' : ''}`}
-                  placeholder="0.00"
-                />
-                <div className="flex items-center gap-1">
-                  <Image
-                    src={resolvedTokenIn.logo}
-                    alt={displaySymbol}
-                    width={16}
-                    height={16}
-                    className="rounded-full"
-                    unoptimized
-                  />
-                  <span className="text-sm">{displaySymbol}</span>
-                  {amountString && (
-                    <span className={`text-sm ml-2 ${amount > walletBalance ? 'text-red-500' : 'text-muted-foreground'}`}>
-                      ≈ ${(parseFloat(amountString) * resolvedPriceUSD).toFixed(2)}
-                    </span>
-                  )}
-                </div>
-              </div>
+          <div className="grid min-w-0 gap-4 py-4">
+            <div>
+              <TokenAmountInput
+                tokenLogoUrl={resolvedTokenIn.logo}
+                tokenSymbol={displaySymbol}
+                amountString={amountString}
+                onAmountChange={setAmountFromString}
+                priceUSD={resolvedPriceUSD}
+                availableText={`${formatTokenAmount(walletBalance, resolvedTokenIn.decimals)} ${displaySymbol}`}
+                inputRef={amountInputRef}
+                onHalf={setHalf}
+                onMax={setMax}
+                isOverBalance={amount > walletBalance}
+              />
             </div>
 
             {amount > walletBalance && (
-              <div className="flex items-center justify-between text-sm text-red-500 mt-1">
-                <span>
+              <div className="mt-1 flex min-w-0 items-center justify-between text-sm text-red-500">
+                <span className="min-w-0 break-words">
                   Amount exceeds wallet balance of {displaySymbol}. Would you like to{" "}
-                  <button 
+                  <button
                     onClick={() => setIsSwapModalOpen(true)}
                     className="text-blue-500 hover:text-blue-600 inline-flex items-center gap-1"
                   >
@@ -444,50 +419,63 @@ export function DepositModal({
               </div>
             )}
 
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={setHalf}>
-                Half
-              </Button>
-              <Button variant="outline" size="sm" onClick={setMax}>
-                Max
-              </Button>
-            </div>
+            {isYieldAiBelowMinimum && (
+              <p className="text-sm text-red-500">
+                Minimum deposit is {MIN_DEPOSIT_YIELD_AI_USDC} {displaySymbol}.
+              </p>
+            )}
 
             <div
-              className="flex items-center justify-between cursor-pointer"
+              className="flex min-w-0 cursor-pointer items-start gap-3"
               onClick={() => setIsYieldExpanded(!isYieldExpanded)}
             >
-              <div className="flex items-center gap-4">
-                <div className="text-sm text-muted-foreground">
-                  APR {protocol.apy.toFixed(2)}%
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xl font-bold">
+              <div className="min-w-0 shrink-0 pt-[1px] text-sm text-muted-foreground">
+                APR {protocol.apy.toFixed(2)}%
+              </div>
+
+              <div className="ml-auto flex min-w-0 flex-col items-start text-left">
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className="min-w-0 truncate text-sm font-semibold tabular-nums">
                     ≈ ${yieldResult.daily.toFixed(2)}
                   </span>
-                  <span className="text-sm text-muted-foreground">/day</span>
-                  <ChevronDown className="h-3 w-3 text-muted-foreground ml-1" />
+                  <span className="shrink-0 text-xs text-muted-foreground">/day</span>
+                  <ChevronDown className="ml-1 size-3 shrink-0 text-muted-foreground" />
                 </div>
+
+                {isYieldExpanded && (
+                  <div className="mt-1 min-w-0 space-y-1 break-words text-sm text-muted-foreground">
+                    <div className="min-w-0 break-words">≈ ${yieldResult.weekly.toFixed(2)} /week</div>
+                    <div className="min-w-0 break-words">≈ ${yieldResult.monthly.toFixed(2)} /month</div>
+                    <div className="min-w-0 break-words">≈ ${yieldResult.yearly.toFixed(2)} /year</div>
+                  </div>
+                )}
               </div>
             </div>
-            {isYieldExpanded && (
-              <div className="space-y-1 text-sm text-muted-foreground">
-                <div>≈ ${yieldResult.weekly.toFixed(2)} /week</div>
-                <div>≈ ${yieldResult.monthly.toFixed(2)} /month</div>
-                <div>≈ ${yieldResult.yearly.toFixed(2)} /year</div>
-              </div>
-            )}
           </div>
 
           <Separator />
 
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={onClose}>
+          <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:justify-end">
+            <Button
+              variant="outline"
+              onClick={onClose}
+              className="h-10 w-full sm:w-auto"
+            >
               Cancel
             </Button>
             <Button
               onClick={handleDeposit}
-              disabled={!isValid || isLoading || isDepositLoading || !tokenIn.address || !protocol.key || amount === BigInt(0)}
+              className="h-10 w-full sm:w-auto"
+              disabled={
+                !isValid ||
+                isLoading ||
+                isDepositLoading ||
+                !tokenIn.address ||
+                !protocol.key ||
+                amount === BigInt(0) ||
+                (protocol.key === "yield-ai" &&
+                  (!yieldAiSafeAddress || isYieldAiBelowMinimum))
+              }
             >
               {(isLoading || isDepositLoading) ? (
                 <>
@@ -510,7 +498,8 @@ export function DepositModal({
         amount={amount}
         priceUSD={resolvedPriceUSD}
         poolAddress={poolAddress}
+        yieldAiSafeAddress={yieldAiSafeAddress}
       />
     </>
   );
-} 
+}

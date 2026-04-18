@@ -49,6 +49,7 @@ function getExecutorAccount(): Account {
 
 async function buildAndSubmit(options: {
   function: string;
+  typeArguments?: string[];
   functionArguments: (string | number | bigint)[];
   maxGasAmount?: number;
   dryRun?: boolean;
@@ -56,6 +57,7 @@ async function buildAndSubmit(options: {
 }) {
   const {
     function: fn,
+    typeArguments = [],
     functionArguments,
     maxGasAmount = 50_000,
     dryRun = false,
@@ -73,6 +75,7 @@ async function buildAndSubmit(options: {
     console.log(`${logPrefix} dryRun tx build:`, {
       function: fn,
       sender: senderLabel,
+      typeArguments,
       functionArguments,
     });
     return { hash: null as string | null, dryRun: true };
@@ -86,7 +89,7 @@ async function buildAndSubmit(options: {
     withFeePayer: false,
     data: {
       function: fn as EntryFunctionId,
-      typeArguments: [],
+      typeArguments,
       functionArguments: functionArguments.map((a) =>
         typeof a === "bigint" ? a.toString() : String(a)
       ),
@@ -221,6 +224,127 @@ export async function executeDepositToMoar(options: {
     maxGasAmount,
     dryRun,
     logPrefix: "[Yield AI] execute_deposit",
+  });
+}
+
+export async function executeSwapFaToFa(options: {
+  safeAddress: string;
+  feeTier: bigint | number;
+  amountInBaseUnits: bigint;
+  amountOutMinBaseUnits: bigint;
+  sqrtPriceLimit: bigint;
+  fromTokenMetadata: string;
+  toTokenMetadata: string;
+  deadlineUnixSeconds: bigint | number;
+  maxGasAmount?: number;
+  dryRun?: boolean;
+}) {
+  const {
+    safeAddress,
+    feeTier,
+    amountInBaseUnits,
+    amountOutMinBaseUnits,
+    sqrtPriceLimit,
+    fromTokenMetadata,
+    toTokenMetadata,
+    deadlineUnixSeconds,
+    maxGasAmount,
+    dryRun,
+  } = options;
+
+  return buildAndSubmit({
+    function: YIELD_AI_VAULT_ENTRYPOINTS.executeSwapFaToFa,
+    functionArguments: [
+      toCanonicalAddress(safeAddress),
+      feeTier,
+      amountInBaseUnits,
+      amountOutMinBaseUnits,
+      sqrtPriceLimit,
+      toCanonicalAddress(fromTokenMetadata),
+      toCanonicalAddress(toTokenMetadata),
+      deadlineUnixSeconds,
+    ],
+    maxGasAmount,
+    dryRun,
+    logPrefix: "[Yield AI] execute_swap_fa_to_fa",
+  });
+}
+
+export async function executeWithdrawMoarFull(options: {
+  safeAddress: string;
+  adapterAddress: string;
+  metadataAddress: string;
+  maxGasAmount?: number;
+  dryRun?: boolean;
+}) {
+  const { safeAddress, adapterAddress, metadataAddress, maxGasAmount, dryRun } = options;
+  return buildAndSubmit({
+    function: YIELD_AI_VAULT_ENTRYPOINTS.executeWithdrawFull,
+    functionArguments: [
+      toCanonicalAddress(safeAddress),
+      toCanonicalAddress(adapterAddress),
+      toCanonicalAddress(metadataAddress),
+    ],
+    maxGasAmount,
+    dryRun,
+    logPrefix: "[Yield AI] execute_withdraw_full",
+  });
+}
+
+export async function executeDepositEchelonFa(options: {
+  safeAddress: string;
+  adapterAddress: string;
+  marketObj: string;
+  amountBaseUnits: bigint;
+  maxGasAmount?: number;
+  dryRun?: boolean;
+}) {
+  const { safeAddress, adapterAddress, marketObj, amountBaseUnits, maxGasAmount, dryRun } = options;
+  return buildAndSubmit({
+    function: YIELD_AI_VAULT_ENTRYPOINTS.executeDepositEchelonFa,
+    functionArguments: [
+      toCanonicalAddress(safeAddress),
+      toCanonicalAddress(adapterAddress),
+      toCanonicalAddress(marketObj),
+      amountBaseUnits,
+    ],
+    maxGasAmount,
+    dryRun,
+    logPrefix: "[Yield AI] execute_deposit_echelon_fa",
+  });
+}
+
+export async function executeClaimEchelonReward(options: {
+  safeAddress: string;
+  adapterAddress: string;
+  rewardCoinType: string;
+  rewardMetadata: string;
+  farmingId: string;
+  maxGasAmount?: number;
+  dryRun?: boolean;
+}) {
+  const {
+    safeAddress,
+    adapterAddress,
+    rewardCoinType,
+    rewardMetadata,
+    farmingId,
+    maxGasAmount,
+    dryRun,
+  } = options;
+
+  return buildAndSubmit({
+    function: YIELD_AI_VAULT_ENTRYPOINTS.executeClaimEchelon,
+    typeArguments: [rewardCoinType],
+    functionArguments: [
+      toCanonicalAddress(safeAddress),
+      toCanonicalAddress(adapterAddress),
+      toCanonicalAddress(rewardMetadata),
+      farmingId,
+    ],
+    maxGasAmount,
+    dryRun,
+    logPrefix: "[Yield AI] execute_claim_echelon",
   });
 }
 

@@ -4,23 +4,37 @@ import {
 } from "@/lib/constants/yieldAiVault";
 
 /**
- * Builds the payload for vault::init_vault (create AI agent safe).
- * Function: {MODULE}::vault::init_vault
- * Arguments: max_per_tx (u64), max_daily (u64) in on-chain base units (e.g. USDC 6 decimals).
+ * Builds the payload for vault::init_vault_v2 (create AI agent safe).
+ * Function: {MODULE}::vault::init_vault_v2
+ * Arguments (u64 strings for JSON / SDK):
+ * - max_per_tx, max_daily: deposit limits (execute_deposit / execute_deposit_echelon_fa) in asset base units (e.g. USDC 6 decimals).
+ * - swap_max_per_tx_usdc, swap_max_daily_usdc: FA-to-FA swap notional caps in USDC micro-units (6 decimals).
  */
 export function buildInitVaultPayload(params: {
   maxPerTxBaseUnits: bigint | string;
   maxDailyBaseUnits: bigint | string;
+  swapMaxPerTxUsdcBaseUnits: bigint | string;
+  swapMaxDailyUsdcBaseUnits: bigint | string;
 }): {
   function: string;
   typeArguments: string[];
   functionArguments: string[];
 } {
-  const { maxPerTxBaseUnits, maxDailyBaseUnits } = params;
+  const {
+    maxPerTxBaseUnits,
+    maxDailyBaseUnits,
+    swapMaxPerTxUsdcBaseUnits,
+    swapMaxDailyUsdcBaseUnits,
+  } = params;
   return {
-    function: `${YIELD_AI_VAULT_MODULE}::init_vault`,
+    function: `${YIELD_AI_VAULT_MODULE}::init_vault_v2`,
     typeArguments: [],
-    functionArguments: [String(maxPerTxBaseUnits), String(maxDailyBaseUnits)],
+    functionArguments: [
+      String(maxPerTxBaseUnits),
+      String(maxDailyBaseUnits),
+      String(swapMaxPerTxUsdcBaseUnits),
+      String(swapMaxDailyUsdcBaseUnits),
+    ],
   };
 }
 
@@ -91,5 +105,27 @@ export function buildVaultExecuteWithdrawFullAsOwnerPayload(params: {
     function: `${YIELD_AI_VAULT_MODULE}::execute_withdraw_full_as_owner`,
     typeArguments: [],
     functionArguments: [safeAddress, adapterAddress, metadata],
+  };
+}
+
+/**
+ * Owner emergency path: full Echelon FA market exit back into the safe (no executor).
+ * Function: {MODULE}::execute_withdraw_all_echelon_fa_as_owner
+ * Arguments: safe_address, adapter_address, market_obj (Object<Market>).
+ */
+export function buildVaultExecuteWithdrawAllEchelonFaAsOwnerPayload(params: {
+  safeAddress: string;
+  adapterAddress: string;
+  marketObj: string;
+}): {
+  function: string;
+  typeArguments: string[];
+  functionArguments: string[];
+} {
+  const { safeAddress, adapterAddress, marketObj } = params;
+  return {
+    function: `${YIELD_AI_VAULT_MODULE}::execute_withdraw_all_echelon_fa_as_owner`,
+    typeArguments: [],
+    functionArguments: [safeAddress, adapterAddress, marketObj],
   };
 }

@@ -1071,9 +1071,9 @@ export function KaminoPositions() {
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <div className="text-gray-500 mb-1 cursor-help">
+                  <span className="inline-flex w-fit text-gray-500 mb-1 cursor-help">
                     🎁 Rewards: {totalRewardsUsd > 0 ? formatCurrency(totalRewardsUsd, 2) : "-"}
-                  </div>
+                  </span>
                 </TooltipTrigger>
                 <TooltipContent className="max-w-xs">
                   <div className="space-y-1 text-xs max-h-48 overflow-auto">

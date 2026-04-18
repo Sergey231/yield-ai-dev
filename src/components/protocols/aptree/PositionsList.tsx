@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { ProtocolCard } from "@/shared/ProtocolCard";
@@ -100,9 +100,35 @@ export function PositionsList({
     [positions]
   );
 
+  const cacheKey = useMemo(() => `proto_has_positions:aptree`, []);
+  const [lastKnownHasPositions, setLastKnownHasPositions] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      setLastKnownHasPositions(window.localStorage.getItem(cacheKey) === "1");
+    } catch {
+      // ignore
+    }
+  }, [cacheKey]);
+
   useEffect(() => {
     onValueRef.current?.(totalValue);
   }, [totalValue]);
+
+  useEffect(() => {
+    // Positions query is disabled when address is missing; keep cache untouched in that case.
+    if (!address) return;
+    if (positionsPending || positionsFetching) return;
+    const hasPositions = positions.length > 0;
+    setLastKnownHasPositions(hasPositions);
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(cacheKey, hasPositions ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [address, cacheKey, positionsPending, positionsFetching, positions.length]);
 
   const protocolPositions = useMemo(
     () =>
@@ -146,6 +172,11 @@ export function PositionsList({
   const hasPositions = positions.length > 0;
   // Hide only after we know the wallet has no APTree position (not while the first fetch is in flight).
   if (!hasPositions && !positionsPending) {
+    return null;
+  }
+  // Sidebar UX: don't show skeleton for protocols that end up empty.
+  // We already show a global "Checking positions..." indicator in the sidebar.
+  if (positionsPending && !hasPositions && !lastKnownHasPositions) {
     return null;
   }
 

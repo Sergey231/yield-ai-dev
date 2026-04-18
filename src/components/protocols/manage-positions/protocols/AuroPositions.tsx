@@ -1577,6 +1577,7 @@ export function AuroPositions({ address, onPositionsValueChange }: AuroPositions
             setSelectedWithdrawPosition(null);
           }}
           onConfirm={handleWithdrawConfirm}
+          protocol={{ name: "Auro Finance", logo: "/protocol_ico/auro.png" }}
           position={{
             coin: selectedWithdrawPosition.collateralTokenAddress,
             supply: Math.floor(parseFloat(selectedWithdrawPosition.collateralAmount) * Math.pow(10, selectedWithdrawPosition.collateralTokenInfo?.decimals || 8)).toString(),

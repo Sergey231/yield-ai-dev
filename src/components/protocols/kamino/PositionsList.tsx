@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { ProtocolCard } from "@/shared/ProtocolCard";
@@ -158,6 +158,40 @@ export function PositionsList({
     }
   }, [effectiveAddress, isPositionsFetched, isRewardsFetched, isPositionsFetching, isRewardsFetching]);
 
+  const cacheKey = useMemo(() => `proto_has_positions:kamino`, []);
+  const [lastKnownHasPositions, setLastKnownHasPositions] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      setLastKnownHasPositions(window.localStorage.getItem(cacheKey) === "1");
+    } catch {
+      // ignore
+    }
+  }, [cacheKey]);
+
+  useEffect(() => {
+    if (!effectiveAddress) return;
+    if (!isPositionsFetched || !isRewardsFetched || isPositionsFetching || isRewardsFetching) return;
+    const hasPositions = positions.length > 0 || calculateRewardsValue > 0;
+    setLastKnownHasPositions(hasPositions);
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(cacheKey, hasPositions ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [
+    cacheKey,
+    effectiveAddress,
+    isPositionsFetched,
+    isRewardsFetched,
+    isPositionsFetching,
+    isRewardsFetching,
+    positions.length,
+    calculateRewardsValue,
+  ]);
+
   // Avoid showing an "empty" card when cached data is empty but a refetch is still in progress.
   const isFetching = isPositionsFetching || isRewardsFetching;
   const isInitialLoading = isPositionsLoading || isRewardsLoading;
@@ -166,6 +200,9 @@ export function PositionsList({
   const isError = isPositionsError || isRewardsError;
 
   if (!protocol || !effectiveAddress) return null;
+  // Sidebar UX: don't show skeleton for protocols that end up empty.
+  // We already show a global "Checking positions..." indicator in the sidebar.
+  if (isLoading && !hasAnyData && !lastKnownHasPositions) return null;
   if (!isLoading && (isError || (positions.length === 0 && calculateRewardsValue <= 0))) return null;
 
   return (

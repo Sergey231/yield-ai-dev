@@ -207,9 +207,9 @@ function ThalaPositionCard({ position, index, onClaimSuccess }: ThalaPositionPro
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <div className="text-gray-500 mb-1 cursor-help">
+                    <span className="inline-flex w-fit text-gray-500 mb-1 cursor-help">
                       🎁 Rewards: {formatCurrencyValue(position.rewardsValueUSD)}
-                    </div>
+                    </span>
                   </TooltipTrigger>
                   <TooltipContent className="max-w-xs">
                     <div className="space-y-1 text-xs max-h-48 overflow-auto">

@@ -11,6 +11,7 @@ import { useClaimRewards } from '@/lib/hooks/useClaimRewards';
 import { useWithdraw } from '@/lib/hooks/useWithdraw';
 import { useToast } from '@/components/ui/use-toast';
 import { useWalletStore } from '@/lib/stores/walletStore';
+import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { queryKeys } from '@/lib/query/queryKeys';
 import { useMoarPositions, useMoarRewards, useMoarPools, type MoarPosition } from '@/lib/query/hooks/protocols/moar';
 import { WithdrawModal } from '@/components/ui/withdraw-modal';
@@ -31,6 +32,8 @@ export function MoarPositions({ address, onPositionsValueChange }: MoarPositions
   const { withdraw, isLoading: isWithdrawing } = useWithdraw();
   const { toast } = useToast();
   const { setRewards, getTokenPrice } = useWalletStore();
+  const protocol = getProtocolByName("Moar Market");
+  const depositDisabled = protocol?.isDepositEnabled === false;
 
   const { data: positions = [], isLoading: positionsLoading, error: positionsError } = useMoarPositions(walletAddress, {
     refetchOnMount: 'always',
@@ -96,7 +99,10 @@ export function MoarPositions({ address, onPositionsValueChange }: MoarPositions
   };
 
   // Обработчик подтверждения withdraw
-  const handleWithdrawConfirm = async (amount: bigint) => {
+  const handleWithdrawConfirm = async (
+    amount: bigint,
+    options?: { withdrawFullPosition?: boolean }
+  ) => {
     if (!selectedPosition) return;
 
     try {
@@ -114,14 +120,17 @@ export function MoarPositions({ address, onPositionsValueChange }: MoarPositions
 
       // Вызываем withdraw через useWithdraw hook
       // Для Moar Market: marketAddress = poolId, token = underlying_asset
+      const useFullWithdraw = Boolean(options?.withdrawFullPosition);
+      const withdrawAmount = useFullWithdraw ? null : amount;
+
       console.log('Calling withdraw with:', {
         protocol: 'moar',
         poolId: selectedPosition.poolId,
-        amount: amount.toString(),
+        amount: withdrawAmount === null ? 'null (full / Option::None)' : withdrawAmount.toString(),
         tokenAddress
       });
 
-      await withdraw('moar', String(selectedPosition.poolId), amount, tokenAddress);
+      await withdraw('moar', String(selectedPosition.poolId), withdrawAmount, tokenAddress);
 
       // Закрываем модал и обновляем состояние
       setShowWithdrawModal(false);
@@ -442,10 +451,11 @@ export function MoarPositions({ address, onPositionsValueChange }: MoarPositions
                   <div className="flex gap-2 mt-2 justify-end">
                     <Button
                       onClick={() => handleDepositClick(position)}
-                      disabled={false}
+                      disabled={depositDisabled}
                       size="sm"
                       variant="default"
                       className="h-10"
+                      title={depositDisabled ? "Deposits disabled (reduce-only)" : undefined}
                     >
                       Deposit
                     </Button>
@@ -562,10 +572,11 @@ export function MoarPositions({ address, onPositionsValueChange }: MoarPositions
                     <div className="flex gap-2 mt-2 justify-end">
                       <Button
                         onClick={() => handleDepositClick(position)}
-                        disabled={false}
+                        disabled={depositDisabled}
                         size="sm"
                         variant="default"
                         className="h-10"
+                        title={depositDisabled ? "Deposits disabled (reduce-only)" : undefined}
                       >
                         Deposit
                       </Button>
@@ -748,6 +759,7 @@ export function MoarPositions({ address, onPositionsValueChange }: MoarPositions
             setSelectedPosition(null);
           }}
           onConfirm={handleWithdrawConfirm}
+          protocol={{ name: "Moar Market", logo: "/protocol_ico/moar-market-logo-primary.png" }}
           position={{
             coin: selectedPosition.assetInfo.symbol,
             supply: selectedPosition.balance,

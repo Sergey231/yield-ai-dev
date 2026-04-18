@@ -309,34 +309,10 @@
     "description": "Moar Market is the Credit Layer for Aptos DeFi. It introduces the concept of Composable Leverage - giving you credit to use across DeFi Protocols.",
     "depositType": "native",
     "depositUrl": "https://app.moar.market/lend",
-    "isDepositEnabled": true,
+    "isDepositEnabled": false,
     "managedType": "native",
     "socialMedia": {
       "twitter": "https://x.com/MoarMarket"
-    },
-    "airdrop": "points",
-    "airdropInfo": {
-      "title": "🎁 Moarbles Points",
-      "description": "Points called Moarbles. Earn automatically by lending (4x) or borrowing. Calculated using time-weighted average balances (TWAB).",
-      "links": [
-        {
-          "text": "Moarbles Leaderboard",
-          "url": "https://app.moar.market/moarbles",
-          "type": "app"
-        },
-        {
-          "text": "Moarbles Docs",
-          "url": "https://docs.moar.market/points-moarbles",
-          "type": "docs"
-        }
-      ],
-      "requirements": [
-        "Lend: 4 Moarbles per $100 TWAB/day",
-        "Borrow: 1 Moarble per $100 TWAB/day",
-        "Min $100 position required",
-        "Auto-accrual via TWAB calculation"
-      ],
-      "additionalInfo": "Supports leveraged LPs and vault strategies. TWAB ensures fair rewards for rebalancers."
     },
     "contractAddresses": [
       "0xa3afc59243afb6deeac965d40b25d509bb3aebc12f502b8592c283070abc2e07"

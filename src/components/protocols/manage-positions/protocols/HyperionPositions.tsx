@@ -893,6 +893,7 @@ export function HyperionPositions() {
             setSelectedVaultData(null);
           }}
           onConfirm={handleVaultWithdrawConfirm}
+          protocol={{ name: "Hyperion", logo: "/protocol_ico/hyperion.png" }}
           position={{
             coin: selectedVaultToken.address,
             supply: selectedVaultToken.amount || "0",

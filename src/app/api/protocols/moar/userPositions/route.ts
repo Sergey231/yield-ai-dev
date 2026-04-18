@@ -35,6 +35,41 @@ async function callView(functionFullname: string, args: any[]): Promise<any> {
   return text ? JSON.parse(text) : null;
 }
 
+const MOAR_POOL_PKG =
+  '0xa3afc59243afb6deeac965d40b25d509bb3aebc12f502b8592c283070abc2e07';
+
+/**
+ * `lens::get_lp_shares_and_deposited_amount` can report a deposited amount that is
+ * slightly above what `pool::withdraw` accepts (share↔asset rounding). Use
+ * `pool::convert_lp_shares_to_amount` for the on-chain redeemable amount and cap
+ * by the lens value when it is lower.
+ */
+async function moarWithdrawableUnderlyingOctas(
+  poolId: number,
+  positionData: unknown[]
+): Promise<string> {
+  const depositedAmount = String(positionData[1] ?? '0');
+  const lpShares = positionData[0];
+  if (!lpShares || lpShares === '0' || depositedAmount === '0') {
+    return depositedAmount;
+  }
+  try {
+    const converted = await callView(`${MOAR_POOL_PKG}::pool::convert_lp_shares_to_amount`, [
+      poolId.toString(),
+      String(lpShares),
+    ]);
+    const raw = Array.isArray(converted) ? converted[0] : converted;
+    if (raw == null) return depositedAmount;
+    const c = BigInt(String(raw));
+    const d = BigInt(depositedAmount);
+    if (c === 0n) return depositedAmount;
+    return (c < d ? c : d).toString();
+  } catch (e) {
+    console.warn(`[Moar userPositions] convert_lp_shares_to_amount failed pool ${poolId}:`, e);
+    return depositedAmount;
+  }
+}
+
 /**
  * @swagger
  * /api/protocols/moar/userPositions:
@@ -182,6 +217,7 @@ export async function GET(request: NextRequest) {
         if (depositedAmount && depositedAmount !== '0') {
           const pool = pools[poolId];
           const underlyingAsset = pool.underlying_asset.inner;
+          const balanceOctas = await moarWithdrawableUnderlyingOctas(poolId, positionData);
           
           try {
             // Get token info from tokenList
@@ -206,7 +242,7 @@ export async function GET(request: NextRequest) {
             console.log(`  - Available keys in prices:`, Object.keys(prices));
             
             // Calculate USD value with fresh price
-            const amount = parseFloat(depositedAmount) / Math.pow(10, tokenInfo.decimals);
+            const amount = parseFloat(balanceOctas) / Math.pow(10, tokenInfo.decimals);
             const price = parseFloat(freshPrice);
             const value = amount * price;
 
@@ -215,7 +251,7 @@ export async function GET(request: NextRequest) {
             positions.push({
               poolId: poolId,
               assetName: tokenInfo.symbol,
-              balance: depositedAmount,
+              balance: balanceOctas,
               value: value.toString(),
               type: 'deposit',
               assetInfo: {
@@ -231,7 +267,7 @@ export async function GET(request: NextRequest) {
             positions.push({
               poolId: poolId,
               assetName: pool.name || 'Unknown',
-              balance: depositedAmount,
+              balance: balanceOctas,
               value: '0',
               type: 'deposit',
               assetInfo: {

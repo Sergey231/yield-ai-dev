@@ -5,6 +5,8 @@ import { runYieldAiVaultCronPass } from "@/lib/protocols/yield-ai/yieldAiVaultWo
 type CronRunBody = {
   /** Some clients send `"true"` / `"false"` instead of JSON booleans. */
   dryRun?: boolean | string;
+  /** Optional: run engine only for these safes (addresses). */
+  safeAddresses?: string[];
   pageSize?: number;
   maxSafesProcessedPerRun?: number;
   maxTxPerRun?: number;
@@ -85,6 +87,7 @@ export async function POST(request: NextRequest) {
           : "(empty)",
       dryRunFromPayload: body.dryRun,
       dryRunResolved: dryRun,
+      safeAddresses: Array.isArray(body.safeAddresses) ? body.safeAddresses.length : undefined,
       pageSize: body.pageSize,
       maxSafesProcessedPerRun: body.maxSafesProcessedPerRun,
       maxTxPerRun: body.maxTxPerRun,
@@ -93,6 +96,9 @@ export async function POST(request: NextRequest) {
 
     const result = await runYieldAiVaultCronPass({
       dryRun,
+      safeAddresses: Array.isArray(body.safeAddresses)
+        ? body.safeAddresses.filter((x) => typeof x === "string" && x.trim().length > 0)
+        : undefined,
       pageSize:
         typeof body.pageSize === "number" && body.pageSize > 0 ? body.pageSize : undefined,
       maxSafesProcessedPerRun:

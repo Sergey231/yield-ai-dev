@@ -5,6 +5,14 @@
 export const YIELD_AI_VAULT_MODULE =
   "0x333d1890e0aa3762bb256f5caeeb142431862628c63063801f44c152ef154700::vault";
 
+/** Vault package id (mainnet), without `::module` suffix. */
+export const YIELD_AI_PACKAGE_ADDRESS =
+  "0x333d1890e0aa3762bb256f5caeeb142431862628c63063801f44c152ef154700";
+
+/** View: returns Echelon adapter object address for vault integration. */
+export const YIELD_AI_ECHELON_ADAPTER_VIEW =
+  `${YIELD_AI_PACKAGE_ADDRESS}::adapter_echelon::get_echelon_adapter_address` as const;
+
 export const VAULT_VIEW = {
   safeRefExists: `${YIELD_AI_VAULT_MODULE}::safe_ref_exists`,
   getSafeCount: `${YIELD_AI_VAULT_MODULE}::get_safe_count`,
@@ -23,7 +31,11 @@ export const YIELD_AI_VAULT_VIEWS = {
 export const YIELD_AI_VAULT_ENTRYPOINTS = {
   executeClaimApt: `${YIELD_AI_VAULT_MODULE}::execute_claim_apt`,
   executeSwapAptToFa: `${YIELD_AI_VAULT_MODULE}::execute_swap_apt_to_fa`,
+  executeSwapFaToFa: `${YIELD_AI_VAULT_MODULE}::execute_swap_fa_to_fa`,
   executeDeposit: `${YIELD_AI_VAULT_MODULE}::execute_deposit`,
+  executeWithdrawFull: `${YIELD_AI_VAULT_MODULE}::execute_withdraw_full`,
+  executeDepositEchelonFa: `${YIELD_AI_VAULT_MODULE}::execute_deposit_echelon_fa`,
+  executeClaimEchelon: `${YIELD_AI_VAULT_MODULE}::execute_claim_echelon`,
 } as const;
 
 // Thresholds:
@@ -52,6 +64,14 @@ export const SWAP_DEADLINE_SECONDS = BigInt(600);
 /** USDC FA metadata object address (mainnet). Used as second argument to vault::deposit. */
 export const USDC_FA_METADATA_MAINNET =
   "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b";
+
+/** USD1 FA metadata object address (mainnet). */
+export const USD1_FA_METADATA_MAINNET =
+  "0x05fabd1b12e39967a3c24e91b7b8f67719a6dacee74f3c8b9fb7d93e855437d2";
+
+/** xBTC (OKX Wrapped BTC) FA metadata object address (mainnet). */
+export const XBTC_FA_METADATA_MAINNET =
+  "0x81214a80d82035a190fcb76b6ff3c0145161c3a9f33d137f2bbaee4cfec8a387";
 
 /** Moar adapter address (mainnet). Used in vault::execute_deposit. */
 export const MOAR_ADAPTER_ADDRESS_MAINNET =

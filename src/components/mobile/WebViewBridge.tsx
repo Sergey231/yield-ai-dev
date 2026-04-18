@@ -99,12 +99,7 @@ export function WebViewBridge() {
 
       const action = (element as HTMLElement).dataset.action;
       if (action) {
-        let payload: Record<string, unknown> = {};
-        try {
-          const raw = (element as HTMLElement).dataset.payload;
-          if (raw) payload = JSON.parse(raw) as Record<string, unknown>;
-        } catch {}
-        postToNative(action, payload);
+        postToNative(action, basePayload);
         return;
       }
 
@@ -138,14 +133,18 @@ export function WebViewBridge() {
           const nonce = command.payload?.nonce;
           if (typeof nonce === "string") {
             sessionNonce.current = nonce;
-            console.log("[Mobile] Session nonce received");
+            console.log("[Bridge] Session nonce received");
           }
           // emit initial route after handshake completes
           emitRouteChange();
           return;
         }
 
-        console.log("[Web ← Mobile]", command.type, command.payload ?? "");
+        console.log("[Bridge ←RN]", command.type, command.payload ?? "");
+        postToNative("web_log", {
+          message: `[Bridge ←RN] ${command.type}`,
+          payload: command.payload ?? null,
+        });
         window.dispatchEvent(
           new CustomEvent<NativeCommand>("yieldai:native-command", {
             detail: command,

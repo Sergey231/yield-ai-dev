@@ -6,7 +6,12 @@ import { STALE_TIME } from '@/lib/query/config';
 import { PanoraPricesService } from '@/lib/services/panora/prices';
 import type { TokenPrice } from '@/lib/types/panora';
 import type { Token } from '@/lib/types/token';
-import { APTOS_COIN_TYPE, USDC_FA_METADATA_MAINNET } from '@/lib/constants/yieldAiVault';
+import {
+  APTOS_COIN_TYPE,
+  USDC_FA_METADATA_MAINNET,
+  USD1_FA_METADATA_MAINNET,
+  XBTC_FA_METADATA_MAINNET,
+} from '@/lib/constants/yieldAiVault';
 import { normalizeAddress } from '@/lib/utils/addressNormalization';
 import { getTokenList } from '@/lib/tokens/getTokenList';
 
@@ -33,10 +38,23 @@ async function fetchSafeContents(safeAddress: string) {
   };
 }
 
-function isUsdcToken(token: Token) {
-  if (token.symbol === 'USDC') return true;
+function tokenNormalizedFaAddress(token: Token): string {
   const addr = token.address.includes('::') ? token.address.split('::')[0] : token.address;
-  return normalizeAddress(addr) === normalizeAddress(USDC_FA_METADATA_MAINNET);
+  return normalizeAddress(addr);
+}
+
+/** FA balances shown in AI agent safe card (allowlist). */
+function isAllowedSafeDisplayToken(token: Token): boolean {
+  if (token.address === APTOS_COIN_TYPE) return true;
+  const n = tokenNormalizedFaAddress(token);
+  return (
+    n === normalizeAddress(USDC_FA_METADATA_MAINNET) ||
+    n === normalizeAddress(USD1_FA_METADATA_MAINNET) ||
+    n === normalizeAddress(XBTC_FA_METADATA_MAINNET) ||
+    token.symbol === 'USDC' ||
+    token.symbol === 'USD1' ||
+    token.symbol === 'xBTC'
+  );
 }
 
 function resolveLogoUrl(addressOrType: string, symbol: string): string | undefined {
@@ -66,7 +84,7 @@ interface UseYieldAiSafeTokensOptions {
 }
 
 /**
- * Fetches safe balances and attaches prices, returning base assets (USDC, APT).
+ * Fetches safe balances and attaches prices, returning allowlisted assets (USDC, APT, USD1, xBTC).
  * Native APT is sourced from coin::balance (aptBalance) to avoid duplicate APT rows.
  */
 export function useYieldAiSafeTokens(
@@ -166,7 +184,7 @@ export function useYieldAiSafeTokens(
       }
 
       const baseOnly = tokens
-        .filter((t) => isUsdcToken(t) || t.address === APTOS_COIN_TYPE)
+        .filter((t) => isAllowedSafeDisplayToken(t))
         .sort((a, b) => {
           const va = a.value ? parseFloat(a.value) : 0;
           const vb = b.value ? parseFloat(b.value) : 0;

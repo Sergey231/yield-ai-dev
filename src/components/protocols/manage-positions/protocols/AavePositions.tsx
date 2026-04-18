@@ -483,6 +483,7 @@ export function AavePositions() {
             setSelectedPosition(null);
           }}
           onConfirm={handleWithdrawConfirm}
+          protocol={{ name: "Aave", logo: "/protocol_ico/aave.ico" }}
           position={{
             coin: selectedPosition.underlying_asset,
             // API returns deposit_amount in human form; WithdrawModal expects supply in octas (smallest units)

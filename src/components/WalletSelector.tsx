@@ -1,40 +1,15 @@
 "use client";
 
-import {
-  APTOS_CONNECT_ACCOUNT_URL,
-  AboutAptosConnect,
-  AboutAptosConnectEducationScreen,
-  AdapterNotDetectedWallet,
-  AdapterWallet,
-  AptosPrivacyPolicy,
-  WalletItem,
-  WalletSortingOptions,
-  groupAndSortWallets,
-  isAptosConnectWallet,
-  isInstallRequired,
-  truncateAddress,
-  useWallet,
-} from "@aptos-labs/wallet-adapter-react";
+import { WalletSortingOptions, truncateAddress, useWallet } from "@aptos-labs/wallet-adapter-react";
 import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
-import { WalletReadyState, WalletName } from "@solana/wallet-adapter-base";
-import { DialogDescription } from "./ui/dialog";
 import {
-  ArrowLeft,
-  ArrowRight,
-  ChevronDown,
   Copy,
   LogOut,
   Loader2,
   Smartphone,
-  User,
 } from "lucide-react";
 import { useCallback, useState, useEffect, useMemo } from "react";
 import { Button } from "./ui/button";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "./ui/collapsible";
 import {
   Dialog,
   DialogContent,
@@ -45,34 +20,58 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 import { useToast } from "./ui/use-toast";
 import { getSolanaWalletAddress } from "@/lib/wallet/getSolanaWalletAddress";
 import { isDerivedAptosWalletReliable } from "@/lib/aptosWalletUtils";
+import {
+  CustomAptosConnectDialogContent,
+  WALLET_CONNECT_MODAL_DIALOG_CLASS,
+  type WalletConnectChainTab,
+} from "@/components/wallet/customAptosConnectDialogContent";
 
 interface WalletSelectorProps extends WalletSortingOptions {
   /** External control for dialog open state */
   externalOpen?: boolean;
   /** Callback when dialog open state changes (for external control) */
   onExternalOpenChange?: (open: boolean) => void;
+  /** When opening via `externalOpen`, which chain tab to show initially. */
+  externalInitialChainTab?: WalletConnectChainTab;
   /** When true, show a mobile icon button to the left that opens Solana wallet picker (for Mobile Tabs) */
   showMobileWalletButton?: boolean;
 }
 
-export function WalletSelector({ externalOpen, onExternalOpenChange, showMobileWalletButton, ...walletSortingOptions }: WalletSelectorProps) {
+export function WalletSelector({ externalOpen, onExternalOpenChange, externalInitialChainTab, showMobileWalletButton, ...walletSortingOptions }: WalletSelectorProps) {
   const { account, connected: aptosConnected, disconnect, wallet } = useWallet();
   const { publicKey: solanaPublicKey, connected: solanaConnected, wallet: solanaWallet, disconnect: disconnectSolana, wallets: solanaWallets, select: selectSolana, connect: connectSolana } = useSolanaWallet();
   const [internalDialogOpen, setInternalDialogOpen] = useState(false);
-  
+  const [pendingChainTab, setPendingChainTab] = useState<WalletConnectChainTab>("aptos");
+
   // Use external control if provided, otherwise use internal state
   const isDialogOpen = externalOpen !== undefined ? externalOpen : internalDialogOpen;
-  const setIsDialogOpen = onExternalOpenChange !== undefined ? onExternalOpenChange : setInternalDialogOpen;
+
+  const setDialogOpen = useCallback(
+    (open: boolean) => {
+      if (onExternalOpenChange !== undefined) {
+        onExternalOpenChange(open);
+      } else {
+        setInternalDialogOpen(open);
+      }
+      if (!open) {
+        setPendingChainTab("aptos");
+      }
+    },
+    [onExternalOpenChange],
+  );
+
+  useEffect(() => {
+    if (isDialogOpen && externalOpen !== undefined && externalInitialChainTab) {
+      setPendingChainTab(externalInitialChainTab);
+    }
+  }, [isDialogOpen, externalOpen, externalInitialChainTab]);
   const [mounted, setMounted] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
-  const [isSolanaDialogOpen, setIsSolanaDialogOpen] = useState(false);
-  const [isSolanaConnecting, setIsSolanaConnecting] = useState(false);
   const { toast } = useToast();
 
   // Cross-chain Solana address (from Aptos derived wallet)
@@ -104,11 +103,6 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, showMobileW
   useEffect(() => {
     setMounted(true);
   }, []);
-
-  const isInWebView = useMemo(() => {
-    if (!mounted) return false;
-    return !!(window as any).ReactNativeWebView?.postMessage;
-  }, [mounted]);
 
   const isAndroidChrome = useMemo(() => {
     if (!mounted) return false;
@@ -161,67 +155,7 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, showMobileW
     }
   }, [aptosConnected, solanaConnected]);
 
-  const closeDialog = useCallback(() => setIsDialogOpen(false), []);
-  const closeSolanaDialog = useCallback(() => setIsSolanaDialogOpen(false), []);
-
-  // Available Solana wallets (excluding not detected)
-  const availableSolanaWallets = useMemo(() => {
-    const filtered = solanaWallets.filter(
-      (w) => w.readyState !== WalletReadyState.NotDetected
-    );
-    // Remove duplicates by name
-    const seen = new Set<string>();
-    return filtered.filter((w) => {
-      const name = w.adapter.name;
-      if (seen.has(name)) return false;
-      seen.add(name);
-      return true;
-    });
-  }, [solanaWallets]);
-
-  // Handle Solana wallet selection
-  const handleSolanaWalletSelect = useCallback(async (walletName: string) => {
-    try {
-      setIsSolanaConnecting(true);
-      // Clear skip flags so derived Aptos auto-connects for the new Solana wallet
-      // Also set walletName synchronously BEFORE selectSolana (React state update is async,
-      // so localStorage might not be written immediately by the adapter)
-      if (typeof window !== "undefined") {
-        try {
-          window.sessionStorage.removeItem("skip_auto_connect_solana");
-          window.sessionStorage.removeItem("skip_auto_connect_derived_aptos");
-          window.localStorage.setItem("walletName", JSON.stringify(walletName));
-        } catch {}
-      }
-      selectSolana(walletName as WalletName);
-      setIsSolanaDialogOpen(false);
-      
-      // Auto-connect after selection
-      setTimeout(async () => {
-        try {
-          await connectSolana();
-          toast({
-            title: "Wallet Connected",
-            description: `Connected to ${walletName}`,
-          });
-        } catch (err: unknown) {
-          // Don't show toast — connection often succeeds via restore mechanism
-          // even when connectSolana() throws (race condition with Phantom etc.)
-          const message = err instanceof Error ? err.message : String(err);
-          console.log('[WalletSelector] connectSolana failed (suppressed):', message);
-        } finally {
-          setIsSolanaConnecting(false);
-        }
-      }, 100);
-    } catch (err: unknown) {
-      setIsSolanaConnecting(false);
-      toast({
-        variant: "destructive",
-        title: "Selection Failed",
-        description: err instanceof Error ? err.message : "Failed to select wallet",
-      });
-    }
-  }, [selectSolana, connectSolana, toast, solanaWallet]);
+  const closeDialog = useCallback(() => setDialogOpen(false), [setDialogOpen]);
 
   const copyAddress = useCallback(async () => {
     if (!account?.address) return;
@@ -506,14 +440,17 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, showMobileW
     "Unknown";
 
   return (
-    <>
+    <Dialog open={isDialogOpen} onOpenChange={setDialogOpen}>
       <div className="flex items-center gap-2">
         {showMobileWalletButton && isAndroidChrome && (
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => setIsSolanaDialogOpen(true)}
-            aria-label="Connect mobile wallet"
+            onClick={() => {
+              setPendingChainTab("aptos");
+              setDialogOpen(true);
+            }}
+            aria-label="Connect wallet"
           >
             <Smartphone className="h-4 w-4" />
           </Button>
@@ -561,7 +498,10 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, showMobileW
                   variant="ghost"
                   size="sm"
                   className="w-full justify-start gap-2"
-                  onClick={() => setIsSolanaDialogOpen(true)}
+                  onClick={() => {
+                    setPendingChainTab("solana");
+                    setDialogOpen(true);
+                  }}
                 >
                   Connect Solana
                 </Button>
@@ -603,7 +543,10 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, showMobileW
                   variant="ghost"
                   size="sm"
                   className="w-full justify-start gap-2"
-                  onClick={() => setIsDialogOpen(true)}
+                  onClick={() => {
+                    setPendingChainTab("aptos");
+                    setDialogOpen(true);
+                  }}
                 >
                   Connect Aptos
                 </Button>
@@ -612,299 +555,30 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, showMobileW
           </DropdownMenuContent>
         </DropdownMenu>
       ) : (
-        isInWebView ? (
-          <Button
-            disabled={isConnecting}
-            data-action="connect_wallet"
-          >
+        <DialogTrigger asChild>
+          <Button disabled={isConnecting} data-action="connect_wallet">
             {isConnecting ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 Connecting...
-              </>
-            ) : (
-              'Connect Wallet'
-            )}
-          </Button>
-        ) : (
-        <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-          <DialogTrigger asChild>
-            <Button
-              disabled={isConnecting}
-              data-action="connect_wallet"
-            >
-              {isConnecting ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Connecting...
-                </>
-              ) : (
-                'Connect Wallet'
-              )}
-            </Button>
-          </DialogTrigger>
-          <ConnectWalletDialog close={closeDialog} isConnecting={isConnecting} {...walletSortingOptions} />
-        </Dialog>
-        )
-      )}
-      </div>
-
-      {/* Dialog for connecting Aptos wallets (external control) - always render for external open */}
-      <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-        <ConnectWalletDialog close={closeDialog} isConnecting={isConnecting} {...walletSortingOptions} />
-      </Dialog>
-
-      {/* Dialog for connecting Solana wallets */}
-      <Dialog open={isSolanaDialogOpen} onOpenChange={setIsSolanaDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Select Solana Wallet</DialogTitle>
-            <DialogDescription>
-              Choose a wallet to connect to your Solana account
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2 mt-4">
-            {availableSolanaWallets.length === 0 ? (
-              <div className="text-sm text-muted-foreground p-4 text-center">
-                No Solana wallets detected. Please install a wallet extension.
-              </div>
-            ) : (
-              availableSolanaWallets.map((w, i) => (
-                <Button
-                  key={`${w.adapter.name}-${i}`}
-                  variant="outline"
-                  className="w-full justify-start"
-                  onClick={() => handleSolanaWalletSelect(w.adapter.name)}
-                  disabled={isSolanaConnecting}
-                >
-                  <div className="flex items-center gap-2">
-                    {w.adapter.icon && (
-                      <img src={w.adapter.icon} alt={w.adapter.name} className="w-6 h-6" />
-                    )}
-                    <span>{w.adapter.name}</span>
-                    {w.readyState === WalletReadyState.Loadable && (
-                      <span className="ml-auto text-xs text-muted-foreground">(Install)</span>
-                    )}
-                  </div>
-                </Button>
-              ))
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
-    </>
-  );
-}
-
-interface ConnectWalletDialogProps extends WalletSortingOptions {
-  close: () => void;
-  isConnecting?: boolean;
-}
-
-function ConnectWalletDialog({
-  close,
-  isConnecting = false,
-  ...walletSortingOptions
-}: ConnectWalletDialogProps) {
-  const { wallets = [], notDetectedWallets = [] } = useWallet();
-
-  const { aptosConnectWallets, availableWallets, installableWallets } =
-    groupAndSortWallets(
-      [...wallets, ...notDetectedWallets],
-      walletSortingOptions
-    );
-
-  const hasAptosConnectWallets = !!aptosConnectWallets.length;
-
-  return (
-    <DialogContent className="max-h-screen overflow-auto">
-      <AboutAptosConnect renderEducationScreen={renderEducationScreen}>
-        <DialogHeader>
-          <DialogTitle className="flex flex-col text-center leading-snug">
-            {hasAptosConnectWallets ? (
-              <>
-                <span>Log in or sign up</span>
-                <span>with Social + Aptos Connect</span>
               </>
             ) : (
               "Connect Wallet"
             )}
-          </DialogTitle>
-        </DialogHeader>
-
-        {hasAptosConnectWallets && (
-          <div className="flex flex-col gap-2 pt-3">
-            {aptosConnectWallets.map((wallet) => (
-              <AptosConnectWalletRow
-                key={wallet.name}
-                wallet={wallet}
-                onConnect={close}
-                isConnecting={isConnecting}
-              />
-            ))}
-            <p className="flex gap-1 justify-center items-center text-muted-foreground text-sm">
-              Learn more about{" "}
-              <AboutAptosConnect.Trigger className="flex gap-1 py-3 items-center text-foreground">
-                Aptos Connect <ArrowRight size={16} />
-              </AboutAptosConnect.Trigger>
-            </p>
-            <AptosPrivacyPolicy className="flex flex-col items-center py-1">
-              <p className="text-xs leading-5">
-                <AptosPrivacyPolicy.Disclaimer />{" "}
-                <AptosPrivacyPolicy.Link className="text-muted-foreground underline underline-offset-4" />
-                <span className="text-muted-foreground">.</span>
-              </p>
-              <AptosPrivacyPolicy.PoweredBy className="flex gap-1.5 items-center text-xs leading-5 text-muted-foreground" />
-            </AptosPrivacyPolicy>
-            <div className="flex items-center gap-3 pt-4 text-muted-foreground">
-              <div className="h-px w-full bg-secondary" />
-              Or
-              <div className="h-px w-full bg-secondary" />
-            </div>
-          </div>
-        )}
-
-        <div className="flex flex-col gap-3 pt-3">
-          {availableWallets.map((wallet) => (
-            <WalletRow key={wallet.name} wallet={wallet} onConnect={close} isConnecting={isConnecting} />
-          ))}
-          {!!installableWallets.length && (
-            <Collapsible className="flex flex-col gap-3">
-              <CollapsibleTrigger asChild>
-                <Button size="sm" variant="ghost" className="gap-2">
-                  More wallets <ChevronDown />
-                </Button>
-              </CollapsibleTrigger>
-              <CollapsibleContent className="flex flex-col gap-3">
-                {installableWallets.map((wallet) => (
-                  <WalletRow
-                    key={wallet.name}
-                    wallet={wallet}
-                    onConnect={close}
-                    isConnecting={isConnecting}
-                  />
-                ))}
-              </CollapsibleContent>
-            </Collapsible>
-          )}
-        </div>
-      </AboutAptosConnect>
-    </DialogContent>
-  );
-}
-
-interface WalletRowProps {
-  wallet: AdapterWallet | AdapterNotDetectedWallet;
-  onConnect?: () => void;
-}
-
-interface WalletRowProps {
-  wallet: AdapterWallet | AdapterNotDetectedWallet;
-  onConnect?: () => void;
-  isConnecting?: boolean;
-}
-
-function WalletRow({ wallet, onConnect, isConnecting = false }: WalletRowProps) {
-  return (
-    <WalletItem
-      wallet={wallet}
-      onConnect={onConnect}
-      className="flex items-center justify-between px-4 py-3 gap-4 border rounded-md"
-    >
-      <div className="flex items-center gap-4">
-        <WalletItem.Icon className="h-6 w-6" />
-        <WalletItem.Name className="text-base font-normal" />
-      </div>
-      {isInstallRequired(wallet) ? (
-        <Button size="sm" variant="ghost" asChild>
-          <WalletItem.InstallLink />
-        </Button>
-      ) : (
-        <WalletItem.ConnectButton asChild>
-          <Button size="sm" disabled={isConnecting}>
-            {isConnecting ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Connecting...
-              </>
-            ) : (
-              'Connect'
-            )}
           </Button>
-        </WalletItem.ConnectButton>
+        </DialogTrigger>
       )}
-    </WalletItem>
-  );
-}
-
-function AptosConnectWalletRow({ wallet, onConnect, isConnecting = false }: WalletRowProps) {
-  return (
-    <WalletItem wallet={wallet} onConnect={onConnect}>
-      <WalletItem.ConnectButton asChild>
-        <Button size="lg" variant="outline" className="w-full gap-4" disabled={isConnecting}>
-          {isConnecting ? (
-            <>
-              <Loader2 className="h-5 w-5 animate-spin" />
-              <span className="text-base font-normal">Connecting...</span>
-            </>
-          ) : (
-            <>
-              <WalletItem.Icon className="h-5 w-5" />
-              <WalletItem.Name className="text-base font-normal" />
-            </>
-          )}
-        </Button>
-      </WalletItem.ConnectButton>
-    </WalletItem>
-  );
-}
-
-function renderEducationScreen(screen: AboutAptosConnectEducationScreen) {
-  return (
-    <>
-      <DialogHeader className="grid grid-cols-[1fr_4fr_1fr] items-center space-y-0">
-        <Button variant="ghost" size="icon" onClick={screen.cancel}>
-          <ArrowLeft />
-        </Button>
-        <DialogTitle className="leading-snug text-base text-center">
-          About Aptos Connect
-        </DialogTitle>
-      </DialogHeader>
-
-      <div className="flex h-[162px] pb-3 items-end justify-center">
-        <screen.Graphic />
-      </div>
-      <div className="flex flex-col gap-2 text-center pb-4">
-        <screen.Title className="text-xl" />
-        <screen.Description className="text-sm text-muted-foreground [&>a]:underline [&>a]:underline-offset-4 [&>a]:text-foreground" />
       </div>
 
-      <div className="grid grid-cols-3 items-center">
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={screen.back}
-          className="justify-self-start"
-        >
-          Back
-        </Button>
-        <div className="flex items-center gap-2 place-self-center">
-          {screen.screenIndicators.map((ScreenIndicator, i) => (
-            <ScreenIndicator key={i} className="py-4">
-              <div className="h-0.5 w-6 transition-colors bg-muted [[data-active]>&]:bg-foreground" />
-            </ScreenIndicator>
-          ))}
-        </div>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={screen.next}
-          className="gap-2 justify-self-end"
-        >
-          {screen.screenIndex === screen.totalScreens - 1 ? "Finish" : "Next"}
-          <ArrowRight size={16} />
-        </Button>
-      </div>
-    </>
+      <DialogContent className={WALLET_CONNECT_MODAL_DIALOG_CLASS}>
+        <CustomAptosConnectDialogContent
+          close={closeDialog}
+          isConnecting={isConnecting}
+          dialogOpen={isDialogOpen}
+          initialChainTabOnOpen={pendingChainTab}
+          {...walletSortingOptions}
+        />
+      </DialogContent>
+    </Dialog>
   );
 }

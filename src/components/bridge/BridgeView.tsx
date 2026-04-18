@@ -58,6 +58,8 @@ interface BridgeViewProps {
   bridgeButtonAlert?: ReactNode;
   sourceBalance?: number;
   isBalanceLoading?: boolean;
+  /** Native SOL balance for the connected Solana wallet (human-readable). */
+  solanaSolBalance?: number;
 }
 
 /** Truncate number to N decimal places WITHOUT rounding */
@@ -99,6 +101,7 @@ export function BridgeView({
   bridgeButtonAlert,
   sourceBalance = 0,
   isBalanceLoading = false,
+  solanaSolBalance = 0,
 }: BridgeViewProps) {
   const searchParams = useSearchParams();
   const { publicKey: solanaPublicKey, connected: solanaConnected } = useSolanaWallet();
@@ -213,7 +216,17 @@ export function BridgeView({
                   {isBalanceLoading ? (
                     <Loader2 className="h-3 w-3 animate-spin inline" />
                   ) : (
-                    <span>{sourceBalance.toString()} {sourceToken.symbol} on {sourceChain?.name || 'Unknown'}</span>
+                    <span>
+                      {sourceBalance.toString()} {sourceToken.symbol} on {sourceChain?.name || 'Unknown'}
+                      {sourceChain?.id === 'Solana' && destChain?.id === 'Aptos'
+                        ? (
+                          <>
+                            <br />
+                            {truncateDecimals(solanaSolBalance, 2)} SOL recommended &gt;0,01
+                          </>
+                        )
+                        : ''}
+                    </span>
                   )}
                 </p>
                 {/* Percentage buttons */}

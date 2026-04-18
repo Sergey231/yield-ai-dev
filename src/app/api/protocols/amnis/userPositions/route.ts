@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getBaseUrl } from '@/lib/utils/config';
+import { getRequestOrigin } from '@/lib/utils/requestOrigin';
 
 export async function GET(request: NextRequest) {
   try {
@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
 
     console.log('Fetching Amnis positions for address:', address);
 
-    const baseUrl = getBaseUrl();
+    const baseUrl = getRequestOrigin(request);
     
     // Get AMI staking pools using our existing API
     console.log('Fetching AMI staking pools...');

@@ -16,7 +16,10 @@ export class TappProtocol implements BaseProtocol {
     };
   }
 
-  async buildWithdraw(marketAddress: string, amountOctas: bigint, token: string) {
+  async buildWithdraw(marketAddress: string, amountOctas: bigint | null, token: string) {
+    if (amountOctas === null) {
+      throw new Error('Withdraw amount is required');
+    }
     // Tapp Exchange withdraw transaction - пока не реализуем
     // Return a placeholder payload that will throw an error when used
     return {

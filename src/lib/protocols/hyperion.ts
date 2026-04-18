@@ -13,7 +13,10 @@ export class HyperionProtocol implements BaseProtocol {
     };
   }
 
-  async buildWithdraw(marketAddress: string, amountOctas: bigint, token: string, userAddress?: string) {
+  async buildWithdraw(marketAddress: string, amountOctas: bigint | null, token: string, userAddress?: string) {
+    if (amountOctas === null) {
+      throw new Error('Withdraw amount is required');
+    }
     console.log('Building Hyperion Goblin Vault withdraw for:', { marketAddress, amountOctas, token, userAddress });
 
     // For Goblin Vaults: marketAddress is the vault token address (poolId)

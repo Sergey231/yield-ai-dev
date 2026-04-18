@@ -22,6 +22,7 @@ interface TokenItemProps {
 export function TokenItem({ token, stakingAprs = {}, disableDrag = false, rightBadge }: TokenItemProps) {
   const { startDrag, endDrag, state } = useDragDrop();
   const { formatUsd, maskBalance } = usePortfolioAmountsPrivacy();
+  const clamp10 = (s: string) => (s.length > 10 ? s.slice(0, 10) : s);
   
   const formattedAmount = formatNumber(parseFloat(token.amount) / Math.pow(10, token.decimals), 3);
   const formattedValue = token.value ? formatUsd(parseFloat(token.value), 2) : 'N/A';
@@ -185,9 +186,9 @@ export function TokenItem({ token, stakingAprs = {}, disableDrag = false, rightB
           <AvatarImage src={isAetToken ? aetIconUrl : logoUrl} />
           <AvatarFallback>{symbol.slice(0, 2)}</AvatarFallback>
         </Avatar>
-        <div className="flex flex-col">
-          <div className="flex items-center gap-1">
-            <span className="text-sm font-medium truncate">{symbol}</span>
+        <div className="flex flex-col min-w-0">
+          <div className="flex items-center gap-1 min-w-0">
+            <span className="text-sm font-medium truncate flex-1 min-w-0">{clamp10(symbol)}</span>
             {rightBadge && (
               <Badge variant="outline" className="bg-green-500/10 text-green-600 border-green-500/20 text-xs font-normal px-2 py-0.5 h-5 shrink-0">
                 {rightBadge}

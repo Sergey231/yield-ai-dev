@@ -98,7 +98,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
   const { tokens: solanaTokens, refresh: refreshSolana } = useSolanaPortfolio();
 
   // Protocols that are closed/winding down must not appear in Ideas pools filter
-  const HIDDEN_IDEAS_PROTOCOLS = new Set(["Earnium", "Auro Finance", "Aries", "Meso Finance"]);
+  const HIDDEN_IDEAS_PROTOCOLS = new Set(["Earnium", "Auro Finance", "Aries", "Meso Finance", "Moar Market"]);
 
   // New states for progressive loading
   // Initialize loading states immediately to show tabs and skeletons right away
@@ -111,7 +111,6 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
     'Kofi Finance': true,
     'Echelon': true,
     'Aave': true,
-    'Moar Market': true,
     'Decibel': true,
     'Echo Protocol': true,
     'APTree': true,
@@ -129,7 +128,6 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
     'Kofi Finance': '/protocol_ico/kofi.png',
     'Echelon': '/protocol_ico/echelon.png',
     'Aave': '/protocol_ico/aave.ico',
-    'Moar Market': '/protocol_ico/moar-market-logo-primary.png',
     'Decibel': '/protocol_ico/decibel.png',
     'Echo Protocol': '/protocol_ico/echo.png',
     'APTree': '/protocol_ico/aptree.png',
@@ -573,42 +571,6 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
                   liquidityRate: pool.liquidityRate,
                   variableBorrowRate: pool.variableBorrowRate,
                   decimals: pool.decimals,
-                  marketAddress: pool.marketAddress || pool.token
-                };
-              });
-            }
-          },
-          {
-            name: 'Moar Market',
-            url: '/api/protocols/moar/pools',
-			logoUrl: '/protocol_ico/moar-market-logo-primary.png',
-            transform: (data: any) => {
-              const pools = data.data || [];
-
-              return pools.map((pool: any) => {
-                const totalAPY = pool.totalAPY || 0;
-                const depositApy = pool.depositApy || 0;
-                const interestRateComponent = pool.interestRateComponent || 0;
-                const farmingAPY = pool.farmingAPY || 0;
-
-                return {
-                  asset: pool.asset || 'Unknown',
-                  provider: pool.provider || 'Moar Market',
-                  totalAPY: totalAPY,
-                  depositApy: depositApy,
-                  borrowAPY: pool.borrowAPY || 0,
-                  token: pool.token || '',
-                  protocol: pool.protocol || 'Moar Market',
-                  poolType: pool.poolType || 'Lending',
-                  tvlUSD: pool.tvlUSD || 0,
-                  dailyVolumeUSD: pool.dailyVolumeUSD || 0,
-                  // Moar Market-specific fields
-                  poolId: pool.poolId,
-                  interestRateComponent: interestRateComponent,
-                  farmingAPY: farmingAPY,
-                  utilization: pool.utilization,
-                  totalBorrows: pool.totalBorrows,
-                  totalDeposits: pool.totalDeposits,
                   marketAddress: pool.marketAddress || pool.token
                 };
               });
@@ -1482,7 +1444,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
 
 
                     // Include whitelisted protocols that may not resolve tokenInfo yet.
-                    return hasAssetColon || hasTokenInfo || hasDexTokens || item.protocol === 'Echelon' || item.protocol === 'Moar Market' || item.protocol === 'Decibel' || item.protocol === 'Echo Protocol' || item.protocol === 'APTree' || item.protocol === 'Jupiter' || item.protocol === 'Kamino';
+                    return hasAssetColon || hasTokenInfo || hasDexTokens || item.protocol === 'Echelon' || item.protocol === 'Decibel' || item.protocol === 'Echo Protocol' || item.protocol === 'APTree' || item.protocol === 'Jupiter' || item.protocol === 'Kamino';
                   })
                   .sort((a, b) => b.totalAPY - a.totalAPY)
                   .map((item, index) => {

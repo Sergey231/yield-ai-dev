@@ -1,12 +1,11 @@
 import { BaseProtocol } from '../protocols/BaseProtocol';
 import { WalletContextState } from '@aptos-labs/wallet-adapter-react';
+import { buildVaultDepositPayload } from '@/lib/protocols/yield-ai/vaultDeposit';
 
-interface ExecuteDepositParams {
-  protocol: BaseProtocol;
-  token: string;
-  amount: bigint;
-  wallet: WalletContextState;
-  options?: { marketAddress?: string };
+export interface ExecuteDepositOptions {
+  marketAddress?: string;
+  /** Yield AI vault safe (owner signs `vault::deposit` into this safe). */
+  yieldAiSafeAddress?: string;
 }
 
 export async function executeDeposit(
@@ -14,7 +13,7 @@ export async function executeDeposit(
   token: string,
   amount: bigint,
   wallet: WalletContextState,
-  options?: { marketAddress?: string }
+  options?: ExecuteDepositOptions
 ) {
   console.log('Executing deposit with:', {
     protocol,
@@ -83,6 +82,20 @@ export async function executeDeposit(
     // For now, we'll use the standard buildDeposit method
     // In the future, we might need to extend this to support poolAddress parameter
     console.log('Using standard Auro buildDeposit method');
+  }
+
+  if (options?.yieldAiSafeAddress && protocol.name === 'Yield AI') {
+    const vaultPayload = buildVaultDepositPayload({
+      safeAddress: options.yieldAiSafeAddress,
+      metadata: token,
+      amountBaseUnits: amount,
+    });
+    return {
+      type: 'entry_function_payload' as const,
+      function: vaultPayload.function,
+      type_arguments: vaultPayload.typeArguments,
+      arguments: vaultPayload.functionArguments,
+    };
   }
 
   // Standard protocol handling (optional marketAddress for Echelon managed positions)

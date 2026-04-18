@@ -1,0 +1,330 @@
+{
+  "version": 1,
+  "network": "mainnet",
+  "global": {
+    "package": "0x333d1890e0aa3762bb256f5caeeb142431862628c63063801f44c152ef154700",
+    "rpcUrl": "https://api.mainnet.aptoslabs.com/v1",
+    "assets": {
+      "USDC": {
+        "metadata": "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b",
+        "decimals": 6,
+        "coinType": null
+      },
+      "MOAR_USDC": {
+        "metadata": "0x22dbe22abf689d8a0f751cab7a32fe5570c49b53fcccd4e5d709b269efda554a",
+        "decimals": 6,
+        "coinType": null
+      },
+      "USD1": {
+        "metadata": "0x05fabd1b12e39967a3c24e91b7b8f67719a6dacee74f3c8b9fb7d93e855437d2",
+        "decimals": 6,
+        "coinType": null
+      },
+      "APT_FA": {
+        "metadata": "0xa",
+        "decimals": 8,
+        "coinType": "0x1::aptos_coin::AptosCoin"
+      },
+      "ThalaAPT": {
+        "metadata": "0xa0d9d647c5737a5aed08d2cfeb39c31cf901d44bc4aa024eaa7e5e68b804e011",
+        "decimals": 8,
+        "coinType": "0xfaf4e633ae9eb31366c9ca24214231760926576c7b625313b3688b5e900731f6::staking::ThalaAPT"
+      },
+      "ELON": {
+        "metadata": "0xfc087a394c203d62c43eecfeba79db01441d39dd9d234131b78415626a26750e",
+        "decimals": 8,
+        "coinType": "0x51964f09020498a1421a2a3bafe8e1d9fa72574b60446486c599bc6f3e9fae29::echelon_coin::ELON"
+      }
+    },
+    "protocols": {
+      "echelon": {
+        "packageAddress": "0xc6bc659f1649553c1a3fa05d9727433dc03843baac29473c817d06d39e7621ba",
+        "adapterAddressView": "adapter_echelon::get_echelon_adapter_address"
+      },
+      "moar": {
+        "packageAddress": "0xa3afc59243afb6deeac965d40b25d509bb3aebc12f502b8592c283070abc2e07",
+        "adapterAddressView": "adapter_moar::get_moar_adapter_address",
+        "poolId": 1
+      }
+    },
+    "dexDefaults": {
+      "slippageBps": 50,
+      "deadlineSecs": 120
+    }
+  },
+  "scheduler": {
+    "intervalSecs": 3600,
+    "maxConcurrentSafes": 3,
+    "timeoutPerSafeSecs": 120
+  },
+  "strategies": {
+    "usd1_echelon_compound": {
+      "strategyVersion": 1,
+      "description": "Claim rewards (Moar + Echelon APT/ThalaAPT/ELON) → swap to USDC → swap to USD1 → deposit to Echelon",
+      "context": {
+        "echelon": {
+          "marketObj": "0xbb8f38636896c629ff9ef0bf916791a992e12ab4f1c6e26279ee9c6979646963",
+          "farmingId": "@0xbb8f38636896c629ff9ef0bf916791a992e12ab4f1c6e26279ee9c6979646963200"
+        },
+        "moar": {
+          "rewardId": "APT",
+          "farmingIdentifier": "auto"
+        }
+      },
+      "defaults": {
+        "minClaimBaseUnits": 10000000,
+        "minSwapRewardBaseUnits": 10000000,
+        "minMoarUsdcWithdrawBaseUnits": 1,
+        "minUsdcSwapToUsd1": 1000000,
+        "minUsd1DepositToEchelon": 100000,
+        "usd1ReserveInSafe": 0
+      },
+      "execution": {
+        "stopOnFailure": false,
+        "maxActionsPerRun": 20
+      },
+      "riskLimits": {
+        "maxSingleActionUsd": 5000,
+        "allowedAssets": ["USDC", "MOAR_USDC", "USD1", "APT_FA", "ThalaAPT", "ELON"],
+        "maxSlippageBps": 100
+      },
+      "actions": [
+        {
+          "id": "claimMoarApt",
+          "type": "claimMoarReward",
+          "description": "Claim APT reward from Moar farming into safe",
+          "enabled": true,
+          "params": {
+            "entryFunction": "vault::execute_claim_apt",
+            "rewardAsset": "APT_FA"
+          },
+          "condition": {
+            "leftRef": "state.moarClaimableApt",
+            "op": ">=",
+            "rightRef": "defaults.minClaimBaseUnits"
+          },
+          "onError": "continue"
+        },
+        {
+          "id": "claimEchelonApt",
+          "type": "claimEchelonReward",
+          "description": "Claim APT reward from Echelon USD1 farming",
+          "enabled": true,
+          "params": {
+            "entryFunction": "vault::execute_claim_echelon",
+            "rewardAsset": "APT_FA",
+            "rewardName": "Aptos Coin",
+            "rewardCoinType": "0x1::aptos_coin::AptosCoin",
+            "rewardMetadata": "0xa",
+            "farmingIdRef": "context.echelon.farmingId"
+          },
+          "condition": {
+            "leftRef": "state.echelonClaimable.APT_FA",
+            "op": ">=",
+            "rightRef": "defaults.minClaimBaseUnits"
+          },
+          "onError": "continue"
+        },
+        {
+          "id": "claimEchelonThalaApt",
+          "type": "claimEchelonReward",
+          "description": "Claim ThalaAPT reward from Echelon USD1 farming",
+          "enabled": true,
+          "params": {
+            "entryFunction": "vault::execute_claim_echelon",
+            "rewardAsset": "ThalaAPT",
+            "rewardName": "Thala APT",
+            "rewardCoinType": "0xfaf4e633ae9eb31366c9ca24214231760926576c7b625313b3688b5e900731f6::staking::ThalaAPT",
+            "rewardMetadata": "0xa0d9d647c5737a5aed08d2cfeb39c31cf901d44bc4aa024eaa7e5e68b804e011",
+            "farmingIdRef": "context.echelon.farmingId"
+          },
+          "condition": {
+            "leftRef": "state.echelonClaimable.ThalaAPT",
+            "op": ">=",
+            "rightRef": "defaults.minClaimBaseUnits"
+          },
+          "onError": "continue"
+        },
+        {
+          "id": "claimEchelonElon",
+          "type": "claimEchelonReward",
+          "description": "Claim ELON reward from Echelon USD1 farming",
+          "enabled": true,
+          "params": {
+            "entryFunction": "vault::execute_claim_echelon",
+            "rewardAsset": "ELON",
+            "rewardName": "Echelon Token",
+            "rewardCoinType": "0x51964f09020498a1421a2a3bafe8e1d9fa72574b60446486c599bc6f3e9fae29::echelon_coin::ELON",
+            "rewardMetadata": "0xfc087a394c203d62c43eecfeba79db01441d39dd9d234131b78415626a26750e",
+            "farmingIdRef": "context.echelon.farmingId"
+          },
+          "condition": {
+            "leftRef": "state.echelonClaimable.ELON",
+            "op": ">=",
+            "rightRef": "defaults.minClaimBaseUnits"
+          },
+          "onError": "continue"
+        },
+        {
+          "id": "swapThalaAptToUsdc",
+          "type": "swapFaToFa",
+          "description": "Swap ThalaAPT → USDC via Hyperion (USDC-hub allowlist)",
+          "enabled": false,
+          "dependsOn": ["claimEchelonThalaApt"],
+          "params": {
+            "entryFunction": "vault::execute_swap_fa_to_fa",
+            "fromAsset": "ThalaAPT",
+            "toAsset": "USDC"
+          },
+          "condition": {
+            "leftRef": "state.safeBalance.ThalaAPT",
+            "op": ">=",
+            "rightRef": "defaults.minSwapRewardBaseUnits"
+          },
+          "onError": "continue"
+        },
+        {
+          "id": "swapElonToUsdc",
+          "type": "swapFaToFa",
+          "description": "Swap ELON → USDC via Hyperion (USDC-hub allowlist)",
+          "enabled": false,
+          "dependsOn": ["claimEchelonElon"],
+          "params": {
+            "entryFunction": "vault::execute_swap_fa_to_fa",
+            "fromAsset": "ELON",
+            "toAsset": "USDC"
+          },
+          "condition": {
+            "leftRef": "state.safeBalance.ELON",
+            "op": ">=",
+            "rightRef": "defaults.minSwapRewardBaseUnits"
+          },
+          "onError": "continue"
+        },
+        {
+          "id": "swapAptToUsdc",
+          "type": "swapFaToFa",
+          "description": "Swap APT (FA) → USDC via Hyperion (USDC-hub allowlist)",
+          "enabled": false,
+          "dependsOn": ["claimMoarApt", "claimEchelonApt"],
+          "params": {
+            "entryFunction": "vault::execute_swap_fa_to_fa",
+            "fromAsset": "APT_FA",
+            "toAsset": "USDC"
+          },
+          "condition": {
+            "leftRef": "state.safeBalance.APT_FA",
+            "op": ">=",
+            "rightRef": "defaults.minSwapRewardBaseUnits"
+          },
+          "onError": "continue"
+        },
+        {
+          "id": "swapUsdcToUsd1",
+          "type": "swapFaToFa",
+          "description": "Swap USDC → USD1 via Hyperion",
+          "enabled": true,
+          "dependsOn": ["withdrawMoar"],
+          "params": {
+            "entryFunction": "vault::execute_swap_fa_to_fa",
+            "fromAsset": "USDC",
+            "toAsset": "USD1"
+          },
+          "condition": {
+            "leftRef": "state.safeBalance.USDC",
+            "op": ">=",
+            "rightRef": "defaults.minUsdcSwapToUsd1"
+          },
+          "onError": "continue"
+        },
+        {
+          "id": "depositUsd1ToEchelon",
+          "type": "depositEchelonFa",
+          "description": "Deposit excess USD1 into Echelon lending market",
+          "enabled": true,
+          "dependsOn": ["swapUsdcToUsd1"],
+          "params": {
+            "entryFunction": "vault::execute_deposit_echelon_fa",
+            "asset": "USD1",
+            "marketObjRef": "context.echelon.marketObj"
+          },
+          "condition": {
+            "allOf": [
+              {
+                "leftRef": "state.safeBalance.USD1",
+                "op": ">",
+                "rightRef": "defaults.usd1ReserveInSafe"
+              },
+              {
+                "leftRef": "state.excessBalance.USD1",
+                "op": ">=",
+                "rightRef": "defaults.minUsd1DepositToEchelon"
+              }
+            ]
+          },
+          "onError": "halt"
+        },
+        {
+          "id": "withdrawMoar",
+          "type": "withdrawMoarFull",
+          "description": "Full withdraw Moar USDC receipt token back to underlying USDC on safe",
+          "enabled": true,
+          "params": {
+            "entryFunction": "vault::execute_withdraw_full",
+            "asset": "USDC"
+          },
+          "condition": {
+            "leftRef": "state.safeBalance.MOAR_USDC",
+            "op": ">=",
+            "rightRef": "defaults.minMoarUsdcWithdrawBaseUnits"
+          },
+          "onError": "halt"
+        },
+        {
+          "id": "depositMoar",
+          "type": "depositMoar",
+          "description": "Deposit to Moar pool from safe (opt-in, disabled by default)",
+          "enabled": false,
+          "params": {
+            "entryFunction": "vault::execute_deposit",
+            "asset": "USDC"
+          },
+          "condition": {
+            "leftRef": "state.safeBalance.USDC",
+            "op": ">=",
+            "rightRef": "defaults.minUsdcSwapToUsd1"
+          },
+          "onError": "halt"
+        }
+      ]
+    }
+  },
+  "safes": [
+    {
+      "address": "0xbbd7a6df613470297fc58cad51d64b7d7c7772e2594e6ade847bb6fd88668869",
+      "label": "Safe #1 (example)",
+      "enabled": true,
+      "priority": 1,
+      "strategyId": "usd1_echelon_compound",
+      "overrides": {}
+    },
+    {
+      "address": "0xfcd901cdf77f6cb0608ca353baa6debd027eae110347270940cf12a0dd477c86",
+      "label": "Safe #2 (example — higher thresholds, no Moar claim)",
+      "enabled": true,
+      "priority": 2,
+      "strategyId": "usd1_echelon_compound",
+      "overrides": {
+        "defaults": {
+          "minClaimBaseUnits": 50000000
+        },
+        "actions": {
+          "claimMoarApt": { "enabled": false }
+        },
+        "riskLimits": {
+          "maxSingleActionUsd": 2000
+        }
+      }
+    }
+  ]
+}

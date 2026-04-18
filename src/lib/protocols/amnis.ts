@@ -76,7 +76,10 @@ export class AmnisProtocol implements BaseProtocol {
     }
   }
 
-  async buildWithdraw(marketAddress: string, amountOctas: bigint, token: string) {
+  async buildWithdraw(marketAddress: string, amountOctas: bigint | null, token: string) {
+    if (amountOctas === null) {
+      throw new Error('Withdraw amount is required');
+    }
     // Amnis Finance liquid staking withdraw transaction
     return {
       type: "entry_function_payload" as const,

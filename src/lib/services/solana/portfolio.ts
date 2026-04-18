@@ -6,6 +6,23 @@ const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ
 const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
 
+// Jupiter "receipt" mints (jl* / JUICED) that mirror protocol positions.
+// We exclude them from wallet token list to avoid double-counting deposits.
+const JUPITER_RECEIPT_MINT_EXCLUDE = new Set<string>([
+  // jlUSDG
+  "9fvHrYNw1A8Evpcj7X2yy4k4fT7nNHcA9L6UsamNHAif",
+  // jlUSDT
+  "Cmn4v2wipYV41dkakDvCgFJpxhtaaKt11NyWV8pjSE8A",
+  // jlUSDS
+  "j14XLJZSVMcUYpAfajdZRpnfHUpJieZHS4aPektLWvh",
+  // JUICED (jupUSD receipt)
+  "7GxATsNMnaC88vdwd2t3mwrFuQwwGvmYPrUQ4D6FotXk",
+  // jlUSDC
+  "9BEcn9aPEmhSPbPQeFGjidRiEKki46fVQDyPpSQXPA2D",
+  // jlEURC
+  "GcV9tEj62VncGithz4o4N9x6HWXARxuRgEAYk9zahNA8",
+]);
+
 const KNOWN_TOKENS: Record<
   string,
   { symbol: string; name: string }
@@ -211,6 +228,10 @@ export class SolanaPortfolioService {
       const tokenAmount = info?.tokenAmount;
 
       if (!mint || !tokenAmount) {
+        continue;
+      }
+
+      if (JUPITER_RECEIPT_MINT_EXCLUDE.has(mint)) {
         continue;
       }
 

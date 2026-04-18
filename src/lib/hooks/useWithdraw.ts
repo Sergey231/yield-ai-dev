@@ -17,7 +17,7 @@ export function useWithdraw() {
   const withdraw = useCallback(async (
     protocolKey: ProtocolKey,
     marketAddress: string,
-    amount: bigint,
+    amount: bigint | null,
     token: string
   ) => {
     try {
@@ -52,7 +52,7 @@ export function useWithdraw() {
         data: {
           function: payload.function as `${string}::${string}::${string}`,
           typeArguments: payload.type_arguments,
-          functionArguments: payload.arguments
+          functionArguments: payload.arguments as (string | number | bigint | boolean | null)[],
         },
         options: {
           maxGasAmount: 20000, // Network limit is 20000

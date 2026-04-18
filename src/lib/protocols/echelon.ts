@@ -5,6 +5,10 @@ import { getTokenInfoWithFallback } from '@/lib/tokens/tokenRegistry';
 export class EchelonProtocol implements BaseProtocol {
   name = "Echelon";
 
+  // Cache v2 pools to avoid repeated network calls during UX flows (e.g. multiple deposits).
+  private v2PoolsCache: { ts: number; data: any[] } | null = null;
+  private static readonly V2_POOLS_CACHE_TTL_MS = 60_000;
+
   /** Normalize hex address for comparison (0x + strip leading zeros after 0x) */
   private normalizeAddress(addr: string): string {
     if (!addr || typeof addr !== 'string') return addr;
@@ -13,41 +17,44 @@ export class EchelonProtocol implements BaseProtocol {
     return '0x' + rest;
   }
 
+  private async getV2Pools(): Promise<any[]> {
+    if (
+      this.v2PoolsCache &&
+      Date.now() - this.v2PoolsCache.ts < EchelonProtocol.V2_POOLS_CACHE_TTL_MS
+    ) {
+      return this.v2PoolsCache.data;
+    }
+
+    const res = await fetch('/api/protocols/echelon/v2/pools');
+    const json = await res.json();
+    const list = json?.success && Array.isArray(json?.data) ? (json.data as any[]) : [];
+    this.v2PoolsCache = { ts: Date.now(), data: list };
+    return list;
+  }
+
   async getMarketAddress(token: string): Promise<string> {
     const normalizedToken = this.normalizeAddress(token);
 
-    const response = await fetch('/api/protocols/echelon/pools');
-    const data = await response.json();
-    
-    if (data.success && Array.isArray(data.marketData)) {
-      // Special handling for APT token address mapping
-      let searchToken = token;
-      if (token === '0xa') {
-        searchToken = '0x1::aptos_coin::AptosCoin';
-      } else if (token === '0x1::aptos_coin::AptosCoin') {
-        searchToken = '0xa';
-      }
+    // Resolve market from v2/pools only. This avoids the extra hop to yield-a service,
+    // and uses the same data source as the main UI (Echelon v2 pools).
+    const pools = await this.getV2Pools();
+    if (Array.isArray(pools) && pools.length > 0) {
+      // Special handling for APT token address mapping (some flows use 0xa).
+      const normalizedAptFa = this.normalizeAddress('0xa');
+      const normalizedAptType = this.normalizeAddress('0x1::aptos_coin::AptosCoin');
+      const normalizedSearch =
+        normalizedToken === normalizedAptFa ? normalizedAptType : normalizedToken;
 
-      let market = data.marketData.find((m: any) => m.coin === token || this.normalizeAddress(m.coin) === normalizedToken);
-      if (!market && searchToken !== token) {
-        market = data.marketData.find((m: any) => m.coin === searchToken || this.normalizeAddress(m.coin) === this.normalizeAddress(searchToken));
-      }
-      if (market) {
-        return market.market;
-      }
-    }
-
-    // Fallback: fetch v2/pools (includes DLP and other assets from app.echelon.market)
-    const v2Response = await fetch('/api/protocols/echelon/v2/pools');
-    const v2Data = await v2Response.json();
-    if (v2Data.success && Array.isArray(v2Data.data)) {
-      const pool = v2Data.data.find(
+      const pool = pools.find(
         (p: any) =>
+          (p.token && this.normalizeAddress(p.token) === normalizedSearch) ||
+          (p.coinAddress && this.normalizeAddress(p.coinAddress) === normalizedSearch) ||
+          (p.faAddress && this.normalizeAddress(p.faAddress) === normalizedSearch) ||
           (p.token && this.normalizeAddress(p.token) === normalizedToken) ||
           (p.coinAddress && this.normalizeAddress(p.coinAddress) === normalizedToken) ||
           (p.faAddress && this.normalizeAddress(p.faAddress) === normalizedToken) ||
-          (p.token === token) ||
-          (p.coinAddress === token)
+          p.token === token ||
+          p.coinAddress === token
       );
       if (pool?.marketAddress) {
         return pool.marketAddress;
@@ -84,7 +91,10 @@ export class EchelonProtocol implements BaseProtocol {
     };
   }
 
-  async buildWithdraw(marketAddress: string, amountOctas: bigint, token: string, userAddress?: string) {
+  async buildWithdraw(marketAddress: string, amountOctas: bigint | null, token: string, userAddress?: string) {
+    if (amountOctas === null) {
+      throw new Error('Withdraw amount is required');
+    }
     console.log('Building withdraw for:', { marketAddress, amountOctas, token, userAddress });
 
     const tokenInfo = await getTokenInfoWithFallback(token);

@@ -25,6 +25,12 @@ const CLOSURE_NOTICES: Partial<Record<ProtocolKey, ClosureNotice>> = {
       "If you currently have funds on the platform, please withdraw your assets as soon as possible.",
     url: "https://x.com/AuroFinance_/status/2034253492068766028",
   },
+  moar: {
+    title: "Moar Market is winding down (reduce-only)",
+    description:
+      "Moar is entering reduce-only mode. No new positions can be opened. Assets remain available for withdrawal.",
+    url: "https://x.com/MoarMarket/status/2045161640656535643",
+  },
 };
 
 export function ProtocolClosureNotice({

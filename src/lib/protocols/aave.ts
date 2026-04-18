@@ -18,7 +18,10 @@ export class AaveProtocol implements BaseProtocol {
     };
   }
 
-  async buildWithdraw(marketAddress: string, amountOctas: bigint, token: string, userAddress?: string) {
+  async buildWithdraw(marketAddress: string, amountOctas: bigint | null, token: string, userAddress?: string) {
+    if (amountOctas === null) {
+      throw new Error('Withdraw amount is required');
+    }
     return {
       type: 'entry_function_payload' as const,
       function: "0x39ddcd9e1a39fa14f25e3f9ec8a86074d05cc0881cbf667df8a6ee70942016fb::supply_logic::withdraw",

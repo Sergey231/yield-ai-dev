@@ -11,6 +11,7 @@ import { Token } from "@/lib/types/token";
 import {
   MOAR_ADAPTER_ADDRESS_MAINNET,
   USDC_FA_METADATA_MAINNET,
+  USD1_FA_METADATA_MAINNET,
 } from "@/lib/constants/yieldAiVault";
 import { formatCurrency, formatNumber } from "@/lib/utils/numberFormat";
 import { useToast } from "@/components/ui/use-toast";
@@ -22,7 +23,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Copy, History, Loader2 } from "lucide-react";
-import { YieldAIDepositModal } from "@/components/ui/yield-ai-deposit-modal";
+import { DepositModal } from "@/components/ui/deposit-modal";
+import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { YieldAIWithdrawModal } from "@/components/ui/yield-ai-withdraw-modal";
 import { YieldAiHistoryModal } from "@/components/ui/yield-ai-history-modal";
 import {
@@ -34,6 +36,9 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { queryKeys } from "@/lib/query/queryKeys";
 import { useYieldAiDepositHistory, useYieldAiSafes, useYieldAiSafeTokens } from "@/lib/query/hooks/protocols/yield-ai";
+import { useEchelonProtocolCardModel } from "@/lib/query/hooks/protocols/echelon/useEchelonProtocolCardModel";
+import type { EchelonModalRow } from "@/lib/query/hooks/protocols/echelon/useEchelonProtocolCardModel";
+import { useEchelonPools } from "@/lib/query/hooks/protocols/echelon/useEchelonPools";
 import {
   Select,
   SelectContent,
@@ -54,7 +59,10 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { buildVaultExecuteWithdrawFullAsOwnerPayload } from "@/lib/protocols/yield-ai/vaultDeposit";
+import {
+  buildVaultExecuteWithdrawFullAsOwnerPayload,
+  buildVaultExecuteWithdrawAllEchelonFaAsOwnerPayload,
+} from "@/lib/protocols/yield-ai/vaultDeposit";
 import {
   HEDGE_FA,
   formatUsdcAmountForSwap,
@@ -62,6 +70,9 @@ import {
 } from "@/lib/protocols/decibel/hedgePrefill";
 import { SwapModal, type SwapModalPrefill } from "@/components/ui/swap-modal";
 import { PnlSummaryRow } from "@/components/ui/pnl-summary-row";
+
+const USDC_LOGO_APTOS = "https://assets.panora.exchange/tokens/aptos/USDC.svg";
+const MIN_VISIBLE_USD = 0.0001;
 
 function envFlag(raw: string | undefined, defaultValue = false): boolean {
   if (raw == null) return defaultValue;
@@ -86,6 +97,13 @@ export function YieldAIPositions() {
   const [showMoarWithdrawConfirm, setShowMoarWithdrawConfirm] = useState(false);
   const [selectedMoarWithdrawPosition, setSelectedMoarWithdrawPosition] = useState<MoarPosition | null>(null);
   const [isExecutingMoarWithdrawToSafe, setIsExecutingMoarWithdrawToSafe] = useState(false);
+  const [showEchelonWithdrawConfirm, setShowEchelonWithdrawConfirm] = useState(false);
+  const [selectedEchelonWithdrawRow, setSelectedEchelonWithdrawRow] = useState<EchelonModalRow | null>(
+    null
+  );
+  const [isExecutingEchelonWithdrawToSafe, setIsExecutingEchelonWithdrawToSafe] = useState(false);
+  const [echelonAdapterAddress, setEchelonAdapterAddress] = useState<string | null>(null);
+  const [echelonAdapterLoadError, setEchelonAdapterLoadError] = useState<string | null>(null);
   const [decibelSubaccounts, setDecibelSubaccounts] = useState<string[]>([]);
   const [selectedDecibelSubaccount, setSelectedDecibelSubaccount] = useState<string>("");
   const [delegationStatusLoading, setDelegationStatusLoading] = useState(false);
@@ -99,6 +117,9 @@ export function YieldAIPositions() {
   const [executorAsset, setExecutorAsset] = useState<"BTC" | "APT">("BTC");
   const [executorSizeUsd, setExecutorSizeUsd] = useState<string>("10");
   const [executorSubmitting, setExecutorSubmitting] = useState(false);
+  const [showUsd1ConvertConfirm, setShowUsd1ConvertConfirm] = useState(false);
+  const [usd1ConvertAmountBaseUnits, setUsd1ConvertAmountBaseUnits] = useState<string>("0");
+  const [isConvertingUsd1ToUsdc, setIsConvertingUsd1ToUsdc] = useState(false);
   const [executorHedgeHint, setExecutorHedgeHint] = useState<{
     sizeUsd: number;
     asset: "BTC" | "APT";
@@ -137,6 +158,58 @@ export function YieldAIPositions() {
   });
   const { data: poolsResponse } = useMoarPools();
 
+  const {
+    modalRows: echelonModalRows,
+    totalValue: echelonTotalValue,
+    rewardsValueUsd: echelonRewardsValueUsd,
+    isLoading: echelonLoading,
+    echelonRewardRows,
+  } = useEchelonProtocolCardModel(safeAddr, {
+    enabled: Boolean(safeAddr),
+    refetchOnMount: "always",
+  });
+
+  const { data: echelonPoolsResp } = useEchelonPools({ enabled: Boolean(safeAddr) });
+  const echelonAprByMarketObj = useMemo(() => {
+    const pools = echelonPoolsResp?.data ?? [];
+    const map = new Map<
+      string,
+      {
+        supplyApr: number;
+        supplyBaseApr: number;
+        borrowApr: number;
+        borrowBaseApr: number;
+        supplyRewardsApr: number;
+        borrowRewardsApr: number;
+      }
+    >();
+    for (const p of pools) {
+      if (!p.marketAddress) continue;
+      const key = normalizeAddress(p.marketAddress);
+      // `/api/protocols/echelon/v2/pools` returns APRs in percent units already.
+      // Supply:
+      // - `depositApy` is total (base + rewards).
+      // - `totalSupplyApr` is base (lending + staking), without rewards.
+      // - `supplyRewardsApr` is rewards-only.
+      const supplyApr = p.depositApy ?? 0;
+      const supplyBaseApr = p.totalSupplyApr ?? 0;
+      // Borrow:
+      // - `borrowAPY` is base borrow APR (without rewards).
+      // - `borrowRewardsApr` is rewards-only.
+      const borrowBaseApr = p.borrowAPY ?? 0;
+      const borrowApr = borrowBaseApr + (p.borrowRewardsApr ?? 0);
+      map.set(key, {
+        supplyApr,
+        supplyBaseApr,
+        borrowApr,
+        borrowBaseApr,
+        supplyRewardsApr: p.supplyRewardsApr ?? 0,
+        borrowRewardsApr: p.borrowRewardsApr ?? 0,
+      });
+    }
+    return map;
+  }, [echelonPoolsResp?.data]);
+
   const poolsAPR = (() => {
     if (!poolsResponse?.data) return {} as Record<number, { totalAPR: number; interestRateComponent: number; farmingAPY: number }>;
     const map: Record<number, { totalAPR: number; interestRateComponent: number; farmingAPY: number }> = {};
@@ -163,6 +236,8 @@ export function YieldAIPositions() {
       queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddr) });
       queryClient.invalidateQueries({ queryKey: queryKeys.protocols.moar.userPositions(safeAddr) });
       queryClient.invalidateQueries({ queryKey: queryKeys.protocols.moar.rewards(safeAddr) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.userPositions(safeAddr) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.rewards(safeAddr) });
     }
   }, [queryClient, walletAddress, safeAddr]);
 
@@ -383,7 +458,7 @@ export function YieldAIPositions() {
   useEffect(() => {
     const handleRefresh: EventListener = (evt) => {
       const event = evt as CustomEvent<{ protocol: string }>;
-      if (event?.detail?.protocol === "yield-ai") {
+      if (event?.detail?.protocol === "yield-ai" || event?.detail?.protocol === "echelon") {
         void reloadSafeData();
       }
     };
@@ -460,8 +535,148 @@ export function YieldAIPositions() {
     }
   };
 
+  useEffect(() => {
+    if (!safeAddr) {
+      setEchelonAdapterAddress(null);
+      setEchelonAdapterLoadError(null);
+      return;
+    }
+    let cancelled = false;
+    setEchelonAdapterLoadError(null);
+    void (async () => {
+      try {
+        const res = await fetch("/api/protocols/yield-ai/echelon-adapter-address");
+        const json = (await res.json()) as { data?: { address?: string }; error?: string };
+        if (cancelled) return;
+        if (!res.ok || json.error) {
+          setEchelonAdapterLoadError(json.error || `HTTP ${res.status}`);
+          setEchelonAdapterAddress(null);
+          return;
+        }
+        const addr = json.data?.address;
+        if (typeof addr === "string" && addr.length >= 10) {
+          setEchelonAdapterAddress(addr);
+        } else {
+          setEchelonAdapterLoadError("Invalid Echelon adapter address");
+          setEchelonAdapterAddress(null);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setEchelonAdapterLoadError(e instanceof Error ? e.message : "Failed to load Echelon adapter");
+          setEchelonAdapterAddress(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [safeAddr]);
+
+  const handleEchelonWithdrawConfirm = async () => {
+    if (!selectedEchelonWithdrawRow || !safeAddr || !echelonAdapterAddress) return;
+    if (!signAndSubmitTransaction) {
+      toast({
+        title: "Unsupported wallet",
+        description: "Current wallet cannot sign and submit transactions.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      setIsExecutingEchelonWithdrawToSafe(true);
+      const marketObj = toCanonicalAddress(selectedEchelonWithdrawRow.marketObj);
+      const payload = buildVaultExecuteWithdrawAllEchelonFaAsOwnerPayload({
+        safeAddress: toCanonicalAddress(safeAddr),
+        adapterAddress: toCanonicalAddress(echelonAdapterAddress),
+        marketObj,
+      });
+
+      const result = await signAndSubmitTransaction({
+        data: {
+          function: payload.function as `${string}::${string}::${string}`,
+          typeArguments: payload.typeArguments,
+          functionArguments: payload.functionArguments,
+        },
+        options: { maxGasAmount: 50000 },
+      });
+
+      if (!result?.hash) {
+        throw new Error("Transaction was submitted without hash");
+      }
+
+      setShowEchelonWithdrawConfirm(false);
+      setSelectedEchelonWithdrawRow(null);
+      if (safeAddr) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.userPositions(safeAddr) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.rewards(safeAddr) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddr) });
+      }
+      toast({
+        title: "Echelon exit submitted",
+        description: "Full position is being withdrawn from Echelon into your AI agent safe.",
+      });
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "yield-ai" } }));
+      }, 2000);
+    } catch (err) {
+      console.error("execute_withdraw_all_echelon_fa_as_owner failed:", err);
+      toast({
+        title: "Echelon withdraw failed",
+        description: err instanceof Error ? err.message : "Transaction failed. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsExecutingEchelonWithdrawToSafe(false);
+    }
+  };
+
+  const handleUsd1ConvertConfirm = async () => {
+    if (!safeAddr) return;
+    if (isConvertingUsd1ToUsdc) return;
+    try {
+      setIsConvertingUsd1ToUsdc(true);
+      const res = await fetch("/api/protocols/yield-ai/swap/usd1-to-usdc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          safeAddress: safeAddr,
+          amountInBaseUnits: usd1ConvertAmountBaseUnits,
+        }),
+      });
+      const json = (await res.json().catch(() => ({}))) as { data?: { hash?: string }; error?: string };
+      if (!res.ok || json.error) {
+        throw new Error(json.error || `HTTP ${res.status}`);
+      }
+      toast({
+        title: "Conversion submitted",
+        description: "USD1 → USDC swap submitted by the executor.",
+      });
+      setShowUsd1ConvertConfirm(false);
+      queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddr) });
+    } catch (err) {
+      console.error("USD1->USDC conversion failed:", err);
+      const message = err instanceof Error ? err.message : "Conversion failed";
+      toast({
+        title: "Conversion failed",
+        description: message,
+        variant: "destructive",
+      });
+    } finally {
+      setIsConvertingUsd1ToUsdc(false);
+    }
+  };
+
   const rewardsData = rewardsResponse?.data ?? [];
   const totalRewardsValue = rewardsResponse?.totalUsd ?? 0;
+  const combinedRewardsValue = totalRewardsValue + echelonRewardsValueUsd;
+  const REWARDS_SHOW_EPS = 1e-8;
+  const hasAnyRewards =
+    totalRewardsValue > REWARDS_SHOW_EPS || echelonRewardsValueUsd > REWARDS_SHOW_EPS;
+  const includingRewardsLabel =
+    combinedRewardsValue > 0 && combinedRewardsValue < 1
+      ? "<$1"
+      : formatCurrency(combinedRewardsValue, 2);
 
   const moarPositionsValue = moarPositions.reduce(
     (sum, p) => sum + parseFloat(p.value || "0"),
@@ -470,7 +685,8 @@ export function YieldAIPositions() {
   const totalValue =
     tokens.reduce((sum, t) => sum + (t.value ? parseFloat(t.value) : 0), 0) +
     moarPositionsValue +
-    totalRewardsValue;
+    totalRewardsValue +
+    echelonTotalValue;
 
   const { data: depositHistory, isLoading: historyLoading, isFetching: historyFetching } = useYieldAiDepositHistory(
     safeAddr,
@@ -487,13 +703,24 @@ export function YieldAIPositions() {
   const aprPct = holdingDays >= 7 && aprRaw != null ? parseFloat(aprRaw) : null;
   const netDepositsUsd = netDepositsRaw != null ? parseFloat(netDepositsRaw) : null;
 
+  const aiAgentProtocolConfig = useMemo(() => getProtocolByName("AI agent"), []);
+  const walletUsdcPriceUsd = useMemo(() => {
+    const usdc = walletTokens?.find(
+      (t) =>
+        normalizeAddress(t.address) === normalizeAddress(USDC_FA_METADATA_MAINNET) ||
+        t.symbol === "USDC"
+    );
+    return usdc?.price ? parseFloat(usdc.price) : 1;
+  }, [walletTokens]);
+
   const performanceLoading =
     historyLoading ||
     historyFetching ||
     safesLoading ||
     safeTokensLoading ||
     moarPositionsLoading ||
-    moarRewardsLoading;
+    moarRewardsLoading ||
+    echelonLoading;
 
   if (safesError) {
     return (
@@ -779,7 +1006,12 @@ export function YieldAIPositions() {
             Moar Market
           </div>
         )}
-        {moarPositions.map((position) => {
+        {moarPositions
+          .filter((position) => {
+            const v = parseFloat(position.value || "0");
+            return Number.isFinite(v) && v >= MIN_VISIBLE_USD;
+          })
+          .map((position) => {
           const value = parseFloat(position.value || "0");
           const valueIsFinite = Number.isFinite(value);
           const decimals = position.assetInfo?.decimals ?? 8;
@@ -998,14 +1230,202 @@ export function YieldAIPositions() {
             </div>
           );
         })}
-        {tokens.length === 0 && moarPositions.length === 0 ? (
+        {(() => {
+          const visibleEchelonRows = echelonModalRows.filter(
+            (row) => Number.isFinite(row.valueUsd) && row.valueUsd >= MIN_VISIBLE_USD
+          );
+          if (visibleEchelonRows.length === 0) return null;
+          return (
+          <div
+            className={
+              moarPositions.length > 0
+                ? "px-3 sm:px-4 pt-3 pb-2 text-xs font-medium text-muted-foreground uppercase tracking-wide border-t border-border"
+                : "px-3 sm:px-4 pt-1 pb-2 text-xs font-medium text-muted-foreground uppercase tracking-wide"
+            }
+          >
+            Echelon
+          </div>
+          );
+        })()}
+        {echelonModalRows
+          .filter((row) => Number.isFinite(row.valueUsd) && row.valueUsd >= MIN_VISIBLE_USD)
+          .map((row) => {
+            const marketKey = normalizeAddress(row.marketObj);
+            const aprRow = echelonAprByMarketObj.get(marketKey);
+            const aprPct = row.positionType === "borrow" ? aprRow?.borrowApr ?? 0 : aprRow?.supplyApr ?? 0;
+            const rewardsApr =
+              row.positionType === "borrow" ? aprRow?.borrowRewardsApr ?? 0 : aprRow?.supplyRewardsApr ?? 0;
+            const baseAprRaw =
+              row.positionType === "borrow" ? aprRow?.borrowBaseApr ?? 0 : aprRow?.supplyBaseApr ?? 0;
+            const baseApr =
+              baseAprRaw > 0 ? baseAprRaw : Math.max(0, aprPct - rewardsApr);
+            return (
+          <div key={row.id} className="border-b last:border-b-0">
+            <div className="p-3 sm:p-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+              <div className="flex gap-3 min-w-0 flex-1">
+                <div className="flex shrink-0 items-center -space-x-1">
+                  <div className="w-8 h-8 relative shrink-0 rounded-full bg-muted flex items-center justify-center overflow-hidden ring-2 ring-background">
+                    <Image
+                      src="/protocol_ico/echelon.png"
+                      alt="Echelon"
+                      width={32}
+                      height={32}
+                      className="object-contain"
+                      unoptimized
+                    />
+                  </div>
+                  {row.tokenLogoUrl ? (
+                    <div className="w-8 h-8 relative shrink-0 rounded-full bg-muted flex items-center justify-center overflow-hidden ring-2 ring-background">
+                      <Image
+                        src={row.tokenLogoUrl}
+                        alt={row.symbol}
+                        width={32}
+                        height={32}
+                        className="object-contain"
+                        unoptimized
+                      />
+                    </div>
+                  ) : null}
+                </div>
+                <div className="min-w-0 flex flex-1 flex-col justify-center gap-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold leading-tight">{row.symbol}</span>
+                      <Badge
+                        variant="outline"
+                        className={
+                          row.positionType === "borrow"
+                            ? "bg-orange-500/10 text-orange-700 border-orange-500/20 text-xs font-normal px-2 py-0.5 h-5"
+                            : "bg-green-500/10 text-green-600 border-green-500/20 text-xs font-normal px-2 py-0.5 h-5"
+                        }
+                      >
+                        {row.positionType === "borrow" ? "Borrow" : "Supply"}
+                      </Badge>
+                    </div>
+                    <div className="text-right shrink-0 sm:hidden">
+                      <div className="flex items-center justify-end gap-2">
+                        {aprPct > 0 && (
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Badge
+                                  variant="outline"
+                                  className="cursor-help bg-blue-500/10 text-blue-600 border-blue-500/20 px-2 py-0.5 text-[10px] font-normal leading-none h-5"
+                                >
+                                  APR: {formatNumber(aprPct, 2)}%
+                                </Badge>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <div className="space-y-1 text-xs">
+                                  <p className="font-medium">APR breakdown</p>
+                                  <p>Base: {formatNumber(baseApr, 2)}%</p>
+                                  <p>Rewards: {formatNumber(rewardsApr, 2)}%</p>
+                                </div>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        )}
+                        <div className="text-lg font-bold leading-tight">
+                          {formatCurrency(row.valueUsd, 2)}
+                        </div>
+                      </div>
+                      <div className="text-base font-semibold leading-tight text-muted-foreground">
+                        {row.amountLabel}
+                      </div>
+                    </div>
+                  </div>
+                  {row.canEmergencyWithdraw && (
+                    <div className="sm:hidden">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={
+                          isExecutingEchelonWithdrawToSafe ||
+                          !echelonAdapterAddress ||
+                          Boolean(echelonAdapterLoadError)
+                        }
+                        onClick={() => {
+                          setSelectedEchelonWithdrawRow(row);
+                          setShowEchelonWithdrawConfirm(true);
+                        }}
+                        className="h-auto min-h-9 w-full whitespace-normal px-2 py-2 text-center text-[11px] leading-snug"
+                      >
+                        {isExecutingEchelonWithdrawToSafe
+                          ? "Withdrawing…"
+                          : "Withdraw to AI agent wallet"}
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="hidden shrink-0 sm:flex flex-col items-end gap-2">
+                <div className="text-right">
+                  <div className="flex items-center justify-end gap-2">
+                    {aprPct > 0 && (
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Badge
+                              variant="outline"
+                              className="cursor-help bg-blue-500/10 text-blue-600 border-blue-500/20 px-2 py-0.5 text-[10px] font-normal leading-none h-5"
+                            >
+                              APR: {formatNumber(aprPct, 2)}%
+                            </Badge>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <div className="space-y-1 text-xs">
+                              <p className="font-medium">APR breakdown</p>
+                              <p>Base: {formatNumber(baseApr, 2)}%</p>
+                              <p>Rewards: {formatNumber(rewardsApr, 2)}%</p>
+                            </div>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
+                    <div className="text-lg font-bold leading-tight">
+                      {formatCurrency(row.valueUsd, 2)}
+                    </div>
+                  </div>
+                  <div className="text-base font-semibold leading-tight text-muted-foreground">
+                    {row.amountLabel}
+                  </div>
+                </div>
+                {row.canEmergencyWithdraw && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      isExecutingEchelonWithdrawToSafe ||
+                      !echelonAdapterAddress ||
+                      Boolean(echelonAdapterLoadError)
+                    }
+                    onClick={() => {
+                      setSelectedEchelonWithdrawRow(row);
+                      setShowEchelonWithdrawConfirm(true);
+                    }}
+                    className="h-auto max-w-[11rem] whitespace-normal px-2 py-2 text-center text-xs leading-tight"
+                  >
+                    {isExecutingEchelonWithdrawToSafe
+                      ? "Withdrawing…"
+                      : "Withdraw to AI agent wallet"}
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+            );
+          })}
+        {tokens.length === 0 &&
+        moarPositions.length === 0 &&
+        echelonModalRows.filter((row) => Number.isFinite(row.valueUsd) && row.valueUsd >= MIN_VISIBLE_USD).length === 0 &&
+        echelonRewardsValueUsd === 0 ? (
           <div className="py-4 text-muted-foreground">No assets in this safe.</div>
         ) : (
           <>
             {tokens.length > 0 && (
               <div
                 className={
-                  moarPositions.length > 0
+                  moarPositions.length > 0 || echelonModalRows.length > 0
                     ? "px-3 sm:px-4 pt-3 pb-2 text-xs font-medium text-muted-foreground uppercase tracking-wide border-t border-border"
                     : "px-3 sm:px-4 pt-1 pb-2 text-xs font-medium text-muted-foreground uppercase tracking-wide"
                 }
@@ -1013,7 +1433,12 @@ export function YieldAIPositions() {
                 AI agent wallet (safe)
               </div>
             )}
-            {tokens.map((token) => {
+            {tokens
+              .filter((token) => {
+                const value = token.value ? parseFloat(token.value) : 0;
+                return Number.isFinite(value) && value >= MIN_VISIBLE_USD;
+              })
+              .map((token) => {
             const value = token.value ? parseFloat(token.value) : 0;
             const amount =
               parseFloat(token.amount) / Math.pow(10, token.decimals);
@@ -1021,6 +1446,9 @@ export function YieldAIPositions() {
             const isUsdc =
               token.symbol === "USDC" ||
               normalizeAddress(token.address) === normalizeAddress(USDC_FA_METADATA_MAINNET);
+            const isUsd1 =
+              token.symbol === "USD1" ||
+              normalizeAddress(token.address) === normalizeAddress(USD1_FA_METADATA_MAINNET);
             return (
               <div
                 key={token.address}
@@ -1065,6 +1493,22 @@ export function YieldAIPositions() {
                   <div className="text-base text-muted-foreground font-semibold">
                     {formatNumber(amount, 4)}
                   </div>
+                  {isUsd1 && (
+                    <div className="flex flex-wrap gap-2 mt-2 justify-end">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-10"
+                        disabled={!safeAddr || isConvertingUsd1ToUsdc}
+                        onClick={() => {
+                          setUsd1ConvertAmountBaseUnits(String(token.amount));
+                          setShowUsd1ConvertConfirm(true);
+                        }}
+                      >
+                        {isConvertingUsd1ToUsdc ? "Converting…" : "Convert to USDC"}
+                      </Button>
+                    </div>
+                  )}
                   {isUsdc && (
                     <div className="flex flex-wrap gap-2 mt-2 justify-end">
                       <Button
@@ -1112,14 +1556,14 @@ export function YieldAIPositions() {
             {formatCurrency(totalValue, 2)}
           </span>
         </div>
-        {totalRewardsValue > 0 && (
+        {hasAnyRewards && (
           <div className="flex justify-end">
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <div className="text-sm text-muted-foreground flex items-center gap-1 justify-end cursor-help">
                     <span>💰</span>
-                    <span>including rewards {formatCurrency(totalRewardsValue)}</span>
+                    <span>including rewards {includingRewardsLabel}</span>
                   </div>
                 </TooltipTrigger>
                 <TooltipContent className="bg-popover text-popover-foreground border-border max-w-xs">
@@ -1135,7 +1579,7 @@ export function YieldAIPositions() {
                         },
                         idx: number
                       ) => (
-                        <div key={idx} className="flex items-center gap-2">
+                        <div key={`moar-${idx}`} className="flex items-center gap-2">
                           {reward.logoUrl && (
                             <img
                               src={reward.logoUrl}
@@ -1151,6 +1595,28 @@ export function YieldAIPositions() {
                         </div>
                       )
                     )}
+                    {echelonRewardRows
+                      .filter(
+                        (r) =>
+                          Number.isFinite(r.usdValue) &&
+                          r.usdValue > 0 &&
+                          Number.isFinite(r.amount) &&
+                          r.amount > 0
+                      )
+                      .map((reward, idx) => (
+                        <div key={`echelon-${reward.symbol}-${idx}`} className="flex items-center gap-2">
+                          {reward.logoUrl ? (
+                            <img
+                              src={reward.logoUrl}
+                              alt={reward.symbol}
+                              className="w-3 h-3 rounded-full"
+                            />
+                          ) : null}
+                          <span>{reward.symbol}</span>
+                          <span>{formatNumber(reward.amount, 6)}</span>
+                          <span className="text-muted-foreground">{formatCurrency(reward.usdValue, 2)}</span>
+                        </div>
+                      ))}
                   </div>
                 </TooltipContent>
               </Tooltip>
@@ -1167,10 +1633,29 @@ export function YieldAIPositions() {
         />
       </div>
 
-      <YieldAIDepositModal
+      <DepositModal
         isOpen={showDepositModal}
         onClose={() => setShowDepositModal(false)}
-        safeAddress={safeAddresses[0]}
+        protocol={{
+          name: aiAgentProtocolConfig?.name ?? "AI agent",
+          logo: aiAgentProtocolConfig?.logoUrl ?? "/logo.png",
+          apy: aprPct ?? 0,
+          key: "yield-ai",
+        }}
+        tokenIn={{
+          symbol: "USDC",
+          logo: USDC_LOGO_APTOS,
+          decimals: 6,
+          address: USDC_FA_METADATA_MAINNET,
+        }}
+        tokenOut={{
+          symbol: "USDC",
+          logo: USDC_LOGO_APTOS,
+          decimals: 6,
+          address: USDC_FA_METADATA_MAINNET,
+        }}
+        priceUSD={walletUsdcPriceUsd}
+        yieldAiSafeAddress={safeAddresses[0]}
       />
 
       <YieldAIWithdrawModal
@@ -1232,6 +1717,91 @@ export function YieldAIPositions() {
           </AlertDialogContent>
         </AlertDialog>
       )}
+
+      {selectedEchelonWithdrawRow && (
+        <AlertDialog
+          open={showEchelonWithdrawConfirm}
+          onOpenChange={(open) => {
+            if (isExecutingEchelonWithdrawToSafe) return;
+            setShowEchelonWithdrawConfirm(open);
+            if (!open) setSelectedEchelonWithdrawRow(null);
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Withdraw to AI agent safe?</AlertDialogTitle>
+              <AlertDialogDescription asChild>
+                <div className="space-y-2 text-sm text-muted-foreground">
+                  <p>
+                    This action executes a full withdraw from Echelon on this market back to your AI agent safe.
+                    After this transaction succeeds, use Withdraw in the AI agent wallet section to send funds to
+                    your wallet.
+                  </p>
+                  {echelonAdapterLoadError ? (
+                    <p className="text-destructive text-xs">
+                      Echelon adapter address could not be loaded: {echelonAdapterLoadError}
+                    </p>
+                  ) : null}
+                </div>
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={isExecutingEchelonWithdrawToSafe}>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                disabled={
+                  isExecutingEchelonWithdrawToSafe ||
+                  !echelonAdapterAddress ||
+                  Boolean(echelonAdapterLoadError)
+                }
+                onClick={(event) => {
+                  event.preventDefault();
+                  void handleEchelonWithdrawConfirm();
+                }}
+              >
+                {isExecutingEchelonWithdrawToSafe ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Withdrawing...
+                  </>
+                ) : (
+                  "Confirm"
+                )}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
+
+      <AlertDialog open={showUsd1ConvertConfirm} onOpenChange={setShowUsd1ConvertConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Convert USD1 to USDC</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will submit an on-chain swap signed by the Yield AI executor. It converts your USD1 held in the AI
+              agent wallet (safe) into USDC so you can withdraw USDC to your wallet.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isConvertingUsd1ToUsdc}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={isConvertingUsd1ToUsdc || !safeAddr || usd1ConvertAmountBaseUnits === "0"}
+              onClick={(event) => {
+                event.preventDefault();
+                void handleUsd1ConvertConfirm();
+              }}
+            >
+              {isConvertingUsd1ToUsdc ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Converting...
+                </>
+              ) : (
+                "Convert"
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <SwapModal
         isOpen={hedgeSwapOpen}

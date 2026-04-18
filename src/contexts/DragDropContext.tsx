@@ -497,7 +497,7 @@ export function DragDropProvider({ children }: { children: ReactNode }) {
             <WithdrawModal
               isOpen={isPositionModalOpen}
               onClose={closePositionModalDirect}
-              onConfirm={async (amount: bigint) => {
+              onConfirm={async (amount: bigint, _options?: { withdrawFullPosition?: boolean }) => {
                 if (positionConfirmHandler) {
                   try {
                     await positionConfirmHandler();
@@ -509,6 +509,7 @@ export function DragDropProvider({ children }: { children: ReactNode }) {
                 }
                 closePositionModalDirect();
               }}
+              protocol={{ name: "Echelon", logo: "/protocol_ico/echelon.png" }}
               position={positionModalData.position}
               tokenInfo={positionModalData.position.tokenInfo}
               isLoading={false}

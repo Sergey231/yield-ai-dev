@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import { useWallet } from '@aptos-labs/wallet-adapter-react';
 import { useWalletData } from '@/contexts/WalletContext';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/query/queryKeys';
 import { buildInitVaultPayload } from '@/lib/protocols/yield-ai/vaultDeposit';
 import { GasStationService } from '@/lib/services/gasStation';
@@ -18,6 +18,26 @@ const USDC_DECIMALS = 6;
 const DEFAULT_SAFE_MAX_PER_TX_USDC = '10000';
 const DEFAULT_SAFE_MAX_DAILY_USDC = '100000';
 
+/** Refetch until the new safe appears so the card can switch to Deposit without a manual refresh. */
+const SAFE_CREATED_REFETCH_MAX_ATTEMPTS = 12;
+const SAFE_CREATED_REFETCH_DELAY_MS = 400;
+
+async function refetchYieldAiSafesUntilPresent(
+  queryClient: QueryClient,
+  owner: string
+): Promise<boolean> {
+  const key = queryKeys.protocols.yieldAi.safes(owner);
+  for (let attempt = 0; attempt < SAFE_CREATED_REFETCH_MAX_ATTEMPTS; attempt++) {
+    await queryClient.refetchQueries({ queryKey: key });
+    const safes = queryClient.getQueryData<string[]>(key);
+    if (safes && safes.length > 0) return true;
+    if (attempt < SAFE_CREATED_REFETCH_MAX_ATTEMPTS - 1) {
+      await new Promise((r) => setTimeout(r, SAFE_CREATED_REFETCH_DELAY_MS));
+    }
+  }
+  return false;
+}
+
 export interface YieldAiSafeSettingsFormProps {
   className?: string;
   onCreated?: (txHash?: string) => void;
@@ -31,13 +51,17 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
 
   const [safeMaxPerTxUSDC, setSafeMaxPerTxUSDC] = useState(DEFAULT_SAFE_MAX_PER_TX_USDC);
   const [safeMaxDailyUSDC, setSafeMaxDailyUSDC] = useState(DEFAULT_SAFE_MAX_DAILY_USDC);
+  const [swapMaxPerTxUSDC, setSwapMaxPerTxUSDC] = useState(DEFAULT_SAFE_MAX_PER_TX_USDC);
+  const [swapMaxDailyUSDC, setSwapMaxDailyUSDC] = useState(DEFAULT_SAFE_MAX_DAILY_USDC);
   const [isCreatingSafe, setIsCreatingSafe] = useState(false);
 
   const parsedLimits = useMemo(() => {
     const maxPerTx = parseFloat(safeMaxPerTxUSDC);
     const maxDaily = parseFloat(safeMaxDailyUSDC);
-    return { maxPerTx, maxDaily };
-  }, [safeMaxPerTxUSDC, safeMaxDailyUSDC]);
+    const swapPerTx = parseFloat(swapMaxPerTxUSDC);
+    const swapDaily = parseFloat(swapMaxDailyUSDC);
+    return { maxPerTx, maxDaily, swapPerTx, swapDaily };
+  }, [safeMaxPerTxUSDC, safeMaxDailyUSDC, swapMaxPerTxUSDC, swapMaxDailyUSDC]);
 
   const validate = () => {
     if (!address || !signAndSubmitTransaction) {
@@ -74,6 +98,34 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
       });
       return false;
     }
+
+    const { swapPerTx, swapDaily } = parsedLimits;
+    if (!Number.isFinite(swapPerTx) || swapPerTx < 0 || !Number.isFinite(swapDaily) || swapDaily < 0) {
+      toast({
+        title: 'Invalid swap limits',
+        description: 'Swap limits must be non-negative numbers (USDC notional).',
+        variant: 'destructive',
+      });
+      return false;
+    }
+    const swapsOff = swapPerTx === 0 && swapDaily === 0;
+    const swapsOn = swapPerTx > 0 && swapDaily > 0;
+    if (!swapsOff && !swapsOn) {
+      toast({
+        title: 'Invalid swap limits',
+        description: 'Set both swap limits to 0 to disable swaps, or both to positive values.',
+        variant: 'destructive',
+      });
+      return false;
+    }
+    if (swapsOn && swapDaily < swapPerTx) {
+      toast({
+        title: 'Invalid swap limits',
+        description: 'Swap max daily must be at least swap max per transaction.',
+        variant: 'destructive',
+      });
+      return false;
+    }
     return true;
   };
 
@@ -81,15 +133,19 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
     if (isCreatingSafe) return;
     if (!validate()) return;
 
-    const { maxPerTx, maxDaily } = parsedLimits;
+    const { maxPerTx, maxDaily, swapPerTx, swapDaily } = parsedLimits;
     const maxPerTxBaseUnits = BigInt(Math.round(maxPerTx * 10 ** USDC_DECIMALS));
     const maxDailyBaseUnits = BigInt(Math.round(maxDaily * 10 ** USDC_DECIMALS));
+    const swapMaxPerTxUsdcBaseUnits = BigInt(Math.round(swapPerTx * 10 ** USDC_DECIMALS));
+    const swapMaxDailyUsdcBaseUnits = BigInt(Math.round(swapDaily * 10 ** USDC_DECIMALS));
 
     try {
       setIsCreatingSafe(true);
       const payload = buildInitVaultPayload({
         maxPerTxBaseUnits,
         maxDailyBaseUnits,
+        swapMaxPerTxUsdcBaseUnits,
+        swapMaxDailyUsdcBaseUnits,
       });
 
       const gasStationSubmitter = GasStationService.getInstance().getTransactionSubmitter();
@@ -122,7 +178,7 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
       }
 
       if (address) {
-        queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safes(address) });
+        await refetchYieldAiSafesUntilPresent(queryClient, address);
       }
 
       onCreated?.(txHash);
@@ -159,6 +215,33 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
             inputMode="decimal"
             value={safeMaxDailyUSDC}
             onChange={(e) => setSafeMaxDailyUSDC(e.target.value.replace(/[^0-9.]/g, ''))}
+            className="h-9 text-sm"
+            disabled={isCreatingSafe}
+          />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-1">
+          <Label className="text-[11px] text-muted-foreground">
+            Swap max per transaction (USDC notional)
+          </Label>
+          <Input
+            type="text"
+            inputMode="decimal"
+            value={swapMaxPerTxUSDC}
+            onChange={(e) => setSwapMaxPerTxUSDC(e.target.value.replace(/[^0-9.]/g, ''))}
+            className="h-9 text-sm"
+            disabled={isCreatingSafe}
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-[11px] text-muted-foreground">Swap max daily (USDC notional)</Label>
+          <Input
+            type="text"
+            inputMode="decimal"
+            value={swapMaxDailyUSDC}
+            onChange={(e) => setSwapMaxDailyUSDC(e.target.value.replace(/[^0-9.]/g, ''))}
             className="h-9 text-sm"
             disabled={isCreatingSafe}
           />

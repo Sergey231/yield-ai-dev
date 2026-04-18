@@ -8,9 +8,11 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { YieldAiSafeSettingsForm } from '@/components/ui/yield-ai-safe-settings-form';
-import { YieldAIDepositModal } from '@/components/ui/yield-ai-deposit-modal';
+import { DepositModal } from '@/components/ui/deposit-modal';
 import { cn } from '@/lib/utils';
 import { getProtocolByName } from '@/lib/protocols/getProtocolsList';
+import { USDC_FA_METADATA_MAINNET } from '@/lib/constants/yieldAiVault';
+import { normalizeAddress } from '@/lib/utils/addressNormalization';
 import { Copy, X } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -19,8 +21,10 @@ export interface YieldAiAgentWalletBlockProps {
   className?: string;
 }
 
+const USDC_LOGO_APTOS = 'https://assets.panora.exchange/tokens/aptos/USDC.svg';
+
 export function YieldAiAgentWalletBlock({ className }: YieldAiAgentWalletBlockProps) {
-  const { address } = useWalletData();
+  const { address, tokens } = useWalletData();
   const protocol = getProtocolByName('AI agent');
   const [logoError, setLogoError] = useState(false);
   const { toast } = useToast();
@@ -43,6 +47,15 @@ export function YieldAiAgentWalletBlock({ className }: YieldAiAgentWalletBlockPr
     if (!hasSafe) return 'Create an AI agent wallet (safe) with spending limits.';
     return `Safe ${safeAddress.slice(0, 6)}...${safeAddress.slice(-4)}`;
   }, [address, safesLoading, hasSafe, safeAddress]);
+
+  const walletUsdcPriceUsd = useMemo(() => {
+    const usdc = tokens?.find(
+      (t) =>
+        normalizeAddress(t.address) === normalizeAddress(USDC_FA_METADATA_MAINNET) ||
+        t.symbol === 'USDC'
+    );
+    return usdc?.price ? parseFloat(usdc.price) : 1;
+  }, [tokens]);
 
   useEffect(() => {
     if (!openDepositAfterCreate) return;
@@ -174,10 +187,29 @@ export function YieldAiAgentWalletBlock({ className }: YieldAiAgentWalletBlockPr
         </DialogContent>
       </Dialog>
 
-      <YieldAIDepositModal
+      <DepositModal
         isOpen={depositOpen}
         onClose={() => setDepositOpen(false)}
-        safeAddress={safeAddress}
+        protocol={{
+          name: protocol?.name ?? 'AI agent',
+          logo: protocol?.logoUrl ?? '/logo.png',
+          apy: 0,
+          key: 'yield-ai',
+        }}
+        tokenIn={{
+          symbol: 'USDC',
+          logo: USDC_LOGO_APTOS,
+          decimals: 6,
+          address: USDC_FA_METADATA_MAINNET,
+        }}
+        tokenOut={{
+          symbol: 'USDC',
+          logo: USDC_LOGO_APTOS,
+          decimals: 6,
+          address: USDC_FA_METADATA_MAINNET,
+        }}
+        priceUSD={walletUsdcPriceUsd}
+        yieldAiSafeAddress={safeAddress}
       />
     </>
   );

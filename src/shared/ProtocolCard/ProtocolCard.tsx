@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { useCollapsible } from "@/contexts/CollapsibleContext";
 import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
 import { ManagePositionsButton } from "@/components/protocols/ManagePositionsButton";
+import { ProtocolClosureNotice } from "@/components/ui/protocol-closure-notice";
 import { ProtocolCardSkeleton } from "./ProtocolCardSkeleton/ProtocolCardSkeleton";
 import { ProtocolCardPosition } from "./ProtocolCardPosition/ProtocolCardPosition";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -65,6 +66,7 @@ export function ProtocolCard({
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
           {logoUrl ? <Image src={logoUrl} alt="" width={20} height={20} className={styles.logo} unoptimized /> : null}
           <span className={styles.title}>{protocol.name}</span>
+          <ProtocolClosureNotice protocolKey={protocol.key} stopPropagation className="-ml-1" />
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
           <span className={styles.headerValue}>{formatUsd(totalValue, 2)}</span>

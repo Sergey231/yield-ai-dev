@@ -19,7 +19,7 @@ import { useToast } from '@/components/ui/use-toast';
 import { SolanaWalletSelector } from '@/components/SolanaWalletSelector';
 import { WalletSelector } from '@/components/WalletSelector';
 import { useWallet, useConnection } from '@solana/wallet-adapter-react';
-import { WalletReadyState, WalletName } from '@solana/wallet-adapter-base';
+import { WalletName } from '@solana/wallet-adapter-base';
 import { useSolanaPortfolio } from '@/hooks/useSolanaPortfolio';
 import { AptosPortfolioService } from '@/lib/services/aptos/portfolio';
 import { Token } from '@/lib/types/token';
@@ -35,18 +35,11 @@ import { ActionLog, type ActionLogItem } from '@/components/bridge/ActionLog';
 import { useAptosClient } from '@/contexts/AptosClientContext';
 import { GasStationService } from '@/lib/services/gasStation';
 import { performMintOnSolana } from '@/lib/cctp-mint-core';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogTrigger,
-} from '@/components/ui/dialog';
 
 // USDC token addresses
 const USDC_SOLANA = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // USDC on Solana
 const USDC_APTOS = '0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b'; // USDC on Aptos
+const WRAPPED_SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 // Chains configuration
 const CHAINS = [
@@ -200,12 +193,11 @@ function BridgePageContent() {
   }, [effectiveSolanaConnectedFinal, solanaAddressFinal, pollTick]);
 
   // Solana wallet selector state
-  const [isSolanaDialogOpen, setIsSolanaDialogOpen] = useState(false);
-  const [isSolanaConnecting, setIsSolanaConnecting] = useState(false);
   // Force re-render counter - used after manual reconnect to update UI
   const [, forceUpdate] = useState(0);
   // Aptos wallet selector state
-  const [isAptosDialogOpen, setIsAptosDialogOpen] = useState(false);
+  const [isWalletConnectDialogOpen, setIsWalletConnectDialogOpen] = useState(false);
+  const [walletConnectInitialChainTab, setWalletConnectInitialChainTab] = useState<"aptos" | "solana">("aptos");
   const [isAptosConnecting, setIsAptosConnecting] = useState(false);
   
   // Restoring/Reconnecting states - show loading while wallets are being restored/reconnected
@@ -936,6 +928,15 @@ function BridgePageContent() {
     return 0;
   }, [sourceChain, solanaTokens, aptosTokens]);
 
+  // SOL balance (human-readable) for hint: "n SOL recommended >0,01 SOL"
+  const solanaSolBalance = useMemo(() => {
+    const sol = solanaTokens.find((t) => t.address === WRAPPED_SOL_MINT || t.symbol === 'SOL');
+    if (!sol) return 0;
+    const raw = parseFloat(sol.amount);
+    if (!Number.isFinite(raw) || raw <= 0) return 0;
+    return raw / Math.pow(10, sol.decimals ?? 9);
+  }, [solanaTokens]);
+
   // Whether the source chain balance is currently loading
   const isSourceBalanceLoading = useMemo(() => {
     if (!sourceChain) return false;
@@ -1293,101 +1294,6 @@ function BridgePageContent() {
     if (!address) return '';
     return `${address.slice(0, 8)}...${address.slice(-8)}`;
   };
-
-  // Solana wallet selection logic
-  const availableSolanaWallets = useMemo(() => {
-    const filtered = wallets.filter(
-      (wallet) => wallet.readyState !== WalletReadyState.NotDetected
-    );
-    const seen = new Set<string>();
-    return filtered.filter((wallet) => {
-      const name = wallet.adapter.name;
-      if (seen.has(name)) {
-        return false;
-      }
-      seen.add(name);
-      return true;
-    });
-  }, [wallets]);
-
-  const handleSolanaWalletSelect = async (walletName: string) => {
-    console.log('[bridge] handleSolanaWalletSelect called with:', walletName);
-    console.log('[bridge] Available wallets:', wallets.map(w => w.adapter.name));
-    console.log('[bridge] Current wallet:', solanaWallet?.adapter?.name);
-    console.log('[bridge] Connected:', solanaConnected);
-    
-    try {
-      setIsSolanaConnecting(true);
-      
-      // Clear skip flags since user is explicitly connecting a new Solana wallet
-      if (typeof window !== "undefined") {
-        try {
-          window.sessionStorage.removeItem("skip_auto_connect_solana");
-          window.sessionStorage.removeItem("skip_auto_connect_derived_aptos");
-          // Pre-set walletName in localStorage to help adapter find it
-          window.localStorage.setItem("walletName", JSON.stringify(walletName));
-        } catch {}
-      }
-      // Allow derived auto-connect for the new Solana wallet
-      skipAutoConnectDerivedRef.current = false;
-      hasTriedAutoConnectDerived.current = false;
-      
-      // Find the wallet adapter
-      const targetWallet = wallets.find(w => w.adapter.name === walletName);
-      console.log('[bridge] Target wallet found:', targetWallet?.adapter?.name, 'readyState:', targetWallet?.readyState);
-      
-      if (!targetWallet) {
-        throw new Error(`Wallet ${walletName} not found in available wallets`);
-      }
-      
-      select(walletName as WalletName);
-      setIsSolanaDialogOpen(false);
-      
-      // Poll for wallet selection, then connect
-      const maxAttempts = 10;
-      let attempt = 0;
-      
-      const tryConnect = async () => {
-        attempt++;
-        console.log('[bridge] Connection attempt', attempt, 'current wallet:', solanaWallet?.adapter?.name);
-        
-        try {
-          await connectSolana();
-          console.log('[bridge] connectSolana() succeeded');
-          toast({
-            title: "Wallet Connected",
-            description: `Connected to ${walletName}`,
-          });
-          setIsSolanaConnecting(false);
-        } catch (error: any) {
-          console.log('[bridge] connectSolana() failed:', error?.name, error?.message);
-          
-          if (attempt < maxAttempts) {
-            // Retry with increasing delay
-            setTimeout(tryConnect, 200 * attempt);
-          } else {
-            // Don't show toast — connection often succeeds via SolanaWalletRestore
-            // even when connectSolana() throws (race condition with Phantom etc.)
-            console.log('[bridge] All connect attempts exhausted, relying on restore mechanism');
-            setIsSolanaConnecting(false);
-          }
-        }
-      };
-      
-      // Start connection attempts after a short delay
-      setTimeout(tryConnect, 150);
-      
-    } catch (error: any) {
-      console.log('[bridge] handleSolanaWalletSelect error:', error);
-      setIsSolanaConnecting(false);
-      toast({
-        variant: "destructive",
-        title: "Selection Failed",
-        description: error.message || "Failed to select wallet",
-      });
-    }
-  };
-
 
   // Ensure source and destination chains/tokens are always set
   useEffect(() => {
@@ -2158,6 +2064,7 @@ function BridgePageContent() {
             onAmountChange={setTransferAmount}
             sourceBalance={sourceUsdcBalance}
             isBalanceLoading={isSourceBalanceLoading}
+            solanaSolBalance={solanaSolBalance}
             onDestinationAddressChange={setDestinationAddress}
             onTransfer={handleTransfer}
             isTransferring={isTransferring}
@@ -2181,6 +2088,13 @@ function BridgePageContent() {
             ) : null}
             walletSection={
                 <div className="p-3 border rounded-lg bg-card w-auto space-y-2">
+                <div className="hidden" aria-hidden="true">
+                  <WalletSelector
+                    externalOpen={isWalletConnectDialogOpen}
+                    onExternalOpenChange={setIsWalletConnectDialogOpen}
+                    externalInitialChainTab={walletConnectInitialChainTab}
+                  />
+                </div>
                 {/* Solana Wallet: Connected or Connect Button */}
                 {effectiveSolanaConnectedFinal && solanaAddressFinal ? (
                   <div>
@@ -2226,55 +2140,24 @@ function BridgePageContent() {
                     )}
                   </div>
                 ) : (
-                  <Dialog open={isSolanaDialogOpen} onOpenChange={setIsSolanaDialogOpen}>
-                    <DialogTrigger asChild>
-                      <Button size="sm" className="w-full" disabled={isSolanaConnecting || isSolanaRestoring || isSolanaReconnecting}>
-                        {isSolanaConnecting || isSolanaRestoring || isSolanaReconnecting ? (
-                          <>
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            {isSolanaRestoring ? 'Restoring...' : isSolanaReconnecting ? 'Reconnecting...' : 'Connecting...'}
-                          </>
-                        ) : (
-                          'Connect Solana Wallet'
-                        )}
-                      </Button>
-                    </DialogTrigger>
-                    <DialogContent>
-                      <DialogHeader>
-                        <DialogTitle>Select Solana Wallet</DialogTitle>
-                        <DialogDescription>
-                          Choose a wallet to connect to your Solana account
-                        </DialogDescription>
-                      </DialogHeader>
-                      <div className="space-y-2 mt-4">
-                        {availableSolanaWallets.length === 0 ? (
-                          <div className="text-sm text-muted-foreground p-4 text-center">
-                            No Solana wallets detected. Please install a wallet extension.
-                          </div>
-                        ) : (
-                          availableSolanaWallets.map((w, index) => (
-                            <Button
-                              key={`${w.adapter.name}-${index}-${w.adapter.url || ''}`}
-                              variant="outline"
-                              className="w-full justify-start"
-                              onClick={() => handleSolanaWalletSelect(w.adapter.name)}
-                              disabled={isSolanaConnecting}
-                            >
-                              <div className="flex items-center gap-2">
-                                {w.adapter.icon && (
-                                  <img src={w.adapter.icon} alt={w.adapter.name} className="w-6 h-6" />
-                                )}
-                                <span>{w.adapter.name}</span>
-                                {w.readyState === WalletReadyState.Loadable && (
-                                  <span className="ml-auto text-xs text-muted-foreground">(Install)</span>
-                                )}
-                              </div>
-                            </Button>
-                          ))
-                        )}
-                      </div>
-                    </DialogContent>
-                  </Dialog>
+                  <Button
+                    size="sm"
+                    className="w-full"
+                    disabled={isSolanaRestoring || isSolanaReconnecting}
+                    onClick={() => {
+                      setWalletConnectInitialChainTab("solana");
+                      setIsWalletConnectDialogOpen(true);
+                    }}
+                  >
+                    {isSolanaRestoring || isSolanaReconnecting ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        {isSolanaRestoring ? 'Restoring...' : 'Reconnecting...'}
+                      </>
+                    ) : (
+                      'Connect Solana Wallet'
+                    )}
+                  </Button>
                 )}
 
                 {/* Aptos Wallet: Connected or Connect Button (INDEPENDENT of Solana) */}
@@ -2324,29 +2207,24 @@ function BridgePageContent() {
                     )}
                   </div>
                 ) : (
-                  <div className="relative">
-                    <div className="hidden">
-                      <WalletSelector 
-                        externalOpen={isAptosDialogOpen} 
-                        onExternalOpenChange={setIsAptosDialogOpen} 
-                      />
-                    </div>
-                    <Button
-                      size="sm"
-                      className="w-full"
-                      disabled={isAptosConnecting || isAptosRestoring || isAptosReconnecting}
-                      onClick={() => setIsAptosDialogOpen(true)}
-                    >
-                      {isAptosConnecting || isAptosRestoring || isAptosReconnecting ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          {isAptosRestoring ? 'Restoring...' : isAptosReconnecting ? 'Reconnecting...' : 'Connecting...'}
-                        </>
-                      ) : (
-                        'Connect Aptos Wallet'
-                      )}
-                    </Button>
-                  </div>
+                  <Button
+                    size="sm"
+                    className="w-full"
+                    disabled={isAptosConnecting || isAptosRestoring || isAptosReconnecting}
+                    onClick={() => {
+                      setWalletConnectInitialChainTab("aptos");
+                      setIsWalletConnectDialogOpen(true);
+                    }}
+                  >
+                    {isAptosConnecting || isAptosRestoring || isAptosReconnecting ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        {isAptosRestoring ? 'Restoring...' : isAptosReconnecting ? 'Reconnecting...' : 'Connecting...'}
+                      </>
+                    ) : (
+                      'Connect Aptos Wallet'
+                    )}
+                  </Button>
                 )}
                 </div>
             }

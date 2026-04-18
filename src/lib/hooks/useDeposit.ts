@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { executeDeposit } from '../transactions/DepositTransaction';
+import { executeDeposit, type ExecuteDepositOptions } from '../transactions/DepositTransaction';
 import { ProtocolKey } from '../transactions/types';
 import { useToast } from '@/components/ui/use-toast';
 import { showTransactionSuccessToast } from '@/components/ui/transaction-toast';
@@ -32,7 +32,7 @@ export function useDeposit() {
     protocolKey: ProtocolKey,
     token: string,
     amount: bigint,
-    options?: { marketAddress?: string }
+    options?: ExecuteDepositOptions
   ) => {
     try {
       console.log('Starting deposit:', { protocolKey, token, amount });
@@ -186,7 +186,18 @@ export function useDeposit() {
             
             if (txData.success && txData.vm_status === "Executed successfully") {
               console.log('Transaction confirmed successfully, showing toast...');
-              showTransactionSuccessToast({ hash: response.hash });
+              showTransactionSuccessToast({
+                hash: response.hash,
+                ...(protocolKey === 'yield-ai'
+                  ? { title: 'Deposit to safe successful!' }
+                  : {}),
+              });
+              if (protocolKey === 'yield-ai') {
+                toast({
+                  title: 'Thanks for your deposit',
+                  description: 'The AI agent will rebalance your funds every hour.',
+                });
+              }
               if (typeof window !== 'undefined') {
                 window.dispatchEvent(
                   new CustomEvent('refreshPositions', { detail: { protocol: protocolKey } })

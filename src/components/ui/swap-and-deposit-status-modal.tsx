@@ -35,11 +35,12 @@ interface SwapAndDepositStatusModalProps {
   };
   userAddress: string;
   poolAddress?: string; // Add this for Auro Finance
+  yieldAiSafeAddress?: string;
 }
 
 type Status = 'idle' | 'loading' | 'success' | 'error';
 
-export function SwapAndDepositStatusModal({ isOpen, onClose, provider = 'panora', amount, fromToken, toToken, protocol, userAddress, poolAddress }: SwapAndDepositStatusModalProps) {
+export function SwapAndDepositStatusModal({ isOpen, onClose, provider = 'panora', amount, fromToken, toToken, protocol, userAddress, poolAddress, yieldAiSafeAddress }: SwapAndDepositStatusModalProps) {
   const [status, setStatus] = useState<Status>('idle');
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -436,11 +437,17 @@ export function SwapAndDepositStatusModal({ isOpen, onClose, provider = 'panora'
                 } else if (protocol.key === 'auro' && !poolAddress) {
                   throw new Error('Auro Finance requires pool address for deposit');
                 } else {
+                  if (protocol.key === 'yield-ai' && !yieldAiSafeAddress) {
+                    throw new Error('Yield AI deposit requires a safe address');
+                  }
                   // Standard deposit logic for other protocols
                   const depositRes = await deposit(
                     protocol.key as ProtocolKey,
                     normalizedTokenAddress,
-                    BigInt(amount)
+                    BigInt(amount),
+                    protocol.key === 'yield-ai' && yieldAiSafeAddress
+                      ? { yieldAiSafeAddress }
+                      : undefined
                   );
                   setDepositResult(depositRes);
                   setDepositStatus('success');
@@ -478,7 +485,7 @@ export function SwapAndDepositStatusModal({ isOpen, onClose, provider = 'panora'
         setIsCheckingTransaction(false);
       });
     }
-  }, [status, result, tokenList, hasProcessedTransaction]);
+  }, [status, result, tokenList, hasProcessedTransaction, poolAddress, yieldAiSafeAddress]);
 
   const handleRetry = () => {
     setRetryCount((c) => c + 1);

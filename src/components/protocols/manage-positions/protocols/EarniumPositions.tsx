@@ -268,7 +268,9 @@ export function EarniumPositionsManaging() {
                     <div className="text-lg font-medium">{(p.pairSymbols || []).join(' / ') || 'Pool'}</div>
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <Image src="/icon-crown.webp" alt="Premium Pool" width={16} height={16} className="object-contain cursor-help" />
+                        <span className="inline-flex cursor-help">
+                          <Image src="/icon-crown.webp" alt="Premium Pool" width={16} height={16} className="object-contain" />
+                        </span>
                       </TooltipTrigger>
                       <TooltipContent className="bg-popover text-popover-foreground border-border">
                         <div className="text-xs">Premium Pool</div>

@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getRequestOrigin } from '@/lib/utils/requestOrigin';
 import { Aptos, AptosConfig, Network } from '@aptos-labs/ts-sdk';
-import { getBaseUrl } from '@/lib/utils/config';
 
 // Auro Finance contract address (mainnet)
 const AURO_ADDRESS = "0x50a340a19e6ada1be07192c042786ca6a9651d5c845acc8727e8c6416a56a32c";
@@ -38,6 +37,34 @@ function setCache(key: string, response: any) {
   rewardsCache.set(key, { timestamp: Date.now(), response });
 }
 
+async function safeReadJson(response: Response, label: string) {
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    const text = await response.text();
+    console.error(`[Auro Rewards] Non-JSON response for ${label}:`, {
+      status: response.status,
+      statusText: response.statusText,
+      contentType,
+      bodyPreview: text.slice(0, 500),
+    });
+    throw new Error(`Non-JSON response for ${label}: ${response.status}`);
+  }
+
+  try {
+    return await response.json();
+  } catch (e) {
+    const text = await response.text().catch(() => "");
+    console.error(`[Auro Rewards] JSON parse error for ${label}:`, {
+      status: response.status,
+      statusText: response.statusText,
+      contentType,
+      bodyPreview: text.slice(0, 500),
+      error: e instanceof Error ? e.message : String(e),
+    });
+    throw e;
+  }
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const address = searchParams.get('address');
@@ -68,13 +95,28 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const baseUrl = getBaseUrl();
+    const baseUrl = getRequestOrigin(request);
+    console.log("[Auro Rewards] GET baseUrl:", { baseUrl, address });
     
     // Fetch positions for the address
-    const positionsResponse = await fetch(`${baseUrl}/api/protocols/auro/userPositions?address=${encodeURIComponent(address)}`);
-    const positionsData = await positionsResponse.json();
+    const positionsUrl = `${baseUrl}/api/protocols/auro/userPositions?address=${encodeURIComponent(address)}`;
+    const positionsResponse = await fetch(positionsUrl);
+    console.log("[Auro Rewards] GET userPositions response:", {
+      url: positionsUrl,
+      status: positionsResponse.status,
+      statusText: positionsResponse.statusText,
+      contentType: positionsResponse.headers.get("content-type"),
+    });
+    const positionsData = await safeReadJson(positionsResponse, "userPositions");
     
     if (!positionsResponse.ok || !positionsData.success) {
+      console.error("[Auro Rewards] userPositions not ok:", {
+        ok: positionsResponse.ok,
+        status: positionsResponse.status,
+        success: positionsData?.success,
+        message: positionsData?.message,
+        error: positionsData?.error,
+      });
       return NextResponse.json({ 
         success: false, 
         error: 'Failed to fetch positions' 
@@ -82,10 +124,24 @@ export async function GET(request: NextRequest) {
     }
 
     // Fetch pools data
-    const poolsResponse = await fetch(`${baseUrl}/api/protocols/auro/pools`);
-    const poolsData = await poolsResponse.json();
+    const poolsUrl = `${baseUrl}/api/protocols/auro/pools`;
+    const poolsResponse = await fetch(poolsUrl);
+    console.log("[Auro Rewards] GET pools response:", {
+      url: poolsUrl,
+      status: poolsResponse.status,
+      statusText: poolsResponse.statusText,
+      contentType: poolsResponse.headers.get("content-type"),
+    });
+    const poolsData = await safeReadJson(poolsResponse, "pools");
     
     if (!poolsResponse.ok || !poolsData.success) {
+      console.error("[Auro Rewards] pools not ok:", {
+        ok: poolsResponse.ok,
+        status: poolsResponse.status,
+        success: poolsData?.success,
+        message: poolsData?.message,
+        error: poolsData?.error,
+      });
       return NextResponse.json({ 
         success: false, 
         error: 'Failed to fetch pools' 

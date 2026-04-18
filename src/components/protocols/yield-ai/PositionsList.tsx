@@ -14,7 +14,9 @@ import {
 import { mapMoarPositionsToProtocolPositionsAiAgent } from "./mapMoarToProtocolPositionsAiAgent";
 import { queryKeys } from "@/lib/query/queryKeys";
 import { useYieldAiSafes, useYieldAiSafeTokens } from "@/lib/query/hooks/protocols/yield-ai";
+import { useEchelonProtocolCardModel } from "@/lib/query/hooks/protocols/echelon/useEchelonProtocolCardModel";
 import { mapYieldAiSafeTokensToProtocolPositions } from "./mapYieldAiSafeTokensToProtocolPositions";
+import { mapEchelonProtocolPositionsToAiAgent } from "./mapEchelonToProtocolPositionsAiAgent";
 
 interface PositionsListProps {
   address?: string;
@@ -31,6 +33,7 @@ export function PositionsList({
   onPositionsCheckComplete,
   showManageButton = true,
 }: PositionsListProps) {
+  const MIN_VISIBLE_USD = 0.0001;
   const { account } = useWallet();
   const queryClient = useQueryClient();
   const walletAddress = address || account?.address?.toString();
@@ -71,6 +74,17 @@ export function PositionsList({
   });
   const { data: poolsResponse } = useMoarPools();
 
+  const {
+    protocolPositions: echelonProtocolPositions,
+    totalValue: echelonTotalValue,
+    rewardsValueUsd: echelonRewardsValueUsd,
+    isLoading: echelonLoading,
+    isFetching: echelonFetching,
+  } = useEchelonProtocolCardModel(safeAddress, {
+    enabled: Boolean(safeAddress),
+    refetchOnMount: refreshKey != null ? "always" : undefined,
+  });
+
   const rewardsTotalUsd = rewardsResponse?.totalUsd ?? 0;
 
   const aprByPoolId = useMemo(() => {
@@ -94,6 +108,24 @@ export function PositionsList({
     [safeTokens]
   );
 
+  const echelonAiPositions = useMemo(
+    () => mapEchelonProtocolPositionsToAiAgent(echelonProtocolPositions),
+    [echelonProtocolPositions]
+  );
+
+  const mergedProtocolPositions = useMemo(
+    () =>
+      [...moarProtocolPositions, ...echelonAiPositions, ...tokenProtocolPositions].sort(
+        (a, b) => b.value - a.value
+      ),
+    [moarProtocolPositions, echelonAiPositions, tokenProtocolPositions]
+  );
+
+  const visibleProtocolPositions = useMemo(
+    () => mergedProtocolPositions.filter((p) => Number.isFinite(p.value) && p.value >= MIN_VISIBLE_USD),
+    [mergedProtocolPositions]
+  );
+
   const positionsValue = useMemo(
     () => moarPositions.reduce((sum, p) => sum + parseFloat(p.value || "0"), 0),
     [moarPositions]
@@ -103,17 +135,28 @@ export function PositionsList({
     [safeTokens]
   );
 
-  const totalValue = positionsValue + tokensValue + rewardsTotalUsd;
+  const combinedRewardsUsd = rewardsTotalUsd + echelonRewardsValueUsd;
+  const totalValue = positionsValue + tokensValue + rewardsTotalUsd + echelonTotalValue;
 
   const totalRewardsUsd =
-    rewardsTotalUsd > 0
-      ? rewardsTotalUsd < 1
+    combinedRewardsUsd > 0
+      ? combinedRewardsUsd < 1
         ? "<$1"
-        : formatCurrency(rewardsTotalUsd, 2)
+        : formatCurrency(combinedRewardsUsd, 2)
       : undefined;
 
-  const isLoading = safesLoading || safeTokensLoading || moarPositionsLoading || moarRewardsLoading;
-  const isFetching = safesFetching || safeTokensFetching || moarPositionsFetching || moarRewardsFetching;
+  const isLoading =
+    safesLoading ||
+    safeTokensLoading ||
+    moarPositionsLoading ||
+    moarRewardsLoading ||
+    echelonLoading;
+  const isFetching =
+    safesFetching ||
+    safeTokensFetching ||
+    moarPositionsFetching ||
+    moarRewardsFetching ||
+    echelonFetching;
   const hasError = Boolean(moarPositionsError);
 
   useEffect(() => {
@@ -135,8 +178,30 @@ export function PositionsList({
       queryClient.invalidateQueries({
         queryKey: queryKeys.protocols.moar.rewards(safeAddress),
       });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.echelon.userPositions(safeAddress),
+      });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.echelon.rewards(safeAddress),
+      });
     }
   }, [refreshKey, safeAddress, queryClient]);
+
+  useEffect(() => {
+    const handleRefresh: EventListener = (evt) => {
+      const event = evt as CustomEvent<{ protocol?: string }>;
+      if (event?.detail?.protocol === "echelon" && safeAddress) {
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.protocols.echelon.userPositions(safeAddress),
+        });
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.protocols.echelon.rewards(safeAddress),
+        });
+      }
+    };
+    window.addEventListener("refreshPositions", handleRefresh);
+    return () => window.removeEventListener("refreshPositions", handleRefresh);
+  }, [safeAddress, queryClient]);
 
   useEffect(() => {
     if (!isFetching) {
@@ -155,18 +220,39 @@ export function PositionsList({
   // Do not show card when user has no safe
   if (!safeAddress) return null;
 
+  const echelonHasActivity =
+    echelonProtocolPositions.length > 0 || echelonRewardsValueUsd > 0;
+
   // No positions at all
-  if (!isLoading && moarPositions.length === 0 && safeTokens.length === 0 && rewardsTotalUsd === 0) {
+  if (
+    !isLoading &&
+    moarPositions.length === 0 &&
+    safeTokens.length === 0 &&
+    rewardsTotalUsd === 0 &&
+    !echelonHasActivity
+  ) {
     return null;
   }
+
+  // Hide card when everything is dust-level (but allow rewards badge to still show a card).
+  if (!isLoading && visibleProtocolPositions.length === 0 && combinedRewardsUsd === 0) {
+    return null;
+  }
+
+  const showInitialSkeleton =
+    isLoading &&
+    moarPositions.length === 0 &&
+    safeTokens.length === 0 &&
+    rewardsTotalUsd === 0 &&
+    !echelonHasActivity;
 
   return (
     <ProtocolCard
       protocol={protocol}
       totalValue={totalValue}
       totalRewardsUsd={totalRewardsUsd}
-      positions={[...moarProtocolPositions, ...tokenProtocolPositions]}
-      isLoading={isLoading && moarPositions.length === 0 && safeTokens.length === 0 && rewardsTotalUsd === 0}
+      positions={visibleProtocolPositions}
+      isLoading={showInitialSkeleton}
       showManageButton={showManageButton}
     />
   );

@@ -26,6 +26,8 @@ import { getPreferredJupiterTokenIcon } from "@/lib/services/solana/jupiterToken
 import { useQueryClient } from "@tanstack/react-query";
 import { queryKeys } from "@/lib/query/queryKeys";
 import { useJupiterPositions } from "@/lib/query/hooks/protocols/jupiter/useJupiterPositions";
+import { useSearchParams } from "next/navigation";
+import { isLikelySolanaAddress } from "@/lib/kamino/kvaultVaultAddress";
 
 type JupiterPosition = {
   token?: {
@@ -184,6 +186,7 @@ export function JupiterPositions() {
   } = useSolanaWallet();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const searchParams = useSearchParams();
   const [positions, setPositions] = useState<JupiterPosition[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -237,7 +240,19 @@ export function JupiterPositions() {
     );
   }, []);
 
-  const jupiterPositionsQuery = useJupiterPositions(solanaProtocolsAddress ?? undefined, {
+  const mockEnabled =
+    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "1" ||
+    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "true";
+
+  const positionsOwnerAddress = useMemo(() => {
+    if (mockEnabled) {
+      const raw = (searchParams?.get("jupiterAddress") || searchParams?.get("address") || "").trim();
+      if (raw && isLikelySolanaAddress(raw)) return raw;
+    }
+    return (solanaProtocolsAddress || "").trim();
+  }, [mockEnabled, searchParams, solanaProtocolsAddress]);
+
+  const jupiterPositionsQuery = useJupiterPositions(positionsOwnerAddress || undefined, {
     refetchOnMount: "always",
   });
 
@@ -248,7 +263,7 @@ export function JupiterPositions() {
   }, [jupiterPositionsQuery.data]);
 
   useEffect(() => {
-    if (!solanaProtocolsAddress) {
+    if (!positionsOwnerAddress) {
       setPositions([]);
       setLoading(false);
       setError(null);
@@ -256,20 +271,20 @@ export function JupiterPositions() {
     }
     setLoading(jupiterPositionsQuery.isFetching);
     setError(jupiterPositionsQuery.isError ? "Failed to load Jupiter positions" : null);
-  }, [solanaProtocolsAddress, jupiterPositionsQuery.isFetching, jupiterPositionsQuery.isError]);
+  }, [positionsOwnerAddress, jupiterPositionsQuery.isFetching, jupiterPositionsQuery.isError]);
 
   useEffect(() => {
-    if (!solanaProtocolsAddress) return;
+    if (!positionsOwnerAddress) return;
     const handleRefresh: EventListener = (evt) => {
       const event = evt as CustomEvent<{ protocol?: string }>;
       if (event?.detail?.protocol !== "jupiter") return;
       queryClient.invalidateQueries({
-        queryKey: queryKeys.protocols.jupiter.userPositions(solanaProtocolsAddress),
+        queryKey: queryKeys.protocols.jupiter.userPositions(positionsOwnerAddress),
       });
     };
     window.addEventListener("refreshPositions", handleRefresh);
     return () => window.removeEventListener("refreshPositions", handleRefresh);
-  }, [solanaProtocolsAddress, queryClient]);
+  }, [positionsOwnerAddress, queryClient]);
 
   const totalValue = useMemo(
     () =>
@@ -303,8 +318,8 @@ export function JupiterPositions() {
     return rawAmount / Math.pow(10, decimals);
   }, [selectedMeta.mint, solanaTokens]);
 
-  const onDepositClick = (position: JupiterPosition) => {
-    void refreshSolana();
+  const onDepositClick = async (position: JupiterPosition) => {
+    await refreshSolana();
     setSelectedPosition(position);
     setIsDepositOpen(true);
   };
@@ -314,8 +329,8 @@ export function JupiterPositions() {
     setSelectedPosition(null);
   };
 
-  const onWithdrawClick = (position: JupiterPosition) => {
-    void refreshSolana();
+  const onWithdrawClick = async (position: JupiterPosition) => {
+    await refreshSolana();
     setSelectedPosition(position);
     setIsWithdrawOpen(true);
   };
@@ -755,6 +770,11 @@ export function JupiterPositions() {
       await refreshSolana();
       if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "jupiter" } }));
+        // Backstop refresh for slow RPC/indexers so reopen without reload is consistent.
+        window.setTimeout(() => {
+          void refreshSolana();
+          window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "jupiter" } }));
+        }, 10000);
       }
       closeDeposit();
     } catch (e) {
@@ -1145,7 +1165,7 @@ export function JupiterPositions() {
     }
   };
 
-  if (!solanaProtocolsAddress) {
+  if (!positionsOwnerAddress) {
     const waiting =
       solanaConnecting ||
       solanaDisconnecting ||

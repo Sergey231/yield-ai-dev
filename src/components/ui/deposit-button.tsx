@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { ExternalLink, ArrowLeft, ArrowRight, ChevronDown } from "lucide-react";
+import { ExternalLink } from "lucide-react";
 import { Protocol } from "@/lib/protocols/getProtocolsList";
 import {
   AlertDialog,
@@ -17,18 +17,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { DepositModal } from "./deposit-modal";
 import { JupiterDepositModal } from "./jupiter-deposit-modal";
 import { KaminoVaultDepositModal } from "./kamino-vault-deposit-modal";
 import { useWalletData } from "@/contexts/WalletContext";
 import { cn } from "@/lib/utils";
-import { getAptosWalletNameFromStorage, isDerivedAptosWalletReliable } from "@/lib/aptosWalletUtils";
+import {
+  CustomAptosConnectDialogContent,
+  WALLET_CONNECT_MODAL_DIALOG_CLASS,
+} from "@/components/wallet/customAptosConnectDialogContent";
 import { getSolanaWalletAddress } from "@/lib/wallet/getSolanaWalletAddress";
 import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
 import { Connection, PublicKey, SystemProgram, Transaction, VersionedTransaction } from "@solana/web3.js";
@@ -43,17 +41,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { ToastAction } from "@/components/ui/toast";
 import { Token as SolanaToken } from "@/lib/types/token";
 import { getSafeSolanaRpcEndpoint } from "@/lib/solana/solanaRpcEndpoint";
-import {
-  useWallet,
-  AboutAptosConnect,
-  AboutAptosConnectEducationScreen,
-  AdapterNotDetectedWallet,
-  AdapterWallet,
-  AptosPrivacyPolicy,
-  WalletItem,
-  groupAndSortWallets,
-  isInstallRequired,
-} from "@aptos-labs/wallet-adapter-react";
+import { useWallet } from "@aptos-labs/wallet-adapter-react";
 
 interface DepositButtonProps {
   protocol: Protocol;
@@ -177,6 +165,7 @@ export function DepositButton({
     protocol.name.toLowerCase() === "kamino" &&
     typeof kaminoVaultAddress === "string" &&
     kaminoVaultAddress.trim().length > 0;
+  const depositDisabled = protocol.isDepositEnabled === false;
 
   const [isExternalDialogOpen, setIsExternalDialogOpen] = useState(false);
   const [isNativeDialogOpen, setIsNativeDialogOpen] = useState(false);
@@ -560,6 +549,14 @@ export function DepositButton({
   }, [solanaWallet, solanaWallets, selectSolanaWallet, connectSolanaWallet]);
 
   const handleClick = async () => {
+    if (depositDisabled) {
+      toast({
+        title: "Deposits disabled",
+        description: `${protocol.name} deposits are currently disabled.`,
+        variant: "destructive",
+      });
+      return;
+    }
     if (isJupiterProtocol) {
       const session = resolveSolanaSession();
       if (!session.signerAddress || !session.hasSigner) {
@@ -903,6 +900,12 @@ export function DepositButton({
       await refreshSolana();
       if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "jupiter" } }));
+        // Some RPC/indexers lag behind finalized txs; refresh again shortly after so reopening the modal
+        // without a full page reload doesn't show stale balances/positions.
+        window.setTimeout(() => {
+          void refreshSolana();
+          window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "jupiter" } }));
+        }, 10000);
       }
       toast({
         title: "Deposit submitted",
@@ -1064,6 +1067,7 @@ export function DepositButton({
             "bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
         )}
         onClick={handleClick}
+        disabled={depositDisabled}
       >
         Deposit
         {protocol.depositType === "external" && !isKaminoKvVaultFlow && (
@@ -1149,229 +1153,14 @@ export function DepositButton({
       )}
 
       <Dialog open={isWalletDialogOpen} onOpenChange={setIsWalletDialogOpen}>
-        <DialogContent className="max-h-screen overflow-auto">
-          <ConnectWalletDialog close={closeWalletDialog} />
+        <DialogContent className={WALLET_CONNECT_MODAL_DIALOG_CLASS}>
+          <CustomAptosConnectDialogContent
+            close={closeWalletDialog}
+            mode="deposit"
+            dialogOpen={isWalletDialogOpen}
+          />
         </DialogContent>
       </Dialog>
-    </>
-  );
-}
-
-interface ConnectWalletDialogProps {
-  close: () => void;
-}
-
-function ConnectWalletDialog({ close }: ConnectWalletDialogProps) {
-  const { wallets = [], notDetectedWallets = [], wallet: selectedWallet, connected } = useWallet();
-  const storedAptosWalletName = getAptosWalletNameFromStorage();
-  const isSelectedDerived =
-    connected &&
-    (
-      isDerivedAptosWalletReliable(selectedWallet as { name?: string } | null) ||
-      String(storedAptosWalletName || "").trim().endsWith(" (Solana)")
-    );
-
-  const { aptosConnectWallets, availableWallets, installableWallets } =
-    groupAndSortWallets(
-      [...wallets, ...notDetectedWallets],
-      {}
-    );
-
-  const hasAptosConnectWallets = !!aptosConnectWallets.length;
-
-  return (
-    <AboutAptosConnect renderEducationScreen={renderEducationScreen}>
-      <DialogHeader>
-        <DialogTitle className="flex flex-col text-center leading-snug">
-          {hasAptosConnectWallets ? (
-            <>
-              <span>Log in or sign up</span>
-              <span>with Social + Aptos Connect</span>
-            </>
-          ) : (
-            "Connect Wallet"
-          )}
-        </DialogTitle>
-      </DialogHeader>
-
-      {hasAptosConnectWallets && (
-        <div className="flex flex-col gap-2 pt-3">
-          {aptosConnectWallets.map((wallet) => (
-            <AptosConnectWalletRow
-              key={wallet.name}
-              wallet={wallet}
-              onConnect={close}
-              isDerivedSelected={isSelectedDerived}
-            />
-          ))}
-          <p className="flex gap-1 justify-center items-center text-muted-foreground text-sm">
-            Learn more about{" "}
-            <AboutAptosConnect.Trigger className="flex gap-1 py-3 items-center text-foreground">
-              Aptos Connect <ArrowRight size={16} />
-            </AboutAptosConnect.Trigger>
-          </p>
-          <AptosPrivacyPolicy className="flex flex-col items-center py-1">
-            <p className="text-xs leading-5">
-              <AptosPrivacyPolicy.Disclaimer />{" "}
-              <AptosPrivacyPolicy.Link className="text-muted-foreground underline underline-offset-4" />
-              <span className="text-muted-foreground">.</span>
-            </p>
-            <AptosPrivacyPolicy.PoweredBy className="flex gap-1.5 items-center text-xs leading-5 text-muted-foreground" />
-          </AptosPrivacyPolicy>
-          <div className="flex items-center gap-3 pt-4 text-muted-foreground">
-            <div className="h-px w-full bg-secondary" />
-            Or
-            <div className="h-px w-full bg-secondary" />
-          </div>
-        </div>
-      )}
-
-      <div className="flex flex-col gap-3 pt-3">
-        {availableWallets.map((wallet) => (
-          <WalletRow
-            key={wallet.name}
-            wallet={wallet}
-            onConnect={close}
-            isConnected={connected && selectedWallet?.name === wallet.name}
-            isDerivedSelected={isSelectedDerived}
-          />
-        ))}
-        {!!installableWallets.length && (
-          <Collapsible className="flex flex-col gap-3">
-            <CollapsibleTrigger asChild>
-              <Button size="sm" variant="ghost" className="gap-2">
-                More wallets <ChevronDown />
-              </Button>
-            </CollapsibleTrigger>
-            <CollapsibleContent className="flex flex-col gap-3">
-              {installableWallets.map((wallet) => (
-                <WalletRow
-                  key={wallet.name}
-                  wallet={wallet}
-                  onConnect={close}
-                  isConnected={connected && selectedWallet?.name === wallet.name}
-                  isDerivedSelected={isSelectedDerived}
-                />
-              ))}
-            </CollapsibleContent>
-          </Collapsible>
-        )}
-      </div>
-    </AboutAptosConnect>
-  );
-}
-
-interface WalletRowProps {
-  wallet: AdapterWallet | AdapterNotDetectedWallet;
-  onConnect?: () => void;
-  isConnected?: boolean;
-  isDerivedSelected?: boolean;
-}
-
-function isDerivedAptosWalletName(name?: string): boolean {
-  if (!name) return false;
-  const normalized = name.toLowerCase();
-  return normalized.includes("derived wallet") || normalized.endsWith(" (solana)");
-}
-
-function getWalletLabel(walletName: string, isConnected: boolean, isDerivedSelected: boolean): string {
-  const normalized = walletName.trim().toLowerCase();
-  if (normalized === "aptos") {
-    return isConnected && isDerivedSelected ? "APTOS (Derived Wallet)" : "APTOS";
-  }
-  return walletName;
-}
-
-function WalletRow({ wallet, onConnect, isConnected = false, isDerivedSelected = false }: WalletRowProps) {
-  const isDerived = isDerivedAptosWalletName(wallet.name);
-  const walletLabel = getWalletLabel(wallet.name, isConnected, isDerivedSelected);
-  return (
-    <WalletItem
-      wallet={wallet}
-      onConnect={onConnect}
-      className="flex items-center justify-between px-4 py-3 gap-4 border rounded-md"
-    >
-      <div className="flex items-center gap-4">
-        <WalletItem.Icon className="h-6 w-6" />
-        <span className="text-base font-normal">{walletLabel}</span>
-      </div>
-      {isInstallRequired(wallet) ? (
-        <Button size="sm" variant="ghost" asChild>
-          <WalletItem.InstallLink />
-        </Button>
-      ) : isConnected && isDerived ? (
-        <Button size="sm" variant="secondary" disabled>
-          Connected
-        </Button>
-      ) : (
-        <WalletItem.ConnectButton asChild>
-          <Button size="sm">Connect</Button>
-        </WalletItem.ConnectButton>
-      )}
-    </WalletItem>
-  );
-}
-
-function AptosConnectWalletRow({ wallet, onConnect, isDerivedSelected = false }: WalletRowProps) {
-  const walletLabel = getWalletLabel(wallet.name, false, isDerivedSelected);
-  return (
-    <WalletItem wallet={wallet} onConnect={onConnect}>
-      <WalletItem.ConnectButton asChild>
-        <Button size="lg" variant="outline" className="w-full gap-4">
-          <WalletItem.Icon className="h-5 w-5" />
-          <span className="text-base font-normal">{walletLabel}</span>
-        </Button>
-      </WalletItem.ConnectButton>
-    </WalletItem>
-  );
-}
-
-function renderEducationScreen(screen: AboutAptosConnectEducationScreen) {
-  return (
-    <>
-      <DialogHeader className="grid grid-cols-[1fr_4fr_1fr] items-center space-y-0">
-        <Button variant="ghost" size="icon" onClick={screen.cancel}>
-          <ArrowLeft />
-        </Button>
-        <DialogTitle className="leading-snug text-base text-center">
-          About Aptos Connect
-        </DialogTitle>
-      </DialogHeader>
-
-      <div className="flex h-[162px] pb-3 items-end justify-center">
-        <screen.Graphic />
-      </div>
-      <div className="flex flex-col gap-2 text-center pb-4">
-        <screen.Title className="text-xl" />
-        <screen.Description className="text-sm text-muted-foreground [&>a]:underline [&>a]:underline-offset-4 [&>a]:text-foreground" />
-      </div>
-
-      <div className="grid grid-cols-3 items-center">
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={screen.back}
-          className="justify-self-start"
-        >
-          Back
-        </Button>
-        <div className="flex items-center gap-2 place-self-center">
-          {screen.screenIndicators.map((ScreenIndicator, i) => (
-            <ScreenIndicator key={i} className="py-4">
-              <div className="h-0.5 w-6 transition-colors bg-muted [[data-active]>&]:bg-foreground" />
-            </ScreenIndicator>
-          ))}
-        </div>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={screen.next}
-          className="gap-2 justify-self-end"
-        >
-          {screen.screenIndex === screen.totalScreens - 1 ? "Finish" : "Next"}
-          <ArrowRight size={16} />
-        </Button>
-      </div>
     </>
   );
 }

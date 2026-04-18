@@ -6,7 +6,14 @@ import { STALE_TIME } from '@/lib/query/config';
 
 export interface EchelonPool {
   token: string;
-  supplyAPY?: number;
+  /** Total supply APR (base + rewards), percent units. */
+  depositApy?: number;
+  /** Total supply APR without rewards (lending + staking), percent units. */
+  totalSupplyApr?: number;
+  /** Lending-only APR, percent units. */
+  lendingApr?: number;
+  /** Staking-only APR, percent units. */
+  stakingAprOnly?: number;
   borrowAPY?: number;
   supplyRewardsApr?: number;
   borrowRewardsApr?: number;
