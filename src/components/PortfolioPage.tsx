@@ -452,8 +452,9 @@ export default function PortfolioPage() {
   const chartTotalAssets = totalAssets + (solanaTotalValue ?? 0) + jupiterValue + kaminoValue;
 
   useEffect(() => {
-    setTotalAssetsStore(totalAssets);
-  }, [totalAssets, setTotalAssetsStore]);
+    // Global total assets (used e.g. in ChatPanel): include Solana wallet + Solana protocols too.
+    setTotalAssetsStore(chartTotalAssets);
+  }, [chartTotalAssets, setTotalAssetsStore]);
 
   // Данные для чарта: кошелек + каждый протокол отдельным сектором
   const chartSectors = [

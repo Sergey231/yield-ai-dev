@@ -31,6 +31,8 @@ export function mapJupiterToProtocolPositions(
     const amount = decimals > 0 ? rawAmount / Math.pow(10, decimals) : 0;
     const price = toNumber(position?.token?.asset?.price, 0);
     const value = amount * price;
+    // Jupiter earn `totalRate` is returned in bps.
+    const aprPct = toNumber(position?.token?.totalRate, 0) / 100;
     return {
       id: `jupiter-${idx}`,
       label: symbol,
@@ -39,6 +41,7 @@ export function mapJupiterToProtocolPositions(
       badge: PositionBadge.Supply,
       subLabel: formatNumber(amount, 4),
       price,
+      apr: Number.isFinite(aprPct) && aprPct > 0 ? aprPct.toFixed(2) : undefined,
     };
   });
 }

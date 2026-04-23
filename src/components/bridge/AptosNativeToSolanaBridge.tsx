@@ -7,10 +7,9 @@ import { isDerivedAptosWallet } from "@/lib/aptosWalletUtils";
 
 const USDC_SOLANA = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const USDC_APTOS = "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b";
+const CCTP_DEPOSIT_FOR_BURN_ENTRY_FUNCTION =
+  "0x35e75139eea19566dc8ac00be056e9bd605e788370d76e8bacf87177aeb32dac::cctp_tools::deposit_for_burn";
 const DOMAIN_SOLANA = 5;
-
-const BYTECODE_URL =
-  "https://raw.githubusercontent.com/circlefin/aptos-cctp/master/typescript/example/precompiled-move-scripts/mainnet/deposit_for_burn.mv";
 
 function solanaAddressToHexBytes(solanaAddress: string): Uint8Array {
   const decoded = bs58.decode(solanaAddress);
@@ -43,15 +42,6 @@ async function getAptosExpireTimestampSecs(ttlSeconds: number = 1800): Promise<n
   }
 }
 
-async function loadDepositForBurnBytecode(): Promise<Uint8Array> {
-  const response = await fetch(BYTECODE_URL);
-  if (!response.ok) {
-    throw new Error(`Failed to load bytecode: ${response.status} ${response.statusText}`);
-  }
-  const arrayBuffer = await response.arrayBuffer();
-  return new Uint8Array(arrayBuffer);
-}
-
 export interface ExecuteAptosNativeToSolanaBridgeParams {
   amount: string;
   aptosAccount: { address: any };
@@ -70,7 +60,7 @@ export interface ExecuteAptosNativeToSolanaBridgeParams {
 }
 
 /**
- * Aptos (native) → Solana: burn через байткод deposit_for_burn.
+ * Aptos (native) → Solana: burn via on-chain entry function (no bytecode download).
  * Подпись и оплата газа — нативный Aptos‑кошелёк пользователя. Сервисный fee payer не используется.
  * Возвращает хэш транзакции Aptos.
  */
@@ -96,27 +86,23 @@ export async function executeAptosNativeToSolanaBridge(
   onStatusUpdate("Computing Solana token account address (ATA)...");
   const tokenAccountAddress = await getSolanaTokenAccountAddress(destinationSolanaAddress, USDC_SOLANA);
   const mintRecipientBytes = solanaAddressToHexBytes(tokenAccountAddress);
-  const mintRecipientAddress = AccountAddress.from(mintRecipientBytes);
+  const mintRecipientAddress = AccountAddress.from(mintRecipientBytes).toString();
 
-  onStatusUpdate("Loading bytecode for deposit_for_burn...");
-  const bytecode = await loadDepositForBurnBytecode();
-
-  onStatusUpdate("Building bytecode transaction...");
+  onStatusUpdate("Building transaction...");
   const expireTimestamp = await getAptosExpireTimestampSecs(1800);
-  const scriptFunctionArguments = [
-    new U64(amountOctas),
-    new U32(DOMAIN_SOLANA),
-    mintRecipientAddress,
-    AccountAddress.fromString(USDC_APTOS),
-  ];
 
   const transaction = await aptosClient.transaction.build.simple({
     sender: aptosAccount.address,
     withFeePayer: false,
     data: {
-      bytecode,
       typeArguments: [],
-      functionArguments: scriptFunctionArguments,
+      function: CCTP_DEPOSIT_FOR_BURN_ENTRY_FUNCTION as `${string}::${string}::${string}`,
+      functionArguments: [
+        amountOctas.toString(),
+        DOMAIN_SOLANA.toString(),
+        mintRecipientAddress,
+        USDC_APTOS,
+      ],
     },
     options: {
       maxGasAmount: 100000,

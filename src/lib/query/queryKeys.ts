@@ -155,6 +155,23 @@ export const queryKeys = {
     decibel: {
       userPositions: (address: string) =>
         ['protocols', 'decibel', 'userPositions', address] as const,
+      marketPrice: (market: string) =>
+        ['protocols', 'decibel', 'marketPrice', market] as const,
+      positionLedger: (
+        subaccount: string,
+        market: string,
+        fromUnixMs: number,
+        toUnixMs: number | null
+      ) =>
+        [
+          'protocols',
+          'decibel',
+          'positionLedger',
+          subaccount,
+          market,
+          fromUnixMs,
+          toUnixMs ?? 'open',
+        ] as const,
     },
 
     /**
@@ -188,6 +205,8 @@ export const queryKeys = {
         ['protocols', 'yield-ai', 'safeTokens', safeAddress] as const,
       depositHistory: (safeAddress: string, currentValue?: number | null) =>
         ['protocols', 'yield-ai', 'depositHistory', safeAddress, currentValue ?? null] as const,
+      deltaNeutralState: (safeAddress: string) =>
+        ['protocols', 'yield-ai', 'deltaNeutralState', safeAddress] as const,
     },
 
     /**

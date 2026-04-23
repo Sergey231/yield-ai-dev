@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 type BridgeMessage = {
   source: "yield-ai-web";
@@ -141,6 +142,40 @@ export function WebViewBridge() {
         }
 
         console.log("[Bridge ←RN]", command.type, command.payload ?? "");
+
+        // Keep injected wallet state in sync (WebView mode).
+        if (command.type === "wallet_connected") {
+          const chain = command.payload?.chain;
+          const address = command.payload?.address;
+          const walletId = command.payload?.walletId;
+          if (
+            (chain === "aptos" || chain === "solana") &&
+            typeof address === "string" &&
+            address.trim()
+          ) {
+            useNativeWalletStore
+              .getState()
+              .setConnected({ chain, address, walletId: typeof walletId === "string" ? walletId : null });
+
+            // Notify the app to refresh read-only portfolio/positions for the injected address.
+            window.dispatchEvent(
+              new CustomEvent("yieldai:wallet-changed", {
+                detail: { chain, address, walletId: typeof walletId === "string" ? walletId : null },
+              }),
+            );
+          }
+        } else if (command.type === "wallet_disconnected") {
+          const chain = command.payload?.chain;
+          if (chain === "aptos" || chain === "solana") {
+            useNativeWalletStore.getState().setDisconnected(chain);
+            window.dispatchEvent(
+              new CustomEvent("yieldai:wallet-changed", {
+                detail: { chain, address: null, walletId: null },
+              }),
+            );
+          }
+        }
+
         postToNative("web_log", {
           message: `[Bridge ←RN] ${command.type}`,
           payload: command.payload ?? null,

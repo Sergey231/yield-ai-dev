@@ -42,6 +42,7 @@ import { CollapsibleControls } from "@/components/ui/collapsible-controls";
 import { cn } from "@/lib/utils";
 import { formatCurrency } from "@/lib/utils/numberFormat";
 import { isDerivedAptosWalletReliable } from "@/lib/aptosWalletUtils";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 function shortenHexAddress(addr: string, head = 4, tail = 4): string {
   if (!addr) return "Unknown";
@@ -64,6 +65,32 @@ export default function Sidebar() {
   const { account } = useAptosNativeRestore();
   // Also keep useWallet for other functionality
   const { wallet: aptosWallet } = useWallet(); // Keep adapter state synced + detect derived wallet
+
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
+  const injectedSolanaAddress = useNativeWalletStore((s) => s.solanaAddress);
+  const effectiveAptosAddress = injectedAptosAddress ?? account?.address?.toString() ?? null;
+
+  const allowSolanaAddressOverride =
+    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "1" ||
+    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "true";
+  const isLikelySolanaAddress = (input: string): boolean => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(input);
+  const [solanaAddressOverride, setSolanaAddressOverride] = useState<string | null>(null);
+  useEffect(() => {
+    if (!allowSolanaAddressOverride) {
+      setSolanaAddressOverride(null);
+      return;
+    }
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      const raw = (sp.get("solanaAddress") || sp.get("solana") || "").trim();
+      setSolanaAddressOverride(raw && isLikelySolanaAddress(raw) ? raw : null);
+    } catch {
+      setSolanaAddressOverride(null);
+    }
+  }, [allowSolanaAddressOverride]);
+
+  const effectiveSolanaOverrideAddress = injectedSolanaAddress ?? solanaAddressOverride;
+
   const {
     address: solanaAddress,
     protocolsAddress: solanaProtocolsAddress,
@@ -71,7 +98,7 @@ export default function Sidebar() {
     totalValueUsd: solanaTotalValue,
     isLoading: isSolanaLoading,
     refresh: refreshSolana,
-  } = useSolanaPortfolio();
+  } = useSolanaPortfolio({ overrideAddress: effectiveSolanaOverrideAddress });
   const [tokens, setTokens] = useState<Token[]>([]);
   const [totalValue, setTotalValue] = useState(0);
   const [hyperionValue, setHyperionValue] = useState(0);
@@ -98,6 +125,7 @@ export default function Sidebar() {
   const [refreshKey, setRefreshKey] = useState(0);
 
   const setTotalAssetsStore = useWalletStore((s) => s.setTotalAssets);
+  const setSolanaTotalAssetsStore = useWalletStore((s) => s.setSolanaTotalAssets);
 
   const APTOS_PROTOCOL_NAMES = [
     "Hyperion",
@@ -136,7 +164,7 @@ export default function Sidebar() {
   }, [solanaProtocolsAddress]);
 
   const loadPortfolio = useCallback(async () => {
-    if (!account?.address) {
+    if (!effectiveAptosAddress) {
       setTokens([]);
       setTotalValue(0);
       return;
@@ -145,7 +173,7 @@ export default function Sidebar() {
     try {
       setIsRefreshing(true);
       const portfolioService = new AptosPortfolioService();
-      const portfolio = await portfolioService.getPortfolio(account.address.toString());
+      const portfolio = await portfolioService.getPortfolio(effectiveAptosAddress);
       // Sidebar UI: for unknown/very long symbols, show a shortened address label instead.
       const displayTokens = (portfolio.tokens || []).map((t) => {
         if (needsAddressLabel(t)) {
@@ -169,7 +197,7 @@ export default function Sidebar() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [account?.address]);
+  }, [effectiveAptosAddress]);
 
   const handleRefresh = useCallback(async () => {
     await loadPortfolio();
@@ -199,18 +227,18 @@ export default function Sidebar() {
   useEffect(() => {
     loadPortfolio();
     // Initialize checking list when account changes
-    if (account?.address) {
+    if (effectiveAptosAddress) {
       resetChecking();
     } else {
       setCheckingProtocols([]);
     }
-  }, [loadPortfolio, account?.address, resetChecking]);
+  }, [loadPortfolio, effectiveAptosAddress, resetChecking]);
 
   useEffect(() => {
-    if (!account?.address) return;
+    if (!effectiveAptosAddress) return;
     // Keep checking list in sync when Solana wallet connects/disconnects
     resetChecking();
-  }, [account?.address, solanaProtocolsAddress, resetChecking]);
+  }, [effectiveAptosAddress, solanaProtocolsAddress, resetChecking]);
 
   const handleHyperionValueChange = useCallback((value: number) => {
     setHyperionValue(Number.isFinite(value) ? value : 0);
@@ -315,28 +343,35 @@ export default function Sidebar() {
   const solanaProtocolsTotal =
     (Number.isFinite(jupiterValue) ? jupiterValue : 0) +
     (Number.isFinite(kaminoValue) ? kaminoValue : 0);
-  const solanaTotalAssets = (Number.isFinite(solanaTotalValue) ? (solanaTotalValue ?? 0) : 0) + solanaProtocolsTotal;
+  const solanaWalletTotal = Number.isFinite(solanaTotalValue) ? (solanaTotalValue ?? 0) : 0;
+  const solanaTotalAssets = solanaWalletTotal + solanaProtocolsTotal;
+  const solanaWalletTotalDisplay =
+    typeof solanaTotalValue === "number" && Number.isFinite(solanaTotalValue) ? solanaWalletTotal : null;
 
   useEffect(() => {
     setTotalAssetsStore(totalAssets);
   }, [totalAssets, setTotalAssetsStore]);
 
+  useEffect(() => {
+    setSolanaTotalAssetsStore(solanaTotalAssets);
+  }, [solanaTotalAssets, setSolanaTotalAssetsStore]);
+
   // Shared UI state: hide assets <1$ for all wallets (Aptos + Solana)
   const [hideSmallAssets, setHideSmallAssets] = useState(true);
 
-  const hasAnyWalletCard = Boolean(account?.address || solanaAddress);
+  const hasAnyWalletCard = Boolean(effectiveAptosAddress || solanaAddress);
 
   const handleGlobalRefresh = useCallback(async () => {
     // Обновляем Aptos-портфель (если есть) и Solana-портфель
-    if (account?.address) {
+    if (effectiveAptosAddress) {
       await handleRefresh();
     }
     if (solanaAddress) {
       await refreshSolana();
     }
-  }, [account?.address, handleRefresh, refreshSolana, solanaAddress]);
+  }, [effectiveAptosAddress, handleRefresh, refreshSolana, solanaAddress]);
 
-  const aptosBlock = account?.address ? (
+  const aptosBlock = effectiveAptosAddress ? (
     <div className="space-y-4">
       <PortfolioCard
         totalValue={totalAssets.toString()}
@@ -401,7 +436,7 @@ export default function Sidebar() {
           .map(({ component: Component, name }) => (
             <Component
               key={name}
-              address={account!.address.toString()}
+              address={effectiveAptosAddress}
               walletTokens={tokens}
               refreshKey={refreshKey}
               onPositionsValueChange={
@@ -459,7 +494,7 @@ export default function Sidebar() {
     <div className="space-y-2">
       <SolanaWalletCard
         tokens={solanaTokens}
-        totalValueUsd={solanaTotalValue}
+        totalValueUsd={solanaWalletTotalDisplay}
         onRefresh={refreshSolana}
         isRefreshing={isSolanaLoading}
         hideSmallAssets={hideSmallAssets}
@@ -506,10 +541,10 @@ export default function Sidebar() {
 
   const walletBlocks = useMemo(() => {
     const blocks: Array<{ key: "aptos" | "solana"; total: number; node: ReactNode }> = [];
-    if (account?.address) blocks.push({ key: "aptos", total: totalAssets, node: aptosBlock });
+    if (effectiveAptosAddress) blocks.push({ key: "aptos", total: totalAssets, node: aptosBlock });
     if (solanaAddress) blocks.push({ key: "solana", total: solanaTotalAssets, node: solanaBlock });
     return blocks.sort((a, b) => b.total - a.total);
-  }, [account?.address, solanaAddress, totalAssets, solanaTotalAssets, aptosBlock, solanaBlock]);
+  }, [effectiveAptosAddress, solanaAddress, totalAssets, solanaTotalAssets, aptosBlock, solanaBlock]);
 
   return (
     <CollapsibleProvider>
@@ -533,7 +568,7 @@ export default function Sidebar() {
                 <span className="text-lg font-medium">Total Assets</span>
                 <span className="text-lg font-medium">
                   {formatCurrency(
-                    (account?.address ? totalAssets : 0) + (solanaAddress ? (solanaTotalValue ?? 0) : 0),
+                    (account?.address ? totalAssets : 0) + (solanaAddress ? solanaTotalAssets : 0),
                     2
                   )}
                 </span>

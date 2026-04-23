@@ -130,7 +130,13 @@ export function PositionsList({
     ) : undefined;
 
   useEffect(() => {
-    onValueRef.current?.(effectiveAddress ? headerTotalValue : 0);
+    // IMPORTANT (Sidebar Total Assets):
+    // `effectiveAddress` can temporarily become empty while the Solana adapter is
+    // connecting/disconnecting or when `protocolsAddress` is gated. In that transient
+    // state we must NOT push `0` upwards, otherwise Sidebar "Total Assets" flickers
+    // and looks like Solana Wallet overwrote protocol totals.
+    if (!effectiveAddress) return;
+    onValueRef.current?.(headerTotalValue);
   }, [effectiveAddress, headerTotalValue]);
 
   useEffect(() => {

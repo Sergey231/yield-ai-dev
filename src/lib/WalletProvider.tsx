@@ -82,7 +82,16 @@ export const WalletProvider = ({ children }: PropsWithChildren) => {
 
   return (
     <AptosWalletAdapterProvider
-      autoConnect={true}
+      autoConnect={async (_core, adapter) => {
+        if (typeof window === "undefined") return true;
+        // After user disconnects a Solana-derived Aptos account, we set this flag so a full
+        // page reload does not immediately auto-reconnect derived Aptos while Solana stays connected.
+        if (sessionStorage.getItem("skip_auto_connect_derived_aptos") === "1") {
+          const name = String(adapter?.name ?? "").trim();
+          if (name.endsWith(" (Solana)")) return false;
+        }
+        return true;
+      }}
       dappConfig={{
         network: Network.MAINNET,
         crossChainWallets: true,

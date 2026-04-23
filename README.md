@@ -496,3 +496,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 See Public Wallet API usage guide:
 
 - [PUBLIC_API.md](./PUBLIC_API.md)
+ 

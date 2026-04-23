@@ -213,6 +213,7 @@ export function mapKaminoToProtocolPositions(
     const label = tokenSymbol || vaultName;
     const price = pickFirstNumber(r.position, ["underlyingTokenPriceUsd", "tokenPriceUsd", "priceUsd"], NaN);
     const underlyingAmount = toNumber(getDeep(r.position, "underlyingTokenAmount"), NaN);
+    const aprPct = pickFirstNumber(r.position, ["aprPct", "depositApy", "apyPct", "apy"], NaN);
 
     out.push({
       id: `kamino-earn-${earnIdx}`,
@@ -226,6 +227,7 @@ export function mapKaminoToProtocolPositions(
         Number.isFinite(underlyingAmount) && underlyingAmount > 0
           ? formatNumber(underlyingAmount, 6)
           : undefined,
+      apr: Number.isFinite(aprPct) && aprPct > 0 ? aprPct.toFixed(2) : undefined,
     });
     earnIdx += 1;
   }

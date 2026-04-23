@@ -1,6 +1,6 @@
 "use client";
 
-import React, { createContext, useContext, useState, ReactNode } from 'react';
+import React, { createContext, useContext, useMemo, useState, ReactNode } from 'react';
 
 interface CollapsibleContextType {
   expandedSections: Set<string>;
@@ -17,7 +17,35 @@ interface CollapsibleProviderProps {
 }
 
 export function CollapsibleProvider({ children }: CollapsibleProviderProps) {
-  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['wallet', 'solana-wallet', 'hyperion', 'echelon', 'aries', 'joule', 'tapp', 'meso', 'auro', 'amnis', 'aave', 'decibel']));
+  const allKnownSectionIds = useMemo(
+    () => [
+      'wallet',
+      'solana-wallet',
+      'hyperion',
+      'echelon',
+      'aries',
+      'joule',
+      'tapp',
+      'meso',
+      'auro',
+      'amnis',
+      'earnium',
+      'aave',
+      'moar',
+      'thala',
+      'echo',
+      'decibel',
+      'aptree',
+      'kamino',
+      'jupiter',
+      'yield-ai',
+      'kofi',
+    ],
+    []
+  );
+
+  // Deterministic initial load: keep everything collapsed.
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(() => new Set());
 
   const toggleSection = (sectionId: string) => {
     setExpandedSections(prev => {
@@ -32,7 +60,7 @@ export function CollapsibleProvider({ children }: CollapsibleProviderProps) {
   };
 
   const expandAll = () => {
-    setExpandedSections(new Set(['wallet', 'solana-wallet', 'hyperion', 'echelon', 'aries', 'joule', 'tapp', 'meso', 'auro', 'amnis', 'aave', 'decibel']));
+    setExpandedSections(new Set(allKnownSectionIds));
   };
 
   const collapseAll = () => {

@@ -67,6 +67,15 @@ const nextConfig = {
         '.js': ['.js', '.ts', '.tsx'],
         '.wasm': ['.wasm'],
       };
+    } else {
+      // @jup-ag/lend-read imports `{ Wallet }` from @coral-xyz/anchor.
+      // Anchor's ESM entry uses a conditional CommonJS export which Next's bundler
+      // can't statically detect, causing "Wallet is not exported" during build.
+      // Force server builds to resolve Anchor to its CJS entry.
+      config.resolve.alias = {
+        ...config.resolve.alias,
+        '@coral-xyz/anchor$': require.resolve('@coral-xyz/anchor/dist/cjs/index.js'),
+      };
     }
     return config;
   },

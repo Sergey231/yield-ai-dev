@@ -6,6 +6,8 @@ import {
   parseClaimableOctas,
 } from "@/lib/protocols/moar/moarFarmingRewardsCore";
 
+const DEBUG_MOAR_LOGS = process.env.DEBUG_MOAR_LOGS === "true";
+
 interface RewardItem {
   side: "supply" | "borrow";
   poolInner: string;
@@ -43,7 +45,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    console.log("🔍 Fetching Moar Market rewards for address:", address);
+    if (DEBUG_MOAR_LOGS) console.log("[Moar] fetching rewards for address:", address);
 
     const rows = await getMoarFarmingRewardRows(address);
 
@@ -84,7 +86,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    console.log("📊 Found", rewards.length, "rewards");
+    if (DEBUG_MOAR_LOGS) console.log("[Moar] found", rewards.length, "rewards");
 
     if (rewards.length > 0 && tokenAddresses.size > 0) {
       try {
@@ -93,7 +95,7 @@ export async function GET(request: NextRequest) {
         const raw = pricesResponse?.data ?? pricesResponse;
         const pricesArray = Array.isArray(raw) ? raw : (raw?.data ?? []);
 
-        console.log("💰 Got prices for", pricesArray.length, "tokens");
+        if (DEBUG_MOAR_LOGS) console.log("[Moar] got prices for", pricesArray.length, "tokens");
 
         let totalUsd = 0;
         rewards.forEach((reward) => {
@@ -111,15 +113,17 @@ export async function GET(request: NextRequest) {
               reward.token_info.price = priceData.usdPrice;
             }
 
-            console.log(
-              `💰 ${reward.symbol}: ${reward.amount.toFixed(6)} * $${priceData.usdPrice} = $${reward.usdValue.toFixed(2)}`
-            );
+            if (DEBUG_MOAR_LOGS) {
+              console.log(
+                `[Moar] ${reward.symbol}: ${reward.amount.toFixed(6)} * $${priceData.usdPrice} = $${reward.usdValue.toFixed(2)}`
+              );
+            }
           } else {
-            console.warn(`💰 No price found for ${reward.symbol} (${reward.tokenAddress})`);
+            console.warn(`[Moar] no price found for ${reward.symbol} (${reward.tokenAddress})`);
           }
         });
 
-        console.log("💰 Total rewards value: $", totalUsd.toFixed(2));
+        if (DEBUG_MOAR_LOGS) console.log("[Moar] total rewards value: $", totalUsd.toFixed(2));
 
         return NextResponse.json({
           success: true,
@@ -127,7 +131,7 @@ export async function GET(request: NextRequest) {
           totalUsd,
         });
       } catch (err) {
-        console.warn("💰 Error fetching prices:", err);
+        console.warn("[Moar] error fetching prices:", err);
         return NextResponse.json({
           success: true,
           data: rewards,

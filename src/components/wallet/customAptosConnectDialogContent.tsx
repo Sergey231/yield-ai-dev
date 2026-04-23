@@ -223,6 +223,10 @@ function sortByDecibelOrder<T extends { name: string }>(
   });
 }
 
+function isWalletInstalled(wallet: AdapterWallet | AdapterNotDetectedWallet): boolean {
+  return wallet.readyState === WalletReadyState.Installed;
+}
+
 function isDerivedAptosWalletName(name?: string): boolean {
   if (!name) return false;
   const normalized = name.toLowerCase();
@@ -281,6 +285,16 @@ export function CustomAptosConnectDialogContent({
   ...walletSortingOptions
 }: CustomAptosConnectDialogContentProps) {
   const { wallets = [], notDetectedWallets = [], connect, wallet: selectedWallet, connected } = useWallet();
+  const {
+    connected: solanaConnected,
+    publicKey: solanaPublicKey,
+    wallets: solanaWallets,
+  } = useSolanaWallet();
+
+  const hasConnectedSolanaWallet = useMemo(() => {
+    if (solanaConnected && solanaPublicKey) return true;
+    return (solanaWallets ?? []).some((w) => w?.adapter?.connected && w?.adapter?.publicKey);
+  }, [solanaConnected, solanaPublicKey, solanaWallets]);
 
   const storedAptosWalletName = mode === "deposit" ? getAptosWalletNameFromStorage() : null;
 
@@ -360,193 +374,156 @@ export function CustomAptosConnectDialogContent({
       ),
     };
   }, [availableWallets, installableWallets]);
+  
+  const curatedAptosRows = useMemo(() => {
+    const nativeOrder = [
+      "petra",
+      "okx wallet",
+      "nightly",
+      "pontem wallet",
+      "backpack",
+      "bitget wallet",
+      "gate wallet",
+      "cosmostation wallet",
+    ] as const;
+    const nativeKeySet = new Set<string>(nativeOrder as unknown as string[]);
 
-  const [showMoreWallets, setShowMoreWallets] = useState(false);
-
-  useEffect(() => {
-    setShowMoreWallets(false);
-  }, [chainTab]);
-
-  const aptosPureWallets = useMemo(() => {
-    if (chainTab !== "aptos") return [];
-    return aptosTabExtensionWallets.filter((w) => decibelAptosSortKey(w.name) === "petra");
-  }, [chainTab, aptosTabExtensionWallets]);
-
-  const aptosCrossChainWallets = useMemo(() => {
-    if (chainTab !== "aptos") return [];
-
-    const byKey = new Map<string, AdapterWallet | AdapterNotDetectedWallet>();
-
-    // Prefer Solana-derived rows when available (e.g. Phantom (Solana) shown as Phantom (Aptos)).
-    for (const w of aptosXChainDerivedWallets) {
-      const key = decibelSolanaOrderKey(w.name);
-      if (!key) continue;
-      if (XCHAIN_APTOS_DERIVED_BASE_KEYS.has(key)) {
-        byKey.set(key, w);
-      }
-    }
-
-    // Fill remaining from native Aptos extension rows (shown as "(Aptos)" per spec).
+    const nativeByKey = new Map<string, AdapterWallet | AdapterNotDetectedWallet>();
     for (const w of aptosTabExtensionWallets) {
       const key = decibelAptosSortKey(w.name);
-      if (key === "petra") continue;
-      // Map trust wallet to order key "trust" so it follows cross-chain order list.
-      const orderKey = key === "trust wallet" ? "trust" : key;
-      if (!XCHAIN_APTOS_DERIVED_BASE_KEYS.has(orderKey as any)) continue;
-      if (!byKey.has(orderKey)) {
-        byKey.set(orderKey, w);
+      if (!nativeKeySet.has(key)) continue;
+      if (!nativeByKey.has(key)) nativeByKey.set(key, w);
+    }
+
+    const derivedWanted = [
+      "okx wallet",
+      "nightly",
+      "pontem wallet",
+      "backpack",
+      "bitget wallet",
+      "gate wallet",
+      "cosmostation wallet",
+      "phantom",
+    ] as const;
+    const derivedKeySet = new Set<string>(derivedWanted as unknown as string[]);
+    const derivedByKey = new Map<string, AdapterWallet | AdapterNotDetectedWallet>();
+    for (const w of aptosXChainDerivedWallets) {
+      const key = decibelSolanaOrderKey(w.name);
+      if (!key || !derivedKeySet.has(key)) continue;
+      if (!derivedByKey.has(key)) derivedByKey.set(key, w);
+    }
+
+    const rows: {
+      key: string;
+      wallet: AdapterWallet | AdapterNotDetectedWallet;
+      label: string;
+      forceShow?: boolean;
+    }[] = [];
+
+    for (const key of nativeOrder) {
+      const w = nativeByKey.get(key);
+      if (!w) continue;
+      rows.push({ key: `aptos-native-${key}`, wallet: w, label: `${titleCaseWalletBase(key)} (Aptos)` });
+      if (hasConnectedSolanaWallet) {
+        const d = derivedByKey.get(key);
+        if (d) {
+          const derivedLabel =
+            key === "cosmostation wallet"
+              ? "Cosmostation Wallet (Derived Aptos)"
+              : `${titleCaseWalletBase(key)} (Aptos Derived)`;
+          rows.push({
+            key: `aptos-derived-${key}`,
+            wallet: d,
+            label: derivedLabel,
+            // Derived rows can be hidden on mobile by "Installed" heuristics; force-show when Solana is connected.
+            forceShow: true,
+          });
+        }
       }
     }
 
-    const out = Array.from(byKey.entries())
-      .sort((a, b) => {
-        const ia = APTOS_XCHAIN_BASE_ORDER.indexOf(a[0] as any);
-        const ib = APTOS_XCHAIN_BASE_ORDER.indexOf(b[0] as any);
-        return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
-      })
-      .map(([, w]) => w);
-
-    return out;
-  }, [chainTab, aptosXChainDerivedWallets, aptosTabExtensionWallets]);
-
-  const aptosCrossChainBaseKeys = useMemo(() => {
-    if (chainTab !== "aptos") return new Set<string>();
-    const keys = new Set<string>();
-    for (const w of aptosCrossChainWallets) {
-      const derivedKey = decibelSolanaOrderKey(w.name);
-      const nativeKey = decibelAptosSortKey(w.name);
-      const baseKey = derivedKey ?? (nativeKey === "trust wallet" ? "trust" : nativeKey);
-      if (baseKey) keys.add(baseKey);
+    if (hasConnectedSolanaWallet) {
+      const phantom = derivedByKey.get("phantom");
+      if (phantom) {
+        rows.push({
+          key: "aptos-derived-phantom",
+          wallet: phantom,
+          label: "Phantom (Derived Aptos)",
+          forceShow: true,
+        });
+      }
     }
-    return keys;
-  }, [chainTab, aptosCrossChainWallets]);
 
-  const solanaTopWallets = useMemo(() => {
-    if (chainTab !== "solana") return [];
+    return [...rows].sort((a, b) => {
+      const ka = a.key;
+      const kb = b.key;
+      const aIsPetra = ka === "aptos-native-petra";
+      const bIsPetra = kb === "aptos-native-petra";
+      if (aIsPetra !== bIsPetra) return aIsPetra ? -1 : 1;
+      const aInstalled = isWalletInstalled(a.wallet);
+      const bInstalled = isWalletInstalled(b.wallet);
+      if (aInstalled !== bInstalled) return aInstalled ? -1 : 1;
+      return 0;
+    });
+  }, [aptosTabExtensionWallets, aptosXChainDerivedWallets, hasConnectedSolanaWallet]);
+
+  const curatedSolanaRows = useMemo(() => {
+    const solanaOrder = [
+      "okx wallet",
+      "nightly",
+      "pontem wallet",
+      "backpack",
+      "bitget wallet",
+      "gate wallet",
+      "cosmostation wallet",
+      "phantom",
+      // Installed-only wallets (must be Solana tab only)
+      "jupiter",
+      "solflare",
+      "trust",
+    ] as const;
+    const solanaKeySet = new Set<string>(solanaOrder as unknown as string[]);
+
     const byKey = new Map<string, AdapterWallet | AdapterNotDetectedWallet>();
     for (const w of solanaTabExtensionWallets) {
       const key = decibelSolanaOrderKey(w.name);
-      if (!key) continue;
-      if (SOLANA_TOP_BASE_ORDER.includes(key as any) && !byKey.has(key)) {
-        byKey.set(key, w);
-      }
+      if (!key || !solanaKeySet.has(key)) continue;
+      if (!byKey.has(key)) byKey.set(key, w);
     }
-    return SOLANA_TOP_BASE_ORDER.map((k) => byKey.get(k)).filter(Boolean) as (
-      | AdapterWallet
-      | AdapterNotDetectedWallet
-    )[];
-  }, [chainTab, solanaTabExtensionWallets]);
 
-  /** Hide adapter Jupiter row when showing hardcoded deeplink row (same tab, no duplicate). */
-  const solanaTopWalletsForUi = useMemo(() => {
-    if (!solanaMobileBrowserRedirectable) return solanaTopWallets;
-    return solanaTopWallets.filter((w) => decibelSolanaOrderKey(w.name) !== "jupiter");
-  }, [solanaMobileBrowserRedirectable, solanaTopWallets]);
+    const rows: { key: string; wallet: AdapterWallet | AdapterNotDetectedWallet; label: string }[] = [];
+    for (const key of solanaOrder) {
+      const w = byKey.get(key);
+      if (!w) continue;
+      rows.push({ key: `solana-${key}`, wallet: w, label: `${titleCaseWalletBase(key)} (Solana)` });
+    }
+    const installedPriority = new Map<string, number>([
+      ["jupiter", 0],
+      ["trust", 1],
+      ["solflare", 2],
+    ]);
+    return [...rows].sort((a, b) => {
+      const ka = a.key.replace(/^solana-/, "");
+      const kb = b.key.replace(/^solana-/, "");
+      const aIsPhantom = ka === "phantom";
+      const bIsPhantom = kb === "phantom";
+      if (aIsPhantom !== bIsPhantom) return aIsPhantom ? -1 : 1;
 
-  const solanaCrossChainWallets = useMemo(() => {
-    if (chainTab !== "solana") return [];
-    const out = solanaTabExtensionWallets.filter((w) => {
-      const key = decibelSolanaOrderKey(w.name);
-      if (!key) return false;
-      if (SOLANA_TOP_BASE_ORDER.includes(key as any)) return false;
-      return SOLANA_XCHAIN_BASE_KEYS.has(key);
+      const aInstalledRank = installedPriority.get(ka);
+      const bInstalledRank = installedPriority.get(kb);
+      const aInstalled = isWalletInstalled(a.wallet);
+      const bInstalled = isWalletInstalled(b.wallet);
+      const aIsPreferredInstalled = aInstalled && aInstalledRank !== undefined;
+      const bIsPreferredInstalled = bInstalled && bInstalledRank !== undefined;
+      if (aIsPreferredInstalled && bIsPreferredInstalled) return aInstalledRank - bInstalledRank;
+      if (aIsPreferredInstalled !== bIsPreferredInstalled) return aIsPreferredInstalled ? -1 : 1;
+
+      if (aInstalled !== bInstalled) return aInstalled ? -1 : 1;
+      return 0;
     });
-    return sortByDecibelOrder(out, SOLANA_XCHAIN_BASE_ORDER, (n) => decibelSolanaOrderKey(n));
-  }, [chainTab, solanaTabExtensionWallets]);
+  }, [solanaTabExtensionWallets]);
 
-  const solanaShownBaseKeys = useMemo(() => {
-    if (chainTab !== "solana") return new Set<string>();
-    const keys = new Set<string>();
-    for (const w of solanaTopWallets) {
-      const key = decibelSolanaOrderKey(w.name);
-      if (key) keys.add(key);
-    }
-    for (const w of solanaCrossChainWallets) {
-      const key = decibelSolanaOrderKey(w.name);
-      if (key) keys.add(key);
-    }
-    return keys;
-  }, [chainTab, solanaTopWallets, solanaCrossChainWallets, solanaMobileBrowserRedirectable]);
-
-  const shownWalletNamesForTab = useMemo(() => {
-    const shown = new Set<string>();
-    if (chainTab === "aptos") {
-      for (const w of aptosPureWallets) shown.add(w.name);
-      for (const w of aptosCrossChainWallets) shown.add(w.name);
-      return shown;
-    }
-    if (chainTab === "solana") {
-      for (const w of solanaTopWallets) shown.add(w.name);
-      for (const w of solanaCrossChainWallets) shown.add(w.name);
-      return shown;
-    }
-    return shown;
-  }, [
-    chainTab,
-    aptosPureWallets,
-    aptosCrossChainWallets,
-    solanaTabExtensionWallets,
-    solanaTopWallets,
-    solanaCrossChainWallets,
-    solanaMobileBrowserRedirectable,
-  ]);
-
-  const moreWalletsForTab = useMemo(() => {
-    if (!(chainTab === "aptos" || chainTab === "solana")) return [];
-    const combined = [...availableWallets, ...installableWallets].filter(shouldShowAptosWalletRow);
-    return combined
-      .filter((w) => !shownWalletNamesForTab.has(w.name))
-      .filter((w) => {
-        // More wallets should not show EVM cross-chain rows.
-        if (isCrossChainEthereumExtensionRow(w.name)) return false;
-
-        if (chainTab === "aptos") {
-          // Do not show Solana-derived rows in Aptos "More" (they belong to Solana tab).
-          if (decibelSolanaBaseSortKey(w.name) !== null) return false;
-
-          // If a wallet base is already represented in Aptos Cross-chain (possibly via Solana-derived row),
-          // hide its native duplicate from "More wallets".
-          const nativeKey = decibelAptosSortKey(w.name);
-          const baseKey = nativeKey === "trust wallet" ? "trust" : nativeKey;
-          if (aptosCrossChainBaseKeys.has(baseKey)) return false;
-
-          // Hide known Solana-top wallets from Aptos "More" (they belong to Solana tab).
-          const solanaKey = decibelSolanaOrderKey(w.name);
-          if (solanaKey === "jupiter" || solanaKey === "solflare") return false;
-
-          // Ensure native Nightly doesn't leak into "More" (it's curated under Cross-chain).
-          if (normalizeWalletListKey(w.name) === "nightly") return false;
-        }
-
-        if (chainTab === "solana") {
-          // Hide Aptos-top wallet from Solana "More" (it belongs to Aptos tab).
-          if (decibelAptosSortKey(w.name) === "petra") return false;
-
-          // If the Solana tab already has a `(Solana)` row for a base wallet, hide its native duplicate.
-          const nativeKey = decibelAptosSortKey(w.name);
-          if (solanaShownBaseKeys.has(nativeKey)) return false;
-        }
-
-        return true;
-      })
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [
-    availableWallets,
-    installableWallets,
-    chainTab,
-    shownWalletNamesForTab,
-    aptosCrossChainBaseKeys,
-    solanaShownBaseKeys,
-  ]);
-
-  const allTabExtensionWallets = useMemo(() => {
-    const combined = [...availableWallets, ...installableWallets];
-    // "All" should show literally everything the adapter provides (including EVM rows).
-    return [...combined].sort((a, b) => a.name.localeCompare(b.name));
-  }, [availableWallets, installableWallets]);
-
-  const extensionWalletsForTab =
-    chainTab === "all" ? allTabExtensionWallets : [];
+  const extensionWalletsForTab: (AdapterWallet | AdapterNotDetectedWallet)[] = [];
 
   return (
     <AboutAptosConnect renderEducationScreen={renderEducationScreen}>
@@ -625,114 +602,53 @@ export function CustomAptosConnectDialogContent({
       {chainTab === "aptos" && (
         <>
           <div className="flex flex-col gap-3 pt-3">
-            {aptosPureWallets.length === 0 ? (
+            {curatedAptosRows.length === 0 ? (
               <p className="py-6 text-center text-sm text-muted-foreground">
                 No Aptos wallets in this list.
               </p>
             ) : (
-              aptosPureWallets.map((wallet) => (
+              curatedAptosRows.map((row) => (
                 <CustomExtensionWalletRow
-                  key={wallet.name}
-                  wallet={wallet}
+                  key={row.key}
+                  wallet={row.wallet}
                   onConnect={close}
                   isConnecting={isConnecting}
                   mode={mode}
-                  isConnected={connected && selectedWallet?.name === wallet.name}
+                  isConnected={connected && selectedWallet?.name === row.wallet.name}
                   isDerivedSelected={!!isDerivedSelected}
+                  displayNameOverride={row.label}
+                  forceShow={row.forceShow}
                 />
               ))
             )}
           </div>
-
-          {aptosCrossChainWallets.length > 0 && (
-            <div className="pt-4">
-              <div className="pb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Cross-chain
-              </div>
-              <div className="flex flex-col gap-3">
-                {aptosCrossChainWallets.map((wallet) => {
-                  const derivedKey = decibelSolanaOrderKey(wallet.name);
-                  const nativeKey = decibelAptosSortKey(wallet.name);
-                  const baseKey =
-                    derivedKey ??
-                    (nativeKey === "trust wallet" ? "trust" : nativeKey);
-                  const label = `${titleCaseWalletBase(baseKey)} (Aptos)`;
-                  return (
-                    <CustomExtensionWalletRow
-                      key={`xchain-aptos-${wallet.name}`}
-                      wallet={wallet}
-                      onConnect={close}
-                      isConnecting={isConnecting}
-                      mode={mode}
-                      isConnected={connected && selectedWallet?.name === wallet.name}
-                      isDerivedSelected={!!isDerivedSelected}
-                      displayNameOverride={label}
-                    />
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </>
       )}
 
       {chainTab === "solana" && (
         <>
           <div className="flex flex-col gap-3 pt-3">
-            {solanaTopWalletsForUi.length > 0 ? (
-              solanaTopWalletsForUi.map((wallet) => {
-                const key = decibelSolanaOrderKey(wallet.name) ?? "";
-                const label =
-                  key === "solflare" ? "Solflare" : key === "metamask" ? "MetaMask" : "Jupiter";
-                return (
-                  <CustomExtensionWalletRow
-                    key={wallet.name}
-                    wallet={wallet}
-                    onConnect={close}
-                    isConnecting={isConnecting}
-                    mode={mode}
-                    isConnected={connected && selectedWallet?.name === wallet.name}
-                    isDerivedSelected={!!isDerivedSelected}
-                    displayNameOverride={label}
-                    forceShow
-                    preferSolanaConnect
-                  />
-                );
-              })
+            {curatedSolanaRows.length > 0 ? (
+              curatedSolanaRows.map((row) => (
+                <CustomExtensionWalletRow
+                  key={row.key}
+                  wallet={row.wallet}
+                  onConnect={close}
+                  isConnecting={isConnecting}
+                  mode={mode}
+                  isConnected={connected && selectedWallet?.name === row.wallet.name}
+                  isDerivedSelected={!!isDerivedSelected}
+                  displayNameOverride={row.label}
+                  forceShow
+                  preferSolanaConnect
+                />
+              ))
             ) : !solanaMobileBrowserRedirectable ? (
               <p className="py-6 text-center text-sm text-muted-foreground">
                 No Solana wallets in this list.
               </p>
             ) : null}
           </div>
-
-          {solanaCrossChainWallets.length > 0 && (
-            <div className="pt-4">
-              <div className="pb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Cross-chain
-              </div>
-              <div className="flex flex-col gap-3">
-                {solanaCrossChainWallets.map((wallet) => {
-                  const key = decibelSolanaOrderKey(wallet.name) ?? wallet.name;
-                  const label = `${titleCaseWalletBase(key)} (Solana)`;
-                  return (
-                    <CustomExtensionWalletRow
-                      key={`xchain-solana-${wallet.name}`}
-                      wallet={wallet}
-                      onConnect={close}
-                      isConnecting={isConnecting}
-                      mode={mode}
-                      isConnected={connected && selectedWallet?.name === wallet.name}
-                      isDerivedSelected={!!isDerivedSelected}
-                      displayNameOverride={label}
-                      forceShow
-                      preferSolanaConnect
-                    />
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </>
       )}
 
@@ -758,32 +674,6 @@ export function CustomAptosConnectDialogContent({
         </div>
       )}
 
-      {(chainTab === "aptos" || chainTab === "solana") && moreWalletsForTab.length > 0 && (
-        <div className="pt-5">
-          <button
-            type="button"
-            className="mx-auto block text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
-            onClick={() => setShowMoreWallets((v) => !v)}
-          >
-            {showMoreWallets ? "Hide more wallets" : "More wallets"}
-          </button>
-          {showMoreWallets && (
-            <div className="flex flex-col gap-3 pt-3">
-              {moreWalletsForTab.map((wallet) => (
-                <CustomExtensionWalletRow
-                  key={`more-${wallet.name}`}
-                  wallet={wallet}
-                  onConnect={close}
-                  isConnecting={isConnecting}
-                  mode={mode}
-                  isConnected={connected && selectedWallet?.name === wallet.name}
-                  isDerivedSelected={!!isDerivedSelected}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
         </div>
       </div>
     </AboutAptosConnect>
@@ -993,6 +883,13 @@ function CustomExtensionWalletRow({
 
       onConnect?.();
       return;
+    }
+    if (typeof window !== "undefined" && isDerivedAptosWalletName(wallet.name)) {
+      try {
+        window.sessionStorage.removeItem("skip_auto_connect_derived_aptos");
+      } catch {
+        /* ignore */
+      }
     }
     connect(wallet.name);
     onConnect?.();

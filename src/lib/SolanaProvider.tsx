@@ -2,7 +2,6 @@
 
 import { WalletProvider as SolanaWalletProvider, ConnectionProvider } from "@solana/wallet-adapter-react";
 import {
-  SolflareWalletAdapter,
   CoinbaseWalletAdapter,
   TorusWalletAdapter,
   LedgerWalletAdapter,
@@ -41,9 +40,11 @@ export function SolanaProvider({ children }: { children: ReactNode }) {
   
   // Most wallets (Phantom, Trust, OKX) register themselves as Standard Wallets automatically.
   // We only include wallets that don't auto-register to avoid conflicts.
+  // NOTE: Solflare now supports Wallet Standard in most setups; including SolflareWalletAdapter
+  // here can create duplicate registrations / selection ambiguity and result in immediate
+  // "wallet connection rejected" errors.
   const wallets = useMemo(
     () => [
-      new SolflareWalletAdapter(),
       new CoinbaseWalletAdapter(),
       new TorusWalletAdapter(),
       new LedgerWalletAdapter(),

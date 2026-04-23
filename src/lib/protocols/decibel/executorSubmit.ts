@@ -41,7 +41,7 @@ function getAptosClient(network: "mainnet" | "testnet"): Aptos {
 export async function submitExecutorEntryFunction(params: {
   network: "mainnet" | "testnet";
   fn: string;
-  functionArguments: (string | number | boolean | bigint | null)[];
+  functionArguments: (string | number | boolean | bigint | null | number[])[];
   maxGasAmount?: number;
 }): Promise<string> {
   const { network, fn, functionArguments, maxGasAmount = 20_000 } = params;

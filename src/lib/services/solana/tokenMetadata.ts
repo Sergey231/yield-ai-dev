@@ -27,13 +27,26 @@ type MetadataCacheEntry = {
 
 export class JupiterTokenMetadataService {
   private static instance: JupiterTokenMetadataService;
-  private cache = new Map<string, MetadataCacheEntry>();
-  private static batchCache = new Map<string, { data: JupiterTokenData[]; timestamp: number }>();
-  private readonly ttlMs = 1000 * 60 * 30; // 30 minutes for individual cache
-  private static readonly BATCH_CACHE_DURATION = 1000 * 60 * 5; // 5 minutes for batch cache
+  // Cache is safe to keep for a long time because we only store symbol/name/icon/decimals
+  // (not prices). This dramatically reduces 429s from Jupiter search endpoint.
+  private cache: Map<string, MetadataCacheEntry>;
+  private static batchCache: Map<string, { data: JupiterTokenData[]; timestamp: number }>;
+  private readonly ttlMs = 1000 * 60 * 60 * 24 * 30; // 30 days for individual cache
+  private readonly missingTtlMs = 1000 * 60 * 5; // 5 minutes for negative cache (avoid sticky N/A on transient 429)
+  private static readonly BATCH_CACHE_DURATION = 1000 * 60 * 60 * 24; // 24 hours for batch cache
   private static readonly BASE_URL = 'https://api.jup.ag/tokens/v2/search';
 
-  private constructor() {}
+  private constructor() {
+    // Use globalThis so Next.js/Vercel keeps cache across module reloads in the same runtime.
+    const g = globalThis as unknown as {
+      __jupTokenMetaCache?: Map<string, MetadataCacheEntry>;
+      __jupTokenMetaBatchCache?: Map<string, { data: JupiterTokenData[]; timestamp: number }>;
+    };
+    g.__jupTokenMetaCache ??= new Map<string, MetadataCacheEntry>();
+    g.__jupTokenMetaBatchCache ??= new Map<string, { data: JupiterTokenData[]; timestamp: number }>();
+    this.cache = g.__jupTokenMetaCache;
+    JupiterTokenMetadataService.batchCache = g.__jupTokenMetaBatchCache;
+  }
 
   static getInstance(): JupiterTokenMetadataService {
     if (!JupiterTokenMetadataService.instance) {
@@ -119,38 +132,48 @@ export class JupiterTokenMetadataService {
         
         // Добавляем API ключ, если он есть
         const apiKey = process.env.NEXT_PUBLIC_JUP_API_KEY || process.env.JUP_API_KEY;
-        console.log(`[JupiterTokenMetadata] 🔑 API Key check:`, {
-          hasNextPublicKey: !!process.env.NEXT_PUBLIC_JUP_API_KEY,
-          hasJupApiKey: !!process.env.JUP_API_KEY,
-          finalApiKey: apiKey ? `${apiKey.substring(0, 8)}...` : 'NOT FOUND',
-          apiKeyLength: apiKey?.length || 0,
-        });
-        
         if (apiKey) {
           headers['x-api-key'] = apiKey;
-          console.log(`[JupiterTokenMetadata] ✅ API key added to headers`);
-        } else {
-          console.warn(`[JupiterTokenMetadata] ⚠️ No API key found! Check JUP_API_KEY or NEXT_PUBLIC_JUP_API_KEY env variable`);
+        }
+        
+        const maxAttempts = 3;
+        let response: Response | null = null;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          response = await fetch(url, { cache: 'no-store', headers });
+          if (response.ok) break;
+
+          const status = response.status;
+          const retryable = status === 429 || (status >= 500 && status <= 599);
+          const retryAfterHeader = response.headers.get('retry-after');
+          const retryAfterMs = retryAfterHeader
+            ? (() => {
+                const sec = Number(retryAfterHeader);
+                if (Number.isFinite(sec) && sec > 0) return Math.min(60_000, Math.floor(sec * 1000));
+                const dt = Date.parse(retryAfterHeader);
+                if (Number.isFinite(dt)) return Math.min(60_000, Math.max(0, dt - Date.now()));
+                return null;
+              })()
+            : null;
+
+          const errorText = await response.text().catch(() => '');
+          console.error(
+            `[JupiterTokenMetadata] Response not OK: ${status} ${response.statusText} (attempt ${attempt}/${maxAttempts})`,
+            errorText,
+          );
+
+          if (!retryable || attempt === maxAttempts) {
+            // Do NOT sticky-negative-cache on transient rate limits; keep missing TTL short.
+            this.markMissing(chunk, status === 429 ? this.missingTtlMs : this.missingTtlMs);
+            response = null;
+            break;
+          }
+
+          const backoffMs = retryAfterMs ?? Math.min(4000, 500 * Math.pow(2, attempt - 1));
+          console.warn(`[JupiterTokenMetadata] Retryable status ${status}; waiting ${backoffMs}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
         }
 
-        console.log(`[JupiterTokenMetadata] Fetching batch for ${chunk.length} tokens (chunk ${chunks.indexOf(chunk) + 1}/${chunks.length})`);
-        console.log(`[JupiterTokenMetadata] URL: ${url}`);
-        console.log(`[JupiterTokenMetadata] Has API key: ${!!apiKey}`);
-        
-        const response = await fetch(url, {
-          cache: 'no-store',
-          headers,
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text().catch(() => '');
-          console.error(`[JupiterTokenMetadata] Response not OK: ${response.status} ${response.statusText}`, errorText);
-          if (response.status === 429) {
-            console.warn(`[JupiterTokenMetadata] Rate limit exceeded, waiting 5 seconds...`);
-            await new Promise(resolve => setTimeout(resolve, 5000));
-          }
-          // Помечаем токены этого чанка как отсутствующие
-          this.markMissing(chunk);
+        if (!response) {
           continue;
         }
 
@@ -159,18 +182,9 @@ export class JupiterTokenMetadataService {
         // Проверяем, что ответ - массив
         if (!Array.isArray(data)) {
           console.error(`[JupiterTokenMetadata] Invalid response format, expected array, got:`, typeof data, data);
-          this.markMissing(chunk);
+          this.markMissing(chunk, this.missingTtlMs);
           continue;
         }
-        
-        console.log(`[JupiterTokenMetadata] ✅ Received ${data.length} tokens from API`);
-        console.log(`[JupiterTokenMetadata] Requested mints (${chunk.length}):`, chunk);
-        console.log(`[JupiterTokenMetadata] Received tokens:`, data.map(t => ({ 
-          id: t.id, 
-          symbol: t.symbol, 
-          icon: t.icon ? '✅' : '❌',
-          hasIcon: !!t.icon 
-        })));
         
         // Сохраняем в batch кэш
         JupiterTokenMetadataService.batchCache.set(cacheKey, {
@@ -184,7 +198,7 @@ export class JupiterTokenMetadataService {
       } catch (error) {
         console.error('[JupiterTokenMetadata] Error fetching batch from Jupiter API:', error);
         // Помечаем токены этого чанка как отсутствующие
-        this.markMissing(chunk);
+        this.markMissing(chunk, this.missingTtlMs);
       }
     }
   }
@@ -203,38 +217,13 @@ export class JupiterTokenMetadataService {
       }
     }
 
-    console.log(`[JupiterTokenMetadata] updateIndividualCache:`, {
-      dataLength: data.length,
-      dataMapSize: dataMap.size,
-      requestedMints: requestedMints?.length || 0,
-      availableIds: Array.from(dataMap.keys()).slice(0, 5),
-    });
-
     // Если указаны конкретные mint адреса, обновляем только их
     const mintsToUpdate = requestedMints || Array.from(dataMap.keys());
-    
-    console.log(`[JupiterTokenMetadata] 🔄 updateIndividualCache:`, {
-      dataMapSize: dataMap.size,
-      requestedMintsCount: requestedMints?.length || 0,
-      mintsToUpdateCount: mintsToUpdate.length,
-      availableIds: Array.from(dataMap.keys()).slice(0, 5),
-      requestedMints: requestedMints?.slice(0, 5),
-    });
     
     for (const mint of mintsToUpdate) {
       const token = dataMap.get(mint);
       
       if (token) {
-        console.log(`[JupiterTokenMetadata] ✅ Found metadata for mint ${mint}:`, {
-          jupiterId: token.id,
-          symbol: token.symbol,
-          name: token.name,
-          icon: token.icon,
-          hasIcon: !!token.icon,
-          iconLength: token.icon?.length || 0,
-          decimals: token.decimals,
-        });
-        
         this.cache.set(mint, {
           expiresAt: now + this.ttlMs,
           metadata: {
@@ -244,28 +233,17 @@ export class JupiterTokenMetadataService {
             decimals: token.decimals,
           },
         });
-        
-        console.log(`[JupiterTokenMetadata] 💾 Cached metadata for ${mint}:`, {
-          symbol: token.symbol,
-          logoUrl: token.icon,
-        });
       } else {
-        console.warn(`[JupiterTokenMetadata] ❌ No match found for mint: ${mint}`, {
-          requestedMint: mint,
-          availableIds: Array.from(dataMap.keys()),
-          dataMapHasMint: dataMap.has(mint),
-          dataMapKeys: Array.from(dataMap.keys()).slice(0, 10),
-        });
-        this.markMissing([mint]);
+        this.markMissing([mint], this.missingTtlMs);
       }
     }
   }
 
-  private markMissing(mints: string[]): void {
+  private markMissing(mints: string[], ttlMs: number = this.ttlMs): void {
     const now = Date.now();
     for (const mint of mints) {
       this.cache.set(mint, {
-        expiresAt: now + this.ttlMs,
+        expiresAt: now + ttlMs,
         metadata: null,
       });
     }
@@ -275,10 +253,8 @@ export class JupiterTokenMetadataService {
    * Очистить кэш
    */
   static clearCache(): void {
-    JupiterTokenMetadataService.batchCache.clear();
-    if (JupiterTokenMetadataService.instance) {
-      JupiterTokenMetadataService.instance.cache.clear();
-    }
+    JupiterTokenMetadataService.batchCache?.clear();
+    JupiterTokenMetadataService.instance?.cache?.clear();
   }
 
   /**

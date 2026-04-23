@@ -1130,7 +1130,18 @@ export function DepositButton({
             logoUrl: tokenIn.logo,
             availableAmount: jupiterWalletAmount,
             apy: protocolAPY,
-            priceUsd: priceUSD || 0,
+            priceUsd:
+              priceUSD ||
+              (() => {
+                const mint = normalizeMint(tokenIn.address);
+                const byMint = mint ? solanaTokens.find((t) => normalizeMint(t.address) === mint) : undefined;
+                const bySymbol = jupiterDisplaySymbol
+                  ? solanaTokens.find((t) => canonicalJupiterSymbol(t.symbol) === canonicalJupiterSymbol(jupiterDisplaySymbol))
+                  : undefined;
+                const candidate = byMint ?? bySymbol;
+                const n = Number((candidate as any)?.price);
+                return Number.isFinite(n) && n > 0 ? n : 0;
+              })(),
           }}
         />
       )}
@@ -1147,7 +1158,14 @@ export function DepositButton({
             logoUrl: tokenIn.logo,
             availableAmount: kaminoWalletAmount,
             apy: typeof kaminoDepositApy === "number" ? kaminoDepositApy : protocolAPY,
-            priceUsd: priceUSD || 0,
+            priceUsd:
+              priceUSD ||
+              (() => {
+                const mint = normalizeMint(tokenIn.address);
+                const candidate = mint ? solanaTokens.find((t) => normalizeMint(t.address) === mint) : undefined;
+                const n = Number((candidate as any)?.price);
+                return Number.isFinite(n) && n > 0 ? n : 0;
+              })(),
           }}
         />
       )}

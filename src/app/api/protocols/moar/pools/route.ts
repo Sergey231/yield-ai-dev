@@ -43,14 +43,18 @@ interface MoarPoolData {
   feeOnInterest: number;
 }
 
+const DEBUG_MOAR_LOGS = process.env.DEBUG_MOAR_LOGS === 'true';
+
 export async function GET() {
   try {
-    console.log('🔍 Fetching Moar Market pools with APR calculation...');
-    console.log('📊 API called at:', new Date().toISOString());
+    if (DEBUG_MOAR_LOGS) {
+      console.log('[Moar] fetching pools with APR calculation...');
+      console.log('[Moar] api called at:', new Date().toISOString());
+    }
     
     // Check if APTOS_API_KEY is available
     const aptosApiKey = process.env.APTOS_API_KEY;
-    console.log('🔑 APTOS_API_KEY exists:', !!aptosApiKey);
+    if (DEBUG_MOAR_LOGS) console.log('[Moar] aptos api key exists:', !!aptosApiKey);
     
     // Prepare headers with API key if available
     const headers: Record<string, string> = {
@@ -77,11 +81,11 @@ export async function GET() {
     }
     
     const poolsData = await poolsResponse.json();
-    console.log('📊 Raw pools data:', poolsData);
+    if (DEBUG_MOAR_LOGS) console.log('[Moar] raw pools data:', poolsData);
     
     // Extract the actual pools array from the response
     const pools = Array.isArray(poolsData) && poolsData.length > 0 ? poolsData[0] : poolsData;
-    console.log('📊 Extracted pools count:', Array.isArray(pools) ? pools.length : 'Not an array');
+    if (DEBUG_MOAR_LOGS) console.log('[Moar] extracted pools count:', Array.isArray(pools) ? pools.length : 'Not an array');
     
     if (!Array.isArray(pools)) {
       throw new Error('Invalid pools data format');
@@ -90,11 +94,11 @@ export async function GET() {
     const transformedPools: InvestmentData[] = [];
     
     // Step 2: Calculate APR for each pool
-    console.log(`📊 Starting APR calculation for ${pools.length} pools`);
+    if (DEBUG_MOAR_LOGS) console.log(`[Moar] starting APR calculation for ${pools.length} pools`);
     for (let poolId = 0; poolId < pools.length; poolId++) {
       try {
         const pool = pools[poolId];
-        console.log(`📈 Calculating APR for pool ${poolId}...`);
+        if (DEBUG_MOAR_LOGS) console.log(`[Moar] calculating APR for pool ${poolId}...`);
         
         // Get interest rate data
         const interestRateResponse = await fetch('https://fullnode.mainnet.aptoslabs.com/v1/view', {
@@ -218,25 +222,27 @@ export async function GET() {
         
         transformedPools.push(poolEntry);
         
-        console.log(`✅ Pool ${poolId} APR calculated:`, {
-          totalAPR: totalAPR,
-          interestRateComponent: interestRateComponent,
-          farmingAPY: farmingAPY,
-          poolToken: poolToken
-        });
+        if (DEBUG_MOAR_LOGS) {
+          console.log(`[Moar] pool ${poolId} APR calculated:`, {
+            totalAPR: totalAPR,
+            interestRateComponent: interestRateComponent,
+            farmingAPY: farmingAPY,
+            poolToken: poolToken
+          });
+        }
 
       } catch (err) {
-        console.warn(`❌ Error calculating APR for pool ${poolId}:`, err);
+        console.warn(`[Moar] error calculating APR for pool ${poolId}:`, err);
         // Continue with other pools instead of failing completely
       }
     }
     
-    console.log(`📊 Final result: ${transformedPools.length} pools processed successfully`);
+    if (DEBUG_MOAR_LOGS) console.log(`[Moar] final result: ${transformedPools.length} pools processed successfully`);
 
     // Sort by total APY in descending order
     transformedPools.sort((a, b) => (b.totalAPY || 0) - (a.totalAPY || 0));
 
-    console.log(`✅ Transformed ${transformedPools.length} Moar Market pools`);
+    if (DEBUG_MOAR_LOGS) console.log(`[Moar] transformed ${transformedPools.length} pools`);
 
     return NextResponse.json({
       success: true,
@@ -251,7 +257,7 @@ export async function GET() {
     });
 
   } catch (error) {
-    console.error('❌ Error fetching Moar Market pools:', error);
+    console.error('[Moar] error fetching pools:', error);
     return NextResponse.json(
       {
         success: false,

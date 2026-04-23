@@ -60,6 +60,7 @@ interface WalletState {
   rewards: ProtocolRewards;
   prices: TokenPrices;
   totalAssets: number;
+  solanaTotalAssets: number;
   
   // Loading states
   balanceLoading: boolean;
@@ -87,6 +88,7 @@ interface WalletState {
   fetchPrices: (tokenAddresses: string[], forceRefresh?: boolean) => Promise<void>;
   setRewards: (protocol: string, rewards: any[]) => void;
   setTotalAssets: (value: number) => void;
+  setSolanaTotalAssets: (value: number) => void;
   
   // Getters
   getBalance: () => WalletBalance[];
@@ -113,6 +115,7 @@ export const useWalletStore = create<WalletState>()(
         rewards: {},
         prices: {},
         totalAssets: 0,
+        solanaTotalAssets: 0,
         
         balanceLoading: false,
         positionsLoading: false,
@@ -143,6 +146,11 @@ export const useWalletStore = create<WalletState>()(
         setTotalAssets: (value: number) => {
           if (Number.isFinite(value)) {
             set({ totalAssets: value });
+          }
+        },
+        setSolanaTotalAssets: (value: number) => {
+          if (Number.isFinite(value)) {
+            set({ solanaTotalAssets: value });
           }
         },
         

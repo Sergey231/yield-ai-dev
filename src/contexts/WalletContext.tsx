@@ -1,8 +1,8 @@
 'use client';
 
 import { createContext, useContext, ReactNode, useEffect, useState, useCallback } from 'react';
-import { useWallet as useAptosWallet } from "@aptos-labs/wallet-adapter-react";
 import { AptosPortfolioService } from '@/lib/services/aptos/portfolio';
+import { useEffectiveWalletAddresses } from "@/lib/hooks/useEffectiveWalletAddresses";
 
 interface PortfolioToken {
   address: string;
@@ -24,12 +24,12 @@ interface WalletContextType {
 const WalletDataContext = createContext<WalletContextType | undefined>(undefined);
 
 export function WalletDataProvider({ children }: { children: ReactNode }) {
-  const { account, connected } = useAptosWallet();
+  const { effectiveAptosAddress } = useEffectiveWalletAddresses();
   const [tokens, setTokens] = useState<PortfolioToken[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const fetchWalletData = useCallback(async () => {
-    if (!connected || !account) {
+    if (!effectiveAptosAddress) {
       setTokens([]);
       return;
     }
@@ -37,7 +37,7 @@ export function WalletDataProvider({ children }: { children: ReactNode }) {
     try {
       setIsRefreshing(true);
       const portfolioService = new AptosPortfolioService();
-      const { tokens: fetchedTokens } = await portfolioService.getPortfolio(account.address.toString());
+      const { tokens: fetchedTokens } = await portfolioService.getPortfolio(effectiveAptosAddress);
       setTokens(fetchedTokens);
     } catch (error) {
       console.error('Error fetching wallet data:', error);
@@ -45,7 +45,7 @@ export function WalletDataProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsRefreshing(false);
     }
-  }, [connected, account]);
+  }, [effectiveAptosAddress]);
 
   const refreshPortfolio = useCallback(async () => {
     console.log('[WalletContext] Manual refresh triggered');
@@ -57,7 +57,7 @@ export function WalletDataProvider({ children }: { children: ReactNode }) {
   }, [fetchWalletData]);
 
   const walletData: WalletContextType = {
-    address: account?.address.toString(),
+    address: effectiveAptosAddress ?? undefined,
     tokens,
     refreshPortfolio,
     isRefreshing,

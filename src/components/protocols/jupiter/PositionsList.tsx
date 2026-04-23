@@ -47,7 +47,10 @@ export function PositionsList({
     useJupiterPositions(effectiveAddress);
 
   const totalValue = useMemo(() => computeJupiterTotalValue(positions), [positions]);
-  const protocolPositions = useMemo(() => mapJupiterToProtocolPositions(positions), [positions]);
+  const protocolPositions = useMemo(() => {
+    const mapped = mapJupiterToProtocolPositions(positions);
+    return [...mapped].sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+  }, [positions]);
   const cacheKey = useMemo(() => `proto_has_positions:jupiter`, []);
   const [lastKnownHasPositions, setLastKnownHasPositions] = useState(false);
 
@@ -61,8 +64,13 @@ export function PositionsList({
   }, [cacheKey]);
 
   useEffect(() => {
-    // Preserve prior behaviour: propagate 0 when empty/disabled.
-    onValueRef.current?.(effectiveAddress ? totalValue : 0);
+    // IMPORTANT (Sidebar Total Assets):
+    // `effectiveAddress` can temporarily become empty while the Solana adapter is
+    // connecting/disconnecting or when `protocolsAddress` is gated. In that transient
+    // state we must NOT push `0` upwards, otherwise Sidebar "Total Assets" flickers
+    // and looks like Solana Wallet overwrote protocol totals.
+    if (!effectiveAddress) return;
+    onValueRef.current?.(totalValue);
   }, [effectiveAddress, totalValue]);
 
   useEffect(() => {

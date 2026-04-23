@@ -34,6 +34,7 @@ import { MobileManagementProvider } from "@/contexts/MobileManagementContext";
 import { useSolanaPortfolio } from "@/hooks/useSolanaPortfolio";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { ProtocolIcon } from "@/shared/ProtocolIcon/ProtocolIcon";
+import { useEffectiveWalletAddresses } from "@/lib/hooks/useEffectiveWalletAddresses";
 
 function MobileTabsContent() {
   const [tab, setTab] = useState<"ideas" | "assets" | "chat">("assets");
@@ -41,6 +42,7 @@ function MobileTabsContent() {
   const { account } = useAptosNativeRestore();
   // Also keep useWallet for other functionality
   useWallet(); // Keep adapter state synced
+  const { effectiveAptosAddress, effectiveSolanaOverrideAddress } = useEffectiveWalletAddresses();
   const {
     address: solanaAddress,
     protocolsAddress: solanaProtocolsAddress,
@@ -48,7 +50,7 @@ function MobileTabsContent() {
     totalValueUsd: solanaTotalValue,
     isLoading: isSolanaLoading,
     refresh: refreshSolana,
-  } = useSolanaPortfolio();
+  } = useSolanaPortfolio({ overrideAddress: effectiveSolanaOverrideAddress });
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [tokens, setTokens] = useState<Token[]>([]);
   const [totalValue, setTotalValue] = useState<string>("0");
@@ -114,11 +116,11 @@ function MobileTabsContent() {
 
   useEffect(() => {
     async function loadPortfolio() {
-      if (!account?.address) return;
+      if (!effectiveAptosAddress) return;
 
       try {
         const portfolioService = new AptosPortfolioService();
-        const portfolio = await portfolioService.getPortfolio(account.address.toString());
+        const portfolio = await portfolioService.getPortfolio(effectiveAptosAddress);
         
         const total = portfolio.tokens.reduce((sum, token) => {
           const value = token.value ? parseFloat(token.value) : 0;
@@ -132,21 +134,32 @@ function MobileTabsContent() {
     }
 
     loadPortfolio();
-  }, [account?.address, hyperionValue, echelonValue, ariesValue, jouleValue, tappValue, mesoValue, auroValue, earniumValue, aaveValue, moarValue, thalaValue, echoValue, decibelValue, aptreeValue, yieldAIValue]);
+  }, [effectiveAptosAddress, hyperionValue, echelonValue, ariesValue, jouleValue, tappValue, mesoValue, auroValue, earniumValue, aaveValue, moarValue, thalaValue, echoValue, decibelValue, aptreeValue, yieldAIValue]);
+
+  // In WebView mode, refresh read-only data after native wallet_connected.
+  useEffect(() => {
+    const onWalletChanged = () => {
+      resetChecking();
+      // Fire-and-forget; individual hooks/services handle their own loading states.
+      refreshSolana().catch(() => {});
+    };
+    window.addEventListener("yieldai:wallet-changed", onWalletChanged as EventListener);
+    return () => window.removeEventListener("yieldai:wallet-changed", onWalletChanged as EventListener);
+  }, [resetChecking, refreshSolana]);
 
   useEffect(() => {
-    if (account?.address) {
+    if (effectiveAptosAddress) {
       resetChecking();
     } else {
       setCheckingProtocols([]);
     }
-  }, [account?.address, resetChecking]);
+  }, [effectiveAptosAddress, resetChecking]);
 
   useEffect(() => {
-    if (!account?.address) return;
+    if (!effectiveAptosAddress) return;
     // Keep checking list in sync when Solana wallet connects/disconnects
     resetChecking();
-  }, [account?.address, solanaProtocolsAddress, resetChecking]);
+  }, [effectiveAptosAddress, solanaProtocolsAddress, resetChecking]);
 
   // Обработчики изменения суммы позиций в протоколах
   const handleHyperionValueChange = (value: number) => {
@@ -266,7 +279,7 @@ function MobileTabsContent() {
               </div>
 
               <div className="shrink-0">
-                <WalletSelector showMobileWalletButton />
+                <WalletSelector />
               </div>
             </div>
           </div>
@@ -279,7 +292,7 @@ function MobileTabsContent() {
             <div className={tab === "assets" ? "block w-full max-w-full" : "hidden w-full max-w-full"}>
               <div className="p-4 space-y-4 w-full max-w-full">
                 {/* Aptos wallet card and protocols - only when Aptos is connected */}
-                {account?.address && (
+                {effectiveAptosAddress && (
                   <>
                     <PortfolioCard 
                       totalValue={totalValue} 
@@ -339,7 +352,7 @@ function MobileTabsContent() {
                         .map(({ component: Component, name, handler }) => (
                           <Component
                             key={name}
-                            address={account.address.toString()}
+                            address={effectiveAptosAddress}
                             onPositionsValueChange={handler}
                             walletTokens={tokens}
                             refreshKey={refreshKey}
@@ -378,7 +391,7 @@ function MobileTabsContent() {
                 )}
                 
                 {/* Message when no wallets connected */}
-                {!account?.address && !solanaAddress && (
+                {!effectiveAptosAddress && !solanaAddress && (
                   <div className="mt-6 p-4 bg-muted rounded-lg">
                     <p className="text-sm text-muted-foreground">
                       Connect your Aptos or Solana wallet to view your assets and positions in DeFi protocols

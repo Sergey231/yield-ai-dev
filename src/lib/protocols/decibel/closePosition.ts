@@ -132,6 +132,47 @@ function roundSizeToLotChainUnits(
   return Math.max(rounded, minSize);
 }
 
+/** Human base size from USD notional and mark (before lot/min rounding). */
+export function decibelBaseHumanFromUsdNotional(orderSizeUsd: number, markPx: number): number {
+  if (!Number.isFinite(orderSizeUsd) || orderSizeUsd <= 0) return 0;
+  if (!Number.isFinite(markPx) || markPx <= 0) return 0;
+  return orderSizeUsd / markPx;
+}
+
+/**
+ * Chain size (u64-style integer) passed to `place_order_to_subaccount` — must match
+ * {@link buildOpenMarketOrderPayload} for the same inputs.
+ */
+export function decibelOpenOrderSizeChainUnits(
+  orderSizeUsd: number,
+  markPx: number,
+  marketConfig: DecibelMarketConfig
+): number {
+  const szDecimals = marketConfig.sz_decimals ?? 9;
+  const lotSize = marketConfig.lot_size ?? 100_000_000;
+  const minSize = marketConfig.min_size ?? 1_000_000_000;
+  const baseHuman = decibelBaseHumanFromUsdNotional(orderSizeUsd, markPx);
+  return roundSizeToLotChainUnits(baseHuman, lotSize, minSize, szDecimals);
+}
+
+/**
+ * Map Decibel REST `|size|` (human base) to the same chain units as order placement
+ * (lot / min_size / sz_decimals). Use after fills when reconciling `account_positions`.
+ */
+export function decibelHumanAbsBaseToOrderChainUnits(absHuman: number, marketConfig: DecibelMarketConfig): number {
+  const szDecimals = marketConfig.sz_decimals ?? 9;
+  const lotSize = marketConfig.lot_size ?? 100_000_000;
+  const minSize = marketConfig.min_size ?? 1_000_000_000;
+  if (!Number.isFinite(absHuman) || absHuman <= 0) return 0;
+  return roundSizeToLotChainUnits(absHuman, lotSize, minSize, szDecimals);
+}
+
+export function decibelChainUnitsToHumanBase(chainUnits: number | bigint, szDecimals: number): number {
+  const c = typeof chainUnits === "bigint" ? chainUnits : BigInt(Math.trunc(chainUnits));
+  const d = Number.isFinite(szDecimals) && szDecimals >= 0 ? szDecimals : 9;
+  return Number(c) / 10 ** d;
+}
+
 /**
  * Builds the transaction payload for opening a position at market (IOC).
  * Uses place_order_to_subaccount with is_reduce_only=false.

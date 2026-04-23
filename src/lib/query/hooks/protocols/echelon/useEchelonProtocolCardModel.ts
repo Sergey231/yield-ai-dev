@@ -10,6 +10,7 @@ import type { ProtocolPosition } from '@/shared/ProtocolCard/types';
 import { useEchelonPositions, type EchelonPosition } from './useEchelonPositions';
 import { useEchelonRewards, type EchelonReward } from './useEchelonRewards';
 import { mapEchelonToProtocolPositions } from '@/components/protocols/echelon/mapEchelonToProtocolPositions';
+import { useEchelonPools, type EchelonPool } from './useEchelonPools';
 
 interface TokenInfo {
   symbol: string;
@@ -77,6 +78,52 @@ export function useEchelonProtocolCardModel(
     enabled,
     refetchOnMount: options?.refetchOnMount,
   });
+
+  const {
+    data: poolsResponse,
+    isLoading: poolsLoading,
+    isFetching: poolsFetching,
+  } = useEchelonPools({ enabled });
+
+  const echelonPools = (poolsResponse?.data ?? []) as EchelonPool[];
+
+  const poolsByMarketAddress = useMemo(() => {
+    const map = new Map<string, EchelonPool>();
+    for (const p of echelonPools) {
+      if (p.marketAddress) map.set(String(p.marketAddress), p);
+    }
+    return map;
+  }, [echelonPools]);
+
+  const poolsByTokenAddress = useMemo(() => {
+    const map = new Map<string, EchelonPool>();
+    for (const p of echelonPools) {
+      if ((p as any).token) map.set(normalizeAddr(String((p as any).token)), p);
+      if ((p as any).coinAddress) map.set(normalizeAddr(String((p as any).coinAddress)), p);
+      if ((p as any).faAddress) map.set(normalizeAddr(String((p as any).faAddress)), p);
+    }
+    return map;
+  }, [echelonPools]);
+
+  const getAprForPosition = useCallback(
+    (position: EchelonPosition): string | undefined => {
+      const byMarket = position.market ? poolsByMarketAddress.get(String(position.market)) : undefined;
+      const rawCoin = String(position.coin ?? '');
+      const cleanCoin = rawCoin ? normalizeAddr(rawCoin.startsWith('@') ? rawCoin.slice(1) : rawCoin) : '';
+      const byToken = cleanCoin ? poolsByTokenAddress.get(cleanCoin) : undefined;
+      const pool = byMarket ?? byToken;
+      if (!pool) return undefined;
+
+      const isBorrow = position.type === 'borrow';
+      const aprPctRaw = isBorrow
+        ? Number(pool.borrowAPY ?? 0) + Number(pool.borrowRewardsApr ?? 0)
+        : Number(pool.depositApy ?? pool.totalSupplyApr ?? 0);
+
+      if (!Number.isFinite(aprPctRaw) || aprPctRaw <= 0) return undefined;
+      return aprPctRaw.toFixed(2);
+    },
+    [poolsByMarketAddress, poolsByTokenAddress]
+  );
 
   const getTokenPrice = useCallback(
     (coinAddress: string): string => {
@@ -356,6 +403,7 @@ export function useEchelonProtocolCardModel(
       const price = priceRaw && priceRaw !== '0' ? parseFloat(priceRaw) : undefined;
       const value = price ? amount * price : 0;
       const positionType: 'supply' | 'borrow' = isBorrow ? 'borrow' : 'supply';
+      const apr = getAprForPosition(position);
 
       return {
         id: `echelon-${position.coin}-${position.type ?? 'position'}-${index}`,
@@ -364,6 +412,7 @@ export function useEchelonProtocolCardModel(
         logoUrl: tokenInfo?.logoUrl || undefined,
         amountLabel: formatNumber(amount, 4),
         price,
+        apr,
         type: positionType,
         _modal: {
           id: `echelon-${position.coin}-${position.type ?? 'position'}-${index}`,
@@ -386,7 +435,7 @@ export function useEchelonProtocolCardModel(
       protocolPositions: mapEchelonToProtocolPositions(forCard),
       modalRows: modalRowsLocal,
     };
-  }, [positions, getTokenInfo, getTokenPrice]);
+  }, [positions, getTokenInfo, getTokenPrice, getAprForPosition]);
 
   const totalRewardsUsdFormatted =
     rewardsValueUsd > 0
@@ -414,8 +463,8 @@ export function useEchelonProtocolCardModel(
     return out;
   }, [rewardsData, getRewardTokenInfoHelper, getTokenPrice]);
 
-  const isLoading = positionsLoading || rewardsLoading;
-  const isFetching = positionsFetching || rewardsFetching;
+  const isLoading = positionsLoading || rewardsLoading || poolsLoading;
+  const isFetching = positionsFetching || rewardsFetching || poolsFetching;
   const hasError = Boolean(positionsError);
 
   return {

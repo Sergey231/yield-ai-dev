@@ -23,11 +23,8 @@ const JUPITER_RECEIPT_MINT_EXCLUDE = new Set<string>([
   "GcV9tEj62VncGithz4o4N9x6HWXARxuRgEAYk9zahNA8",
 ]);
 
-const KNOWN_TOKENS: Record<
-  string,
-  { symbol: string; name: string }
-> = {
-  [WRAPPED_SOL_MINT]: { symbol: "SOL", name: "Solana" },
+const KNOWN_TOKENS: Record<string, { symbol: string; name: string; logoUrl?: string }> = {
+  [WRAPPED_SOL_MINT]: { symbol: "SOL", name: "Solana", logoUrl: "/token_ico/sol.png" },
 };
 
 export interface SolanaPortfolio {
@@ -42,6 +39,9 @@ export class SolanaPortfolioService {
   private static instance: SolanaPortfolioService;
   private connection: Connection;
   private rpcEndpoints: string[];
+  private static readonly PRICE_TTL_MS = 30_000;
+  private static priceCache = new Map<string, { price: number; expiresAt: number }>();
+  private static inFlightPriceBatches = new Map<string, Promise<Record<string, number>>>();
 
   private constructor() {
     // Build robust RPC list with key-safe Helius handling.
@@ -280,10 +280,18 @@ export class SolanaPortfolioService {
     });
 
     const metadataService = JupiterTokenMetadataService.getInstance();
-    const requestedMints = tokens.map((token) => token.address);
+    // Avoid depending on Jupiter metadata for SOL (frequently rate-limited); use known local fallback.
+    const requestedMints = tokens.map((token) => token.address).filter((m) => m !== WRAPPED_SOL_MINT);
     console.log(`[SolanaPortfolio] 🔍 Requesting metadata for ${requestedMints.length} mints:`, requestedMints);
     
     const metadataMap = await metadataService.getMetadataMap(requestedMints);
+    // Seed SOL metadata with local fallback so UI never shows sticky N/A for SOL.
+    metadataMap[WRAPPED_SOL_MINT] = {
+      symbol: KNOWN_TOKENS[WRAPPED_SOL_MINT]?.symbol,
+      name: KNOWN_TOKENS[WRAPPED_SOL_MINT]?.name,
+      logoUrl: KNOWN_TOKENS[WRAPPED_SOL_MINT]?.logoUrl,
+      decimals: 9,
+    };
     
     console.log(`[SolanaPortfolio] 📦 Received metadataMap with ${Object.keys(metadataMap).length} entries:`, 
       Object.keys(metadataMap).map(mint => ({
@@ -314,7 +322,7 @@ export class SolanaPortfolioService {
       });
 
       if (!metadata) {
-        console.warn(`[SolanaPortfolio] ⚠️ No metadata found for token: ${token.address} (symbol: ${token.symbol})`);
+        // Non-fatal; prices can still be fetched. Keep logs quiet to avoid noise on rate limits.
         continue;
       }
 
@@ -384,6 +392,30 @@ export class SolanaPortfolioService {
       });
     }
 
+    // Filter out likely NFTs from the wallet token list.
+    // We don't have Metaplex `tokenStandard` here, so use a conservative heuristic:
+    // - decimals == 0
+    // - raw amount == 1 (1-of-1)
+    // - no USD price from Jupiter price API
+    //
+    // This keeps fungible tokens with decimals 0 that still have a price.
+    const beforeNftFilter = tokens.length;
+    for (let i = tokens.length - 1; i >= 0; i--) {
+      const t = tokens[i];
+      if (!t) continue;
+      if (t.decimals !== 0) continue;
+      const raw = String(t.amount ?? "").trim();
+      if (raw !== "1") continue;
+      const price = priceMap[t.address];
+      const hasPrice = typeof price === "number" && Number.isFinite(price) && price > 0;
+      if (hasPrice) continue;
+      tokens.splice(i, 1);
+    }
+    const removedNfts = beforeNftFilter - tokens.length;
+    if (removedNfts > 0) {
+      console.log(`[SolanaPortfolio] 🧹 Filtered out likely NFTs: ${removedNfts}`);
+    }
+
     tokens.sort((a, b) => {
       const valueA = a.value ? parseFloat(a.value) : 0;
       const valueB = b.value ? parseFloat(b.value) : 0;
@@ -419,8 +451,33 @@ export class SolanaPortfolioService {
 
     const result: Record<string, number> = {};
 
+    const now = Date.now();
     const ids = [...new Set(mints)];
     const chunkSize = 50;
+
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const parseRetryAfterMs = (value: string | null): number | null => {
+      if (!value) return null;
+      const sec = Number(value);
+      if (Number.isFinite(sec) && sec > 0) return Math.min(60_000, Math.max(0, Math.floor(sec * 1000)));
+      const dt = Date.parse(value);
+      if (Number.isFinite(dt)) {
+        const ms = dt - Date.now();
+        return ms > 0 ? Math.min(60_000, ms) : 0;
+      }
+      return null;
+    };
+
+    // 1) Fill from fresh cache first
+    const pending: string[] = [];
+    for (const mint of ids) {
+      const cached = SolanaPortfolioService.priceCache.get(mint);
+      if (cached && cached.expiresAt > now) {
+        result[mint] = cached.price;
+      } else {
+        pending.push(mint);
+      }
+    }
 
     const fetchBatch = async (idsChunk: string[]) => {
       if (!idsChunk.length) return;
@@ -435,62 +492,122 @@ export class SolanaPortfolioService {
         
         // Добавляем API ключ, если он есть
         const apiKey = process.env.NEXT_PUBLIC_JUP_API_KEY || process.env.JUP_API_KEY;
-        console.log(`[SolanaPortfolio] 💰 Price API - API Key check:`, {
-          hasNextPublicKey: !!process.env.NEXT_PUBLIC_JUP_API_KEY,
-          hasJupApiKey: !!process.env.JUP_API_KEY,
-          finalApiKey: apiKey ? `${apiKey.substring(0, 8)}...` : 'NOT FOUND',
-          apiKeyLength: apiKey?.length || 0,
-        });
-        
         if (apiKey) {
           headers['x-api-key'] = apiKey;
-          console.log(`[SolanaPortfolio] ✅ Price API key added to headers`);
-        } else {
-          console.warn(`[SolanaPortfolio] ⚠️ No Price API key found! Check JUP_API_KEY or NEXT_PUBLIC_JUP_API_KEY env variable`);
         }
 
         // TODO: proxy Jupiter Price API through our backend service to avoid direct client calls.
-        const response = await fetch(url.toString(), { 
-          cache: "no-store",
-          headers,
-        });
-        
-        if (!response.ok) {
-          console.warn(`[SolanaPortfolio] Price API response not OK: ${response.status} ${response.statusText}`);
-          return;
+        const attemptFetch = async (): Promise<Response> => {
+          return await fetch(url.toString(), {
+            cache: "no-store",
+            headers,
+          });
+        };
+
+        const maxAttempts = 3;
+        let response: Response | null = null;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          response = await attemptFetch();
+          if (response.ok) break;
+
+          const status = response.status;
+          const retryable = status === 429 || (status >= 500 && status <= 599);
+          const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+          if (!retryable || attempt === maxAttempts) {
+            console.warn(
+              `[SolanaPortfolio] Price API response not OK: ${status} ${response.statusText} (attempt ${attempt}/${maxAttempts})`,
+            );
+            return;
+          }
+
+          const backoffMs = retryAfterMs ?? Math.min(4000, 500 * Math.pow(2, attempt - 1));
+          console.warn(
+            `[SolanaPortfolio] Price API retryable status ${status}; waiting ${backoffMs}ms (attempt ${attempt}/${maxAttempts})`,
+          );
+          await sleep(backoffMs);
         }
 
-        const data = (await response.json()) as Record<
-          string,
-          { usdPrice?: number }
-        >;
+        if (!response || !response.ok) return;
 
-        console.log(`[SolanaPortfolio] 💰 Price API response for chunk:`, {
-          requestedIds: idsChunk.length,
-          responseKeys: Object.keys(data).length,
-          responseData: Object.entries(data).map(([mint, value]) => ({
-            mint,
-            usdPrice: value?.usdPrice,
-            hasPrice: typeof value?.usdPrice === "number",
-          })),
-        });
+        const json = (await response.json().catch(() => null)) as unknown;
+        /**
+         * Jupiter Price API responses vary by version:
+         * - v3 commonly returns `{ data: { [mint]: { price: number } } }`
+         * - some gateways may return `{ [mint]: { usdPrice: number } }`
+         */
+        const dataObj = (() => {
+          if (!json || typeof json !== "object") return null;
+          const o = json as Record<string, unknown>;
+          const maybeData = o["data"];
+          if (maybeData && typeof maybeData === "object") return maybeData as Record<string, unknown>;
+          return o as Record<string, unknown>;
+        })();
 
-        for (const [mint, value] of Object.entries(data)) {
-          if (typeof value?.usdPrice === "number") {
-            result[mint] = value.usdPrice;
-            console.log(`[SolanaPortfolio] ✅ Price found for ${mint}: $${value.usdPrice}`);
-          } else {
-            console.warn(`[SolanaPortfolio] ⚠️ No valid price for ${mint}:`, value);
-          }
+        if (!dataObj) return;
+
+        for (const [mint, value] of Object.entries(dataObj)) {
+          const row = value as any;
+          const p =
+            typeof row?.usdPrice === "number"
+              ? row.usdPrice
+              : typeof row?.price === "number"
+                ? row.price
+                : NaN;
+          if (!Number.isFinite(p) || p <= 0) continue;
+          result[mint] = p;
+          SolanaPortfolioService.priceCache.set(mint, {
+            price: p,
+            expiresAt: Date.now() + SolanaPortfolioService.PRICE_TTL_MS,
+          });
         }
       } catch (error) {
         console.error("Failed to fetch Solana token prices:", error);
       }
     };
 
-    for (let i = 0; i < ids.length; i += chunkSize) {
-      const chunk = ids.slice(i, i + chunkSize);
-      await fetchBatch(chunk);
+    // 2) Fetch missing prices with coalescing per idsChunk
+    for (let i = 0; i < pending.length; i += chunkSize) {
+      const chunk = pending.slice(i, i + chunkSize);
+      const cacheKey = chunk.slice().sort().join(",");
+      const existing = SolanaPortfolioService.inFlightPriceBatches.get(cacheKey);
+      if (existing) {
+        const data = await existing;
+        for (const [mint, price] of Object.entries(data)) {
+          result[mint] = price;
+        }
+        continue;
+      }
+
+      const p = (async () => {
+        const before = { ...result };
+        await fetchBatch(chunk);
+        // Return only newly populated prices for this batch
+        const out: Record<string, number> = {};
+        for (const mint of chunk) {
+          const price = result[mint];
+          if (typeof price === "number" && price !== before[mint]) out[mint] = price;
+        }
+        return out;
+      })();
+
+      SolanaPortfolioService.inFlightPriceBatches.set(cacheKey, p);
+      try {
+        const data = await p;
+        for (const [mint, price] of Object.entries(data)) {
+          result[mint] = price;
+        }
+      } finally {
+        SolanaPortfolioService.inFlightPriceBatches.delete(cacheKey);
+      }
+    }
+
+    // 3) Stale-while-revalidate: if some are still missing, fall back to stale cache (even if expired)
+    for (const mint of ids) {
+      if (typeof result[mint] === "number") continue;
+      const cached = SolanaPortfolioService.priceCache.get(mint);
+      if (cached) {
+        result[mint] = cached.price;
+      }
     }
 
     return result;

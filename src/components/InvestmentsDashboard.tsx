@@ -95,7 +95,27 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
   const [showOnlyStablePools, setShowOnlyStablePools] = useState(true);
   const [activeTab, setActiveTab] = useState<"lite" | "pro">("lite");
   const { selectedProtocol, setSelectedProtocol } = useProtocol();
-  const { tokens: solanaTokens, refresh: refreshSolana } = useSolanaPortfolio();
+
+  const allowSolanaAddressOverride =
+    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "1" ||
+    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "true";
+  const isLikelySolanaAddress = (input: string): boolean => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(input);
+  const [solanaAddressOverride, setSolanaAddressOverride] = useState<string | null>(null);
+  useEffect(() => {
+    if (!allowSolanaAddressOverride) {
+      setSolanaAddressOverride(null);
+      return;
+    }
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      const raw = (sp.get("solanaAddress") || sp.get("solana") || "").trim();
+      setSolanaAddressOverride(raw && isLikelySolanaAddress(raw) ? raw : null);
+    } catch {
+      setSolanaAddressOverride(null);
+    }
+  }, [allowSolanaAddressOverride]);
+
+  const { tokens: solanaTokens, refresh: refreshSolana } = useSolanaPortfolio({ overrideAddress: solanaAddressOverride });
 
   // Protocols that are closed/winding down must not appear in Ideas pools filter
   const HIDDEN_IDEAS_PROTOCOLS = new Set(["Earnium", "Auro Finance", "Aries", "Meso Finance", "Moar Market"]);

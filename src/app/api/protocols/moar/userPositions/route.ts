@@ -3,6 +3,7 @@ import { getTokenInfo } from '@/lib/tokens/tokenRegistry';
 import { PanoraPricesService } from '@/lib/services/panora/prices';
 
 const APTOS_API_KEY = process.env.APTOS_API_KEY;
+const DEBUG_MOAR_LOGS = process.env.DEBUG_MOAR_LOGS === 'true';
 
 async function callView(functionFullname: string, args: any[]): Promise<any> {
   const url = 'https://fullnode.mainnet.aptoslabs.com/v1/view';
@@ -27,7 +28,7 @@ async function callView(functionFullname: string, args: any[]): Promise<any> {
 
   if (!res.ok) {
     const text = await res.text();
-    console.error('[Moar Market] VIEW ERROR:', functionFullname, 'args:', JSON.stringify(args), '->', res.status, res.statusText, text);
+    console.error('[Moar] view error:', functionFullname, 'args:', JSON.stringify(args), '->', res.status, res.statusText, text);
     throw new Error(`VIEW ERROR ${res.status} ${res.statusText}: ${text}`);
   }
   
@@ -129,20 +130,13 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    console.log('🔍 Moar Market userPositions API called with address:', address);
-    console.log('🔑 APTOS_API_KEY exists:', !!APTOS_API_KEY);
-
+    
     // Step 1: Get all available pools
     const poolsResponse = await callView('0xa3afc59243afb6deeac965d40b25d509bb3aebc12f502b8592c283070abc2e07::pool::get_all_pools', []);
-    console.log('📊 Moar Market pools response:', poolsResponse);
-    console.log('📊 Pools response type:', typeof poolsResponse);
-    console.log('📊 Pools response length:', Array.isArray(poolsResponse) ? poolsResponse.length : 'Not an array');
     
     // Extract the actual pools array from the response
     const pools = Array.isArray(poolsResponse) && poolsResponse.length > 0 ? poolsResponse[0] : poolsResponse;
-    console.log('📊 Extracted pools:', pools);
-    console.log('📊 Extracted pools count:', Array.isArray(pools) ? pools.length : 'Not an array');
-
+    
     const positions: any[] = [];
     const tokenAddresses = new Set<string>();
     const normalizeHex = (addr: string) => {
@@ -154,7 +148,7 @@ export async function GET(request: NextRequest) {
     for (let poolId = 0; poolId < pools.length; poolId++) {
       try {
         const positionData = await callView('0xa3afc59243afb6deeac965d40b25d509bb3aebc12f502b8592c283070abc2e07::lens::get_lp_shares_and_deposited_amount', [poolId.toString(), address]);
-        console.log(`📈 Pool ${poolId} position data:`, positionData);
+        if (DEBUG_MOAR_LOGS) console.log(`[Moar] pool ${poolId} position data:`, positionData);
 
         // positionData is an array: [lp_shares, deposited_amount, ...]
         const depositedAmount = positionData[1]; // Second number is deposited amount
@@ -162,7 +156,7 @@ export async function GET(request: NextRequest) {
         if (depositedAmount && depositedAmount !== '0') {
           const pool = pools[poolId];
           const underlyingAsset = pool.underlying_asset.inner;
-          console.log(`📝 Collecting token address for pool ${poolId}: ${underlyingAsset}`);
+          if (DEBUG_MOAR_LOGS) console.log(`[Moar] collecting token address for pool ${poolId}: ${underlyingAsset}`);
           tokenAddresses.add(underlyingAsset);
         }
       } catch (error) {
@@ -175,14 +169,14 @@ export async function GET(request: NextRequest) {
     let prices: Record<string, string> = {};
     if (tokenAddresses.size > 0) {
       try {
-        console.log('💰 Fetching prices for', tokenAddresses.size, 'tokens from Panora API');
+        if (DEBUG_MOAR_LOGS) console.log('[Moar] fetching prices for', tokenAddresses.size, 'tokens from Panora API');
         const pricesService = PanoraPricesService.getInstance();
         const pricesResponse = await pricesService.getPrices(1, Array.from(tokenAddresses));
         // Panora returns { data: TokenPrice[], status }; our wrapper may return { data: that } — normalize to array
         const raw = pricesResponse?.data ?? pricesResponse;
         const pricesArray = Array.isArray(raw) ? raw : (raw?.data ?? []);
         
-        console.log('💰 Got prices for', pricesArray.length, 'tokens');
+        if (DEBUG_MOAR_LOGS) console.log('[Moar] got prices for', pricesArray.length, 'tokens');
         
         // Build prices lookup with all possible address variations
         pricesArray.forEach((priceData: any) => {
@@ -201,9 +195,9 @@ export async function GET(request: NextRequest) {
           }
         });
         
-        console.log('💰 Prices lookup:', prices);
+        if (DEBUG_MOAR_LOGS) console.log('[Moar] prices lookup:', prices);
       } catch (error) {
-        console.warn('💰 Error fetching prices from Panora API:', error);
+        console.warn('[Moar] error fetching prices from Panora API:', error);
       }
     }
 
@@ -234,19 +228,25 @@ export async function GET(request: NextRequest) {
             
             const priceSource = 'Panora API';
             
-            console.log(`🔍 Looking for price of ${underlyingAsset}:`);
-            console.log(`  - Original (${underlyingAsset}): ${prices[underlyingAsset] || 'not found'}`);
-            console.log(`  - Normalized (${normalizedAsset}): ${prices[normalizedAsset] || 'not found'}`);
-            console.log(`  - Short (${shortAsset}): ${prices[shortAsset] || 'not found'}`);
-            console.log(`  - Selected: ${freshPrice}`);
-            console.log(`  - Available keys in prices:`, Object.keys(prices));
+            if (DEBUG_MOAR_LOGS) {
+              console.log(`[Moar] looking for price of ${underlyingAsset}:`);
+              console.log(`  - original (${underlyingAsset}): ${prices[underlyingAsset] || 'not found'}`);
+              console.log(`  - normalized (${normalizedAsset}): ${prices[normalizedAsset] || 'not found'}`);
+              console.log(`  - short (${shortAsset}): ${prices[shortAsset] || 'not found'}`);
+              console.log(`  - selected: ${freshPrice}`);
+              console.log('  - available keys in prices:', Object.keys(prices));
+            }
             
             // Calculate USD value with fresh price
             const amount = parseFloat(balanceOctas) / Math.pow(10, tokenInfo.decimals);
             const price = parseFloat(freshPrice);
             const value = amount * price;
 
-            console.log(`💰 ${tokenInfo.symbol}: ${amount.toFixed(6)} * $${price.toFixed(6)} = $${value.toFixed(2)} (${priceSource})`);
+            if (DEBUG_MOAR_LOGS) {
+              console.log(
+                `[Moar] ${tokenInfo.symbol}: ${amount.toFixed(6)} * $${price.toFixed(6)} = $${value.toFixed(2)} (${priceSource})`
+              );
+            }
 
             positions.push({
               poolId: poolId,
@@ -285,7 +285,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    console.log('✅ Moar Market positions found:', positions.length);
+    if (DEBUG_MOAR_LOGS) console.log('[Moar] positions found:', positions.length);
 
     return NextResponse.json({
       success: true,
