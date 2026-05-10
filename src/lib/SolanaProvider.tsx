@@ -60,11 +60,17 @@ export function SolanaProvider({ children }: { children: ReactNode }) {
         localStorageKey="walletName"
         onError={(error) => {
           const name = (error as { name?: string })?.name;
+          const message = (error as { message?: string })?.message ?? String(error ?? "");
+          const lower = message.toLowerCase();
           // Suppress expected errors during disconnect/reconnect flows
           if (
+            name === "UnauthorizedError" ||
             name === "WalletDisconnectedError" ||
             name === "WalletNotConnectedError" ||
-            name === "WalletNotSelectedError"
+            name === "WalletNotSelectedError" ||
+            lower.includes("not been authorized by the user") ||
+            lower.includes("not authorized by the user") ||
+            lower.includes("requested method and/or account has not been authorized")
           ) {
             return;
           }

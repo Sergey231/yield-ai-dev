@@ -35,14 +35,21 @@ import { useSolanaPortfolio } from "@/hooks/useSolanaPortfolio";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { ProtocolIcon } from "@/shared/ProtocolIcon/ProtocolIcon";
 import { useEffectiveWalletAddresses } from "@/lib/hooks/useEffectiveWalletAddresses";
+import { useAptosHasTransactions } from "@/lib/query/hooks/aptos/useAptosHasTransactions";
+import { isDerivedAptosWalletReliable } from "@/lib/aptosWalletUtils";
 
 function MobileTabsContent() {
   const [tab, setTab] = useState<"ideas" | "assets" | "chat">("assets");
   // Use native restore hook to ensure native Aptos wallets are reconnected
   const { account } = useAptosNativeRestore();
   // Also keep useWallet for other functionality
-  useWallet(); // Keep adapter state synced
+  const { wallet: aptosWallet } = useWallet(); // Keep adapter state synced
   const { effectiveAptosAddress, effectiveSolanaOverrideAddress } = useEffectiveWalletAddresses();
+  const isAptosDerived = isDerivedAptosWalletReliable(aptosWallet);
+  const aptosHasTxQuery = useAptosHasTransactions(effectiveAptosAddress ?? undefined, {
+    enabled: Boolean(effectiveAptosAddress) && isAptosDerived,
+  });
+  const shouldCheckAptosProtocols = !isAptosDerived || Boolean(aptosHasTxQuery.data?.hasTransactions);
   const {
     address: solanaAddress,
     protocolsAddress: solanaProtocolsAddress,
@@ -71,7 +78,10 @@ function MobileTabsContent() {
   const [yieldAIValue, setYieldAIValue] = useState<number>(0);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [refreshKey, setRefreshKey] = useState<number>(0);
-  const [checkingProtocols, setCheckingProtocols] = useState<string[]>([]);
+  const [checkingAptosProtocols, setCheckingAptosProtocols] = useState<string[]>([]);
+  const [checkingSolanaProtocols, setCheckingSolanaProtocols] = useState<string[]>([]);
+  const [aptosCheckRunId, setAptosCheckRunId] = useState(0);
+  const [solanaCheckRunId, setSolanaCheckRunId] = useState(0);
 
   const APTOS_PROTOCOL_NAMES = [
     "Hyperion",
@@ -93,11 +103,33 @@ function MobileTabsContent() {
   ];
   const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino"];
 
-  const resetChecking = useCallback(() => {
-    setCheckingProtocols(
-      solanaAddress ? [...APTOS_PROTOCOL_NAMES, ...SOLANA_PROTOCOL_NAMES] : [...APTOS_PROTOCOL_NAMES]
-    );
-  }, [solanaAddress]);
+  const resetAptosChecking = useCallback(() => {
+    setAptosCheckRunId((x) => x + 1);
+    setCheckingAptosProtocols(shouldCheckAptosProtocols ? [...APTOS_PROTOCOL_NAMES] : []);
+  }, [shouldCheckAptosProtocols]);
+
+  const resetSolanaChecking = useCallback(() => {
+    setSolanaCheckRunId((x) => x + 1);
+    setCheckingSolanaProtocols([...SOLANA_PROTOCOL_NAMES]);
+  }, []);
+
+  useEffect(() => {
+    if (!effectiveAptosAddress || checkingAptosProtocols.length === 0) return;
+    const runId = aptosCheckRunId;
+    const t = window.setTimeout(() => {
+      setCheckingAptosProtocols((prev) => (aptosCheckRunId === runId ? [] : prev));
+    }, 30_000);
+    return () => window.clearTimeout(t);
+  }, [aptosCheckRunId, checkingAptosProtocols.length, effectiveAptosAddress]);
+
+  useEffect(() => {
+    if (!solanaAddress || checkingSolanaProtocols.length === 0) return;
+    const runId = solanaCheckRunId;
+    const t = window.setTimeout(() => {
+      setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? [] : prev));
+    }, 30_000);
+    return () => window.clearTimeout(t);
+  }, [solanaCheckRunId, checkingSolanaProtocols.length, solanaAddress]);
 
   // When set (e.g. "decibel" or "decibel,thala"), only these protocols are shown and fetched
   const debugProtocolKeys =
@@ -139,27 +171,30 @@ function MobileTabsContent() {
   // In WebView mode, refresh read-only data after native wallet_connected.
   useEffect(() => {
     const onWalletChanged = () => {
-      resetChecking();
+      if (effectiveAptosAddress) resetAptosChecking();
+      if (solanaAddress) resetSolanaChecking();
       // Fire-and-forget; individual hooks/services handle their own loading states.
       refreshSolana().catch(() => {});
     };
     window.addEventListener("yieldai:wallet-changed", onWalletChanged as EventListener);
     return () => window.removeEventListener("yieldai:wallet-changed", onWalletChanged as EventListener);
-  }, [resetChecking, refreshSolana]);
+  }, [effectiveAptosAddress, refreshSolana, resetAptosChecking, resetSolanaChecking, solanaAddress]);
 
   useEffect(() => {
     if (effectiveAptosAddress) {
-      resetChecking();
+      resetAptosChecking();
     } else {
-      setCheckingProtocols([]);
+      setCheckingAptosProtocols([]);
     }
-  }, [effectiveAptosAddress, resetChecking]);
+  }, [effectiveAptosAddress, resetAptosChecking]);
 
   useEffect(() => {
-    if (!effectiveAptosAddress) return;
-    // Keep checking list in sync when Solana wallet connects/disconnects
-    resetChecking();
-  }, [effectiveAptosAddress, solanaProtocolsAddress, resetChecking]);
+    if (!solanaAddress) {
+      setCheckingSolanaProtocols([]);
+      return;
+    }
+    resetSolanaChecking();
+  }, [resetSolanaChecking, solanaAddress]);
 
   // Обработчики изменения суммы позиций в протоколах
   const handleHyperionValueChange = (value: number) => {
@@ -252,7 +287,8 @@ function MobileTabsContent() {
       setDecibelValue(0);
       setAptreeValue(0);
       setYieldAIValue(0);
-      resetChecking();
+      if (effectiveAptosAddress) resetAptosChecking();
+      if (solanaAddress) resetSolanaChecking();
       setRefreshKey((k) => k + 1);
 
       setTotalValue(total.toFixed(2));
@@ -301,11 +337,11 @@ function MobileTabsContent() {
                       isRefreshing={isRefreshing}
                       hasSolanaWallet={!!solanaAddress}
                     />
-                    {checkingProtocols.length > 0 && (
+                    {checkingAptosProtocols.length > 0 && (
                       <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
                         <span className="whitespace-nowrap">Checking positions on</span>
                         <div className="flex items-center gap-1">
-                          {checkingProtocols.map((name) => {
+                          {checkingAptosProtocols.map((name) => {
                             const proto = getProtocolByName(name);
                             const logo =
                               name === "Kamino" ? "/protocol_ico/kamino.png" : proto?.logoUrl || "/favicon.ico";
@@ -322,7 +358,7 @@ function MobileTabsContent() {
                         </div>
                       </div>
                     )}
-                    {(() => {
+                    {shouldCheckAptosProtocols ? (() => {
                       const protocolItems = [
                         { component: HyperionPositionsList, value: hyperionValue, name: 'Hyperion', handler: handleHyperionValueChange },
                         { component: EchelonPositionsList, value: echelonValue, name: 'Echelon', handler: handleEchelonValueChange },
@@ -356,12 +392,13 @@ function MobileTabsContent() {
                             onPositionsValueChange={handler}
                             walletTokens={tokens}
                             refreshKey={refreshKey}
-                            onPositionsCheckComplete={() =>
-                              setCheckingProtocols((prev) => prev.filter((p) => p !== name))
-                            }
+                            onPositionsCheckComplete={() => {
+                              const runId = aptosCheckRunId;
+                              setCheckingAptosProtocols((prev) => (aptosCheckRunId === runId ? prev.filter((p) => p !== name) : prev));
+                            }}
                           />
                         ));
-                    })()}
+                    })() : null}
                   </>
                 )}
                 
@@ -374,17 +411,40 @@ function MobileTabsContent() {
                       onRefresh={refreshSolana}
                       isRefreshing={isSolanaLoading}
                     />
+                    {checkingSolanaProtocols.length > 0 && (
+                      <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
+                        <span className="whitespace-nowrap">Checking positions on</span>
+                        <div className="flex items-center gap-1">
+                          {checkingSolanaProtocols.map((name) => {
+                            const proto = getProtocolByName(name);
+                            const logo =
+                              name === "Kamino" ? "/protocol_ico/kamino.png" : proto?.logoUrl || "/favicon.ico";
+                            return (
+                              <ProtocolIcon
+                                key={name}
+                                logoUrl={logo}
+                                name={name}
+                                size="sm"
+                                isLoading={true}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                     <JupiterPositionsList
                       address={solanaProtocolsAddress ?? undefined}
-                      onPositionsCheckComplete={() =>
-                        setCheckingProtocols((prev) => prev.filter((p) => p !== "Jupiter"))
-                      }
+                      onPositionsCheckComplete={() => {
+                        const runId = solanaCheckRunId;
+                        setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Jupiter") : prev));
+                      }}
                     />
                     <KaminoPositionsList
                       address={solanaProtocolsAddress ?? undefined}
-                      onPositionsCheckComplete={() =>
-                        setCheckingProtocols((prev) => prev.filter((p) => p !== "Kamino"))
-                      }
+                      onPositionsCheckComplete={() => {
+                        const runId = solanaCheckRunId;
+                        setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Kamino") : prev));
+                      }}
                     />
                     <SolanaSignMessageButton />
                   </div>

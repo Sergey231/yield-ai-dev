@@ -47,10 +47,12 @@ function getExecutorAccount(): Account {
   return account;
 }
 
+type ExecutorArg = string | number | bigint | number[] | Uint8Array;
+
 async function buildAndSubmit(options: {
   function: string;
   typeArguments?: string[];
-  functionArguments: (string | number | bigint)[];
+  functionArguments: ExecutorArg[];
   maxGasAmount?: number;
   dryRun?: boolean;
   logPrefix?: string;
@@ -90,9 +92,12 @@ async function buildAndSubmit(options: {
     data: {
       function: fn as EntryFunctionId,
       typeArguments,
-      functionArguments: functionArguments.map((a) =>
-        typeof a === "bigint" ? a.toString() : String(a)
-      ),
+      functionArguments: functionArguments.map((a) => {
+        if (a instanceof Uint8Array) return a;
+        if (Array.isArray(a)) return Uint8Array.from(a);
+        if (typeof a === "bigint") return a.toString();
+        return String(a);
+      }),
     },
     options: { maxGasAmount },
   });
@@ -123,6 +128,25 @@ async function buildAndSubmit(options: {
   console.log(`${logPrefix} tx confirmed on-chain:`, { hash, function: fn });
 
   return { hash, dryRun: false };
+}
+
+export async function submitYieldAiExecutorEntryFunction(options: {
+  fn: string;
+  typeArguments?: string[];
+  functionArguments: ExecutorArg[];
+  maxGasAmount?: number;
+  dryRun?: boolean;
+  logPrefix?: string;
+}) {
+  const { fn, typeArguments, functionArguments, maxGasAmount, dryRun, logPrefix } = options;
+  return buildAndSubmit({
+    function: fn,
+    typeArguments,
+    functionArguments,
+    maxGasAmount,
+    dryRun,
+    logPrefix,
+  });
 }
 
 export async function executeClaimApt(options: {

@@ -21,6 +21,10 @@ export interface ProtocolCardProps {
   totalRewardsUsd?: string;
   /** Optional tooltip body (e.g. per-token breakdown), shown when hovering the rewards row. */
   rewardsBreakdown?: ReactNode;
+  /** Optional extra block inside expanded content (below positions). */
+  extraContent?: ReactNode;
+  /** Optional block rendered below rewards row and above Manage Positions. */
+  belowRewardsContent?: ReactNode;
   /**
    * Match Echelon sidebar: border-top, text-sm label/value, rewards row after positions.
    * When false, uses compact ProtocolCard styles.
@@ -38,6 +42,8 @@ export function ProtocolCard({
   totalValue,
   totalRewardsUsd,
   rewardsBreakdown,
+  extraContent,
+  belowRewardsContent,
   rewardsEchelonStyle = false,
   positions = [],
   isLoading = false,
@@ -83,6 +89,7 @@ export function ProtocolCard({
             positions.map((pos, i) => (
               <ProtocolCardPosition key={pos.id ?? i} position={pos} />
             ))}
+          {extraContent}
           {totalRewardsUsd &&
             (rewardsBreakdown ? (
               <TooltipProvider>
@@ -136,6 +143,7 @@ export function ProtocolCard({
                 </span>
               </div>
             ))}
+          {belowRewardsContent}
           {showManageButton && <ManagePositionsButton protocol={protocol} />}
         </div>
       )}

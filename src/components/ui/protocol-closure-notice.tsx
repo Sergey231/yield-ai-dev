@@ -31,6 +31,12 @@ const CLOSURE_NOTICES: Partial<Record<ProtocolKey, ClosureNotice>> = {
       "Moar is entering reduce-only mode. No new positions can be opened. Assets remain available for withdrawal.",
     url: "https://x.com/MoarMarket/status/2045161640656535643",
   },
+  tapp: {
+    title: "Tapp Exchange is winding down",
+    description:
+      "Tapp Exchange is winding down. Please withdraw your assets before May 31, 2026. After that, withdrawals will require direct on-chain interaction.",
+    url: "https://x.com/TappExchange/status/2050138465288012148",
+  },
 };
 
 export function ProtocolClosureNotice({

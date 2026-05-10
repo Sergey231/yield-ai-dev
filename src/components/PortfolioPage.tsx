@@ -81,7 +81,10 @@ export default function PortfolioPage() {
   const [kaminoValue, setKaminoValue] = useState(0);
   const [yieldAIValue, setYieldAIValue] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [checkingProtocols, setCheckingProtocols] = useState<string[]>([]);
+  const [checkingAptosProtocols, setCheckingAptosProtocols] = useState<string[]>([]);
+  const [checkingSolanaProtocols, setCheckingSolanaProtocols] = useState<string[]>([]);
+  const [aptosCheckRunId, setAptosCheckRunId] = useState(0);
+  const [solanaCheckRunId, setSolanaCheckRunId] = useState(0);
   const [refreshKey, setRefreshKey] = useState(0);
   const [isYieldCalcOpen, setIsYieldCalcOpen] = useState(false);
   const [hideSmallAssets, setHideSmallAssets] = useState(true);
@@ -258,12 +261,33 @@ export default function PortfolioPage() {
   ];
   const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino"];
 
-  const resetChecking = useCallback(() => {
-    const next: string[] = [];
-    if (resolvedAptosAddress) next.push(...APTOS_PROTOCOL_NAMES);
-    if (solanaProtocolsAddress) next.push(...SOLANA_PROTOCOL_NAMES);
-    setCheckingProtocols(next);
-  }, [resolvedAptosAddress, solanaProtocolsAddress]);
+  const resetAptosChecking = useCallback(() => {
+    setAptosCheckRunId((x) => x + 1);
+    setCheckingAptosProtocols(resolvedAptosAddress ? [...APTOS_PROTOCOL_NAMES] : []);
+  }, [resolvedAptosAddress]);
+
+  const resetSolanaChecking = useCallback(() => {
+    setSolanaCheckRunId((x) => x + 1);
+    setCheckingSolanaProtocols(solanaProtocolsAddress ? [...SOLANA_PROTOCOL_NAMES] : []);
+  }, [solanaProtocolsAddress]);
+
+  useEffect(() => {
+    if (!resolvedAptosAddress || checkingAptosProtocols.length === 0) return;
+    const runId = aptosCheckRunId;
+    const t = window.setTimeout(() => {
+      setCheckingAptosProtocols((prev) => (aptosCheckRunId === runId ? [] : prev));
+    }, 30_000);
+    return () => window.clearTimeout(t);
+  }, [aptosCheckRunId, checkingAptosProtocols.length, resolvedAptosAddress]);
+
+  useEffect(() => {
+    if (!solanaProtocolsAddress || checkingSolanaProtocols.length === 0) return;
+    const runId = solanaCheckRunId;
+    const t = window.setTimeout(() => {
+      setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? [] : prev));
+    }, 30_000);
+    return () => window.clearTimeout(t);
+  }, [solanaCheckRunId, checkingSolanaProtocols.length, solanaProtocolsAddress]);
 
   const loadPortfolio = useCallback(async () => {
     if (!resolvedAptosAddress) {
@@ -307,9 +331,10 @@ export default function PortfolioPage() {
     setJupiterValue(0);
     setKaminoValue(0);
     setYieldAIValue(0);
-    resetChecking();
+    resetAptosChecking();
+    resetSolanaChecking();
     setRefreshKey((k) => k + 1);
-  }, [loadPortfolio, refreshSolana, resetChecking]);
+  }, [loadPortfolio, refreshSolana, resetAptosChecking, resetSolanaChecking]);
 
   useEffect(() => {
     void loadPortfolio();
@@ -317,11 +342,13 @@ export default function PortfolioPage() {
 
   useEffect(() => {
     if (resolvedAptosAddress || solanaProtocolsAddress) {
-      resetChecking();
+      resetAptosChecking();
+      resetSolanaChecking();
     } else {
-      setCheckingProtocols([]);
+      setCheckingAptosProtocols([]);
+      setCheckingSolanaProtocols([]);
     }
-  }, [resolvedAptosAddress, solanaProtocolsAddress, resetChecking]);
+  }, [resolvedAptosAddress, solanaProtocolsAddress, resetAptosChecking, resetSolanaChecking]);
 
   useEffect(() => {
     if (!solanaProtocolsAddress) {
@@ -585,7 +612,7 @@ export default function PortfolioPage() {
                   <PortfolioChart
                     data={chartSectors}
                     totalValue={chartTotalAssets.toString()}
-                    isLoading={checkingProtocols.length > 0 || isRefreshing}
+                    isLoading={(checkingAptosProtocols.length > 0 || checkingSolanaProtocols.length > 0) || isRefreshing}
                   />
                 </div>
                 {showChartDownload ? (
@@ -631,11 +658,11 @@ export default function PortfolioPage() {
                             addressFieldError={aptosFieldError}
                           />
                           ) : null}
-                          {checkingProtocols.length > 0 && (
+                          {checkingAptosProtocols.length > 0 && (
                             <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
                               <span className="whitespace-nowrap">Checking positions on</span>
                               <div className="flex items-center gap-1">
-                                {checkingProtocols.map((name) => {
+                                {checkingAptosProtocols.map((name) => {
                                   const proto = getProtocolByName(name);
                                   const logo =
                                     name === "Kamino" ? "/protocol_ico/kamino.png" : proto?.logoUrl || "/favicon.ico";
@@ -778,9 +805,10 @@ export default function PortfolioPage() {
                                 undefined
                               }
                               onMainnetValueChange={name === 'Decibel' ? handleDecibelMainnetValueChange : undefined}
-                              onPositionsCheckComplete={() =>
-                                setCheckingProtocols((prev) => prev.filter((p) => p !== name))
-                              }
+                              onPositionsCheckComplete={() => {
+                                const runId = aptosCheckRunId;
+                                setCheckingAptosProtocols((prev) => (aptosCheckRunId === runId ? prev.filter((p) => p !== name) : prev));
+                              }}
                             />
                           )) : null}
                         </div>
@@ -821,6 +849,27 @@ export default function PortfolioPage() {
                         hideSmallAssets={hideSmallAssets}
                         onHideSmallAssetsChange={setHideSmallAssets}
                       />
+                      {checkingSolanaProtocols.length > 0 && (
+                        <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
+                          <span className="whitespace-nowrap">Checking positions on</span>
+                          <div className="flex items-center gap-1">
+                            {checkingSolanaProtocols.map((name) => {
+                              const proto = getProtocolByName(name);
+                              const logo =
+                                name === "Kamino" ? "/protocol_ico/kamino.png" : proto?.logoUrl || "/favicon.ico";
+                              return (
+                                <ProtocolIcon
+                                  key={name}
+                                  logoUrl={logo}
+                                  name={name}
+                                  size="sm"
+                                  isLoading={true}
+                                />
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                       {[
                         {
                           component: JupiterPositionsList,
@@ -842,9 +891,10 @@ export default function PortfolioPage() {
                             address={solanaProtocolsAddress ?? undefined}
                             showManageButton={false}
                             onPositionsValueChange={onValue}
-                            onPositionsCheckComplete={() =>
-                              setCheckingProtocols((prev) => prev.filter((p) => p !== name))
-                            }
+                            onPositionsCheckComplete={() => {
+                              const runId = solanaCheckRunId;
+                              setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== name) : prev));
+                            }}
                           />
                         ))}
                       {solanaManual === null && !solanaUrlAddress && solanaAddress ? (
@@ -867,7 +917,7 @@ export default function PortfolioPage() {
             <PortfolioChart
               data={chartSectors}
               totalValue={chartTotalAssets.toString()}
-              isLoading={checkingProtocols.length > 0 || isRefreshing}
+              isLoading={(checkingAptosProtocols.length > 0 || checkingSolanaProtocols.length > 0) || isRefreshing}
             />
           </div>
           {showChartDownload ? (

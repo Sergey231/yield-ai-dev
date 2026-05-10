@@ -24,7 +24,7 @@ type JupiterTokenPriceRow = {
   usdPrice?: number;
 };
 
-type KaminoVaultMetrics = {
+type KaminoVaultMetrics = Record<string, unknown> & {
   apy?: string | number;
 };
 
@@ -44,13 +44,71 @@ const CACHE_VAULTS_TTL_MS = 60 * 60 * 1000; // 1h
 let marketsCache: TimedCache<KaminoMarketRow[]> | null = null;
 let vaultCatalogCache: TimedCache<KaminoVaultCatalogRow[]> | null = null;
 
+type KaminoUserPositionsApiResponse =
+  | { success: true; data: unknown[]; count: number; meta?: any; debug?: any }
+  | { success: false; error: string; data: unknown[]; count: number };
+
+type KaminoUserPositionsSWR = {
+  freshUntilMs: number;
+  staleUntilMs: number;
+  payload: KaminoUserPositionsApiResponse;
+};
+
+const USER_POSITIONS_FRESH_TTL_MS = 30_000;
+const USER_POSITIONS_STALE_TTL_MS = 15 * 60_000;
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getGlobalInFlight(): Map<string, Promise<unknown>> {
+  const g = globalThis as any;
+  g.__kaminoUserPositionsInFlight ??= new Map<string, Promise<unknown>>();
+  return g.__kaminoUserPositionsInFlight as Map<string, Promise<unknown>>;
+}
+
+function getGlobalSWRCache(): Map<string, KaminoUserPositionsSWR> {
+  const g = globalThis as any;
+  g.__kaminoUserPositionsSWR ??= new Map<string, KaminoUserPositionsSWR>();
+  return g.__kaminoUserPositionsSWR as Map<string, KaminoUserPositionsSWR>;
+}
+
+function getGlobalRefreshInFlight(): Map<string, Promise<void>> {
+  const g = globalThis as any;
+  g.__kaminoUserPositionsRefreshInFlight ??= new Map<string, Promise<void>>();
+  return g.__kaminoUserPositionsRefreshInFlight as Map<string, Promise<void>>;
 }
 
 function isCacheFresh(entry: TimedCache<unknown> | null, ttlMs: number): boolean {
   if (!entry) return false;
   return Date.now() - entry.atMs <= ttlMs;
+}
+
+async function mapWithConcurrencyLimit<T, R>(
+  items: T[],
+  limit: number,
+  mapper: (item: T, idx: number) => Promise<R>
+): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let nextIdx = 0;
+  const workers = Array.from({ length: Math.max(1, limit) }, async () => {
+    while (true) {
+      const i = nextIdx++;
+      if (i >= items.length) break;
+      out[i] = await mapper(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+function shouldRetryStatus(status: number): boolean {
+  return (
+    status === 429 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  );
 }
 
 async function getKaminoMarketsCached(): Promise<KaminoMarketRow[]> {
@@ -102,7 +160,16 @@ function getDeep(obj: unknown, path: string): unknown {
   return current;
 }
 
-type ReserveMeta = { mint?: string; symbol?: string; logoUrl?: string; priceUsd?: number };
+type ReserveMeta = {
+  mint?: string;
+  symbol?: string;
+  logoUrl?: string;
+  priceUsd?: number;
+  /** Fraction, e.g. 0.054 = 5.4% */
+  borrowApy?: number;
+  /** Fraction, e.g. 0.038 = 3.8% */
+  supplyApy?: number;
+};
 
 type TokenMeta = { symbol?: string; logoUrl?: string; decimals?: number };
 
@@ -189,7 +256,20 @@ function buildReserveMetaByReservePubkey(rows: KaminoReserveMetricsRow[]): Recor
       totalSupply && totalSupplyUsd && totalSupply.greaterThan(0)
         ? totalSupplyUsd.div(totalSupply).toNumber()
         : undefined;
-    out[reserve] = { mint, symbol, priceUsd: typeof priceUsd === "number" && Number.isFinite(priceUsd) && priceUsd > 0 ? priceUsd : undefined };
+    const borrowApyRaw = Number(getDeep(r, "borrowApy"));
+    const supplyApyRaw = Number(getDeep(r, "supplyApy"));
+    const borrowApy =
+      Number.isFinite(borrowApyRaw) && borrowApyRaw > 0 ? borrowApyRaw : undefined;
+    const supplyApy =
+      Number.isFinite(supplyApyRaw) && supplyApyRaw > 0 ? supplyApyRaw : undefined;
+    out[reserve] = {
+      mint,
+      symbol,
+      priceUsd:
+        typeof priceUsd === "number" && Number.isFinite(priceUsd) && priceUsd > 0 ? priceUsd : undefined,
+      borrowApy,
+      supplyApy,
+    };
   }
   return out;
 }
@@ -258,6 +338,10 @@ function slimKaminoObligation(
           if (!hasDeposit && depositedAmountSf === "0") return null;
 
           const meta = reserveMetaByReserve[depositReserve] ?? {};
+          const supplyApyPct =
+            typeof meta.supplyApy === "number" && Number.isFinite(meta.supplyApy) && meta.supplyApy > 0
+              ? meta.supplyApy * 100
+              : 0;
           const mint = (meta.mint || "").trim();
           const symbol = (meta.symbol || "").trim();
           const known = mint ? KNOWN_SOLANA_TOKEN_BY_MINT[mint] : undefined;
@@ -292,6 +376,8 @@ function slimKaminoObligation(
             tokenMint: mint || undefined,
             tokenSymbol: tokenMeta?.symbol || known?.symbol || symbol || undefined,
             tokenLogoUrl: tokenMeta?.logoUrl || logoUrl,
+            tokenDecimals: typeof decimals === "number" ? decimals : undefined,
+            supplyApyPct,
           };
         })
         .filter((x): x is NonNullable<typeof x> => Boolean(x))
@@ -316,6 +402,10 @@ function slimKaminoObligation(
           if (mv) marketValueUsd = mv.toNumber();
 
           const meta = reserveMetaByReserve[borrowReserve] ?? {};
+          const borrowApyPct =
+            typeof meta.borrowApy === "number" && Number.isFinite(meta.borrowApy) && meta.borrowApy > 0
+              ? meta.borrowApy * 100
+              : 0;
           const mint = (meta.mint || "").trim();
           const symbol = (meta.symbol || "").trim();
           const known = mint ? KNOWN_SOLANA_TOKEN_BY_MINT[mint] : undefined;
@@ -349,6 +439,8 @@ function slimKaminoObligation(
             tokenMint: mint || undefined,
             tokenSymbol: tokenMeta?.symbol || known?.symbol || symbol || undefined,
             tokenLogoUrl: tokenMeta?.logoUrl || logoUrl,
+            tokenDecimals: typeof decimals === "number" ? decimals : undefined,
+            borrowApyPct,
           };
         })
         .filter((x): x is NonNullable<typeof x> => Boolean(x))
@@ -376,14 +468,23 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+    let retryAfterMs = 0;
     try {
       const response = await fetch(url, init);
       if (response.ok) return response;
 
-      const shouldRetry =
-        response.status === 502 || response.status === 503 || response.status === 504;
+      const status = response.status;
+      const retryable = shouldRetryStatus(status);
+      const retryAfterHeader = response.headers.get("retry-after");
+      retryAfterMs = retryAfterHeader
+        ? Math.max(0, Math.floor(Number(retryAfterHeader) * 1000))
+        : 0;
 
-      if (!shouldRetry || attempt === RETRY_ATTEMPTS) {
+      if (status === 429) {
+        console.warn("[Kamino] rate limited", { url, attempt, status, retryAfterHeader });
+      }
+
+      if (!retryable || attempt === RETRY_ATTEMPTS) {
         return response;
       }
     } catch (error) {
@@ -391,7 +492,11 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
       if (attempt === RETRY_ATTEMPTS) break;
     }
 
-    await sleep(RETRY_DELAY_MS);
+    // Respect Retry-After when present; otherwise use fixed backoff.
+    // Add a small jitter to spread concurrent retries.
+    const jitter = Math.floor(Math.random() * 250);
+    const waitMs = Math.max(RETRY_DELAY_MS, retryAfterMs) + jitter;
+    await sleep(waitMs);
   }
 
   throw lastError instanceof Error ? lastError : new Error("Kamino request failed after retries");
@@ -480,25 +585,59 @@ function toApyPct(apyFraction: unknown): number {
   return apy * 100;
 }
 
-async function fetchVaultAprPctMap(vaultAddresses: string[]): Promise<Map<string, number>> {
-  const out = new Map<string, number>();
+function extractExchangeRateFromVaultMetrics(metrics: KaminoVaultMetrics | null): Decimal | null {
+  if (!metrics || typeof metrics !== "object") return null;
+  const candidates = [
+    // Common names used across vault implementations.
+    "exchangeRate",
+    "pricePerShare",
+    "sharePrice",
+    "tokensPerShare",
+    "shareToTokenRate",
+    "rate",
+    // Sometimes nested
+    "data.exchangeRate",
+    "data.pricePerShare",
+  ];
+  for (const key of candidates) {
+    const v = key.includes(".") ? getDeep(metrics, key) : (metrics as any)[key];
+    const d = parseDecimal(v);
+    if (d && d.isFinite() && d.greaterThan(0)) return d;
+  }
+  return null;
+}
+
+async function fetchVaultMetricsSummaryMap(vaultAddresses: string[]): Promise<{
+  aprPctByVault: Map<string, number>;
+  exchangeRateByVault: Map<string, Decimal>;
+}> {
+  const aprPctByVault = new Map<string, number>();
+  const exchangeRateByVault = new Map<string, Decimal>();
   const uniq = Array.from(new Set(vaultAddresses.map((v) => (v || "").trim()).filter(Boolean)));
-  for (const va of uniq) {
+  if (uniq.length === 0) return { aprPctByVault, exchangeRateByVault };
+
+  const CONCURRENCY = 6;
+  await mapWithConcurrencyLimit(uniq, CONCURRENCY, async (va) => {
     try {
       const res = await fetchWithRetry(`${KAMINO_API_BASE_URL}/kvaults/vaults/${va}/metrics`, {
         method: "GET",
         headers: { Accept: "application/json" },
         cache: "no-store",
       });
-      if (!res.ok) continue;
+      if (!res.ok) return;
       const metrics = (await res.json().catch(() => null)) as KaminoVaultMetrics | null;
+
       const aprPct = toApyPct(metrics?.apy);
-      if (Number.isFinite(aprPct) && aprPct > 0) out.set(va, aprPct);
+      if (Number.isFinite(aprPct) && aprPct > 0) aprPctByVault.set(va, aprPct);
+
+      const rate = extractExchangeRateFromVaultMetrics(metrics);
+      if (rate) exchangeRateByVault.set(va, rate);
     } catch {
       // ignore
     }
-  }
-  return out;
+  });
+
+  return { aprPctByVault, exchangeRateByVault };
 }
 
 function hasEarnVaultBalance(item: unknown): boolean {
@@ -555,7 +694,7 @@ function enrichEarnPositionPayload(pos: unknown, vaultMetaByAddress: Map<string,
   return out;
 }
 
-async function fetchVaultExchangeRateMap(vaultAddresses: string[]): Promise<Map<string, Decimal>> {
+async function fetchVaultExchangeRateMapViaSdk(vaultAddresses: string[]): Promise<Map<string, Decimal>> {
   const out = new Map<string, Decimal>();
   const uniq = Array.from(new Set(vaultAddresses.map((v) => (v || "").trim()).filter(Boolean)));
   for (const va of uniq) {
@@ -786,6 +925,11 @@ export async function GET(request: NextRequest) {
     const address = (searchParams.get("address") || "").trim();
     const debug = isTruthyParam(searchParams.get("debug"));
     const refreshCache = isTruthyParam(searchParams.get("refreshcache"));
+    const tStart = Date.now();
+    const timingsMs: Record<string, number> = {};
+    const mark = (k: string, startedAt: number) => {
+      timingsMs[k] = Date.now() - startedAt;
+    };
 
     if (!address) {
       return NextResponse.json(
@@ -808,229 +952,360 @@ export async function GET(request: NextRequest) {
       reservesCache?.clear();
     }
 
-    const marketList = await getKaminoMarketsCached();
+    const computePayloadInternal = async (opts: {
+      debugFlag: boolean;
+      refreshCacheFlag: boolean;
+    }): Promise<KaminoUserPositionsApiResponse> => {
+      const tStartLocal = Date.now();
+      const timingsLocal: Record<string, number> = {};
+      const markLocal = (k: string, startedAt: number) => {
+        timingsLocal[k] = Date.now() - startedAt;
+      };
 
-    // Preload reserve->mint/symbol maps for all markets.
-    const reserveMetricsByMarket = await Promise.all(
-      marketList.map(async (m) => {
-        const mk = (m?.lendingMarket || "").trim();
-        if (!mk) return { market: mk, rows: [] as KaminoReserveMetricsRow[] };
-        const rows = await fetchMarketReservesMetricsCached(mk);
-        return { market: mk, rows };
-      })
-    );
-    const reserveMetaByMarket = new Map<string, Record<string, ReserveMeta>>();
-    const reserveMints: string[] = [];
-    for (const r of reserveMetricsByMarket) {
-      if (!r.market) continue;
-      const metaByReserve = buildReserveMetaByReservePubkey(r.rows);
-      reserveMetaByMarket.set(r.market, metaByReserve);
-      for (const meta of Object.values(metaByReserve)) {
-        if (meta.mint) reserveMints.push(meta.mint);
-      }
-    }
+      const debugFlag = opts.debugFlag;
+      const refreshCacheFlag = opts.refreshCacheFlag;
 
-    // kVault catalog used to enrich both Earn positions and Farm aggregations.
-    const vaultCatalog: KaminoVaultCatalogRow[] = await getKaminoVaultCatalogCached();
-    const vaultMetaByAddress = buildVaultAddressToMetaMap(vaultCatalog);
+      const tMarkets = Date.now();
+      const tVaultCatalog = Date.now();
+      const [marketList, vaultCatalog] = await Promise.all([
+        getKaminoMarketsCached(),
+        getKaminoVaultCatalogCached(),
+      ]);
+      markLocal("markets", tMarkets);
+      markLocal("vaultCatalog", tVaultCatalog);
 
-    const obligationResults = await Promise.all(
-      marketList.map(async (m) => {
-        if (!m?.lendingMarket) {
-          return { market: m, obligations: [] as unknown[] };
+      const vaultMetaByAddress = buildVaultAddressToMetaMap(vaultCatalog);
+
+      const lendPromise = (async () => {
+        const tReserves = Date.now();
+        const tObligations = Date.now();
+        const RESERVE_CONCURRENCY = 6;
+        const OBLIGATIONS_CONCURRENCY = 6;
+
+        const reserveMetricsP = mapWithConcurrencyLimit(marketList, RESERVE_CONCURRENCY, async (m) => {
+          const mk = (m?.lendingMarket || "").trim();
+          if (!mk) return { market: mk, rows: [] as KaminoReserveMetricsRow[] };
+          const rows = await fetchMarketReservesMetricsCached(mk);
+          return { market: mk, rows };
+        });
+
+        const obligationsP = mapWithConcurrencyLimit(marketList, OBLIGATIONS_CONCURRENCY, async (m) => {
+          if (!m?.lendingMarket) return { market: m, obligations: [] as unknown[] };
+          const url = `${KAMINO_API_BASE_URL}/kamino-market/${m.lendingMarket}/users/${address}/obligations?env=mainnet-beta`;
+          try {
+            const res = await fetchWithRetry(url, {
+              method: "GET",
+              headers: { Accept: "application/json" },
+              cache: "no-store",
+            });
+            if (!res.ok) {
+              if (res.status === 429) console.warn("[Kamino] obligations rate limited", { market: m.lendingMarket, url });
+              return { market: m, obligations: [] as unknown[] };
+            }
+            const payload = await res.json().catch(() => []);
+            return { market: m, obligations: Array.isArray(payload) ? payload : [] };
+          } catch {
+            return { market: m, obligations: [] as unknown[] };
+          }
+        });
+
+        const [reserveMetricsByMarket, obligationResults] = await Promise.all([reserveMetricsP, obligationsP]);
+        markLocal("reserveMetrics", tReserves);
+        markLocal("obligations", tObligations);
+
+        const reserveMetaByMarket = new Map<string, Record<string, ReserveMeta>>();
+        const reserveMints: string[] = [];
+        for (const r of reserveMetricsByMarket) {
+          if (!r.market) continue;
+          const metaByReserve = buildReserveMetaByReservePubkey(r.rows);
+          reserveMetaByMarket.set(r.market, metaByReserve);
+          for (const meta of Object.values(metaByReserve)) {
+            if (meta.mint) reserveMints.push(meta.mint);
+          }
         }
-        const url = `${KAMINO_API_BASE_URL}/kamino-market/${m.lendingMarket}/users/${address}/obligations?env=mainnet-beta`;
+
+        const tReservePricing = Date.now();
+        const usdPriceByReserveMint = await fetchJupiterUsdPriceMap(reserveMints);
+        for (const [mint, meta] of Object.entries(KNOWN_SOLANA_TOKEN_BY_MINT)) {
+          if (meta.symbol === "USDC" || meta.symbol === "USDT" || meta.symbol === "USDG" || meta.symbol === "USDS" || meta.symbol === "JupUSD" || meta.symbol === "EURC") {
+            if (!usdPriceByReserveMint.has(mint)) usdPriceByReserveMint.set(mint, 1);
+          }
+        }
+        markLocal("reservePricing", tReservePricing);
+
+        const tReserveTokenMeta = Date.now();
+        const tokenMetaByMint = {
+          ...buildKnownTokenMetaByMint(),
+          ...(await fetchJupiterTokenMetaMap(reserveMints)),
+        };
+        markLocal("reserveTokenMeta", tReserveTokenMeta);
+
+        const rows: KaminoUserPositionRow[] = [];
+        const debugObligations: Array<{ marketPubkey: string; marketName?: string; url: string; obligation: unknown }> = [];
+
+        for (const { market, obligations } of obligationResults) {
+          if (!obligations.length) continue;
+          for (const obligation of obligations) {
+            const reserveMetaByReserve = reserveMetaByMarket.get((market?.lendingMarket || "").trim()) ?? {};
+            if (debugFlag) {
+              debugObligations.push({
+                marketPubkey: market.lendingMarket,
+                marketName: market.name,
+                url: `${KAMINO_API_BASE_URL}/kamino-market/${market.lendingMarket}/users/${address}/obligations?env=mainnet-beta`,
+                obligation,
+              });
+            }
+            rows.push({
+              source: "kamino-lend",
+              marketPubkey: market.lendingMarket,
+              marketName: market.name,
+              obligation: slimKaminoObligation(obligation, reserveMetaByReserve, usdPriceByReserveMint, tokenMetaByMint),
+            });
+          }
+        }
+
+        return { rows, reserveMints, reserveMetaByMarket, debugObligations };
+      })();
+
+      const earnPromise = (async () => {
+        let earnRaw: unknown[] = [];
+        const tEarnPositions = Date.now();
         try {
-          const res = await fetchWithRetry(url, {
+          const kvRes = await fetchWithRetry(`${KAMINO_API_BASE_URL}/kvaults/users/${address}/positions`, {
             method: "GET",
             headers: { Accept: "application/json" },
             cache: "no-store",
           });
-          if (!res.ok) {
-            return { market: m, obligations: [] as unknown[] };
+          if (kvRes.ok) {
+            const kvJson = await kvRes.json().catch(() => []);
+            earnRaw = Array.isArray(kvJson) ? kvJson : [];
+          } else if (kvRes.status === 429) {
+            console.warn("[Kamino] kvaults positions rate limited", { address });
           }
-          const payload = await res.json().catch(() => []);
-          return {
-            market: m,
-            obligations: Array.isArray(payload) ? payload : [],
-          };
         } catch {
-          return { market: m, obligations: [] as unknown[] };
+          earnRaw = [];
         }
-      })
-    );
+        markLocal("earnPositions", tEarnPositions);
 
-    const flat: KaminoUserPositionRow[] = [];
+        const tEarnEnrich = Date.now();
+        const earnEnrichedAll = earnRaw
+          .filter((pos) => hasEarnVaultBalance(pos))
+          .map((pos) => enrichEarnPositionPayload(pos, vaultMetaByAddress));
+        const earnVaults = earnEnrichedAll
+          .map((p) => extractKvaultVaultAddress(p))
+          .filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+        markLocal("earnEnrich", tEarnEnrich);
 
-    // Prices for KLend deposits/borrows.
-    const usdPriceByReserveMint = await fetchJupiterUsdPriceMap(reserveMints);
-    // Ensure stables (and SOL) have sane fallback prices if missing.
-    for (const [mint, meta] of Object.entries(KNOWN_SOLANA_TOKEN_BY_MINT)) {
-      if (meta.symbol === "USDC" || meta.symbol === "USDT" || meta.symbol === "USDG" || meta.symbol === "USDS" || meta.symbol === "JupUSD" || meta.symbol === "EURC") {
-        if (!usdPriceByReserveMint.has(mint)) usdPriceByReserveMint.set(mint, 1);
+        const tEarnMetrics = Date.now();
+        const { aprPctByVault, exchangeRateByVault } = await fetchVaultMetricsSummaryMap(earnVaults);
+        markLocal("earnVaultMetrics", tEarnMetrics);
+
+        const missingVaults = earnVaults.filter((v) => !exchangeRateByVault.has(v.trim()));
+        if (missingVaults.length > 0) {
+          const tEarnExchangeRpc = Date.now();
+          const fromRpc = await fetchVaultExchangeRateMapViaSdk(missingVaults);
+          for (const [k, v] of fromRpc.entries()) exchangeRateByVault.set(k, v);
+          markLocal("earnExchangeRateRpc", tEarnExchangeRpc);
+        }
+
+        const tEarnPricing = Date.now();
+        const earnUnderlyingMints = earnEnrichedAll
+          .map((p) => (p && typeof p === "object" ? String((p as Record<string, unknown>).tokenMint ?? "").trim() : ""))
+          .filter(Boolean);
+        const usdPriceByMint = await fetchJupiterUsdPriceMap(earnUnderlyingMints);
+        markLocal("earnPricing", tEarnPricing);
+
+        for (const [mint, meta] of Object.entries(KNOWN_SOLANA_TOKEN_BY_MINT)) {
+          if (meta.symbol === "USDC" || meta.symbol === "USDT" || meta.symbol === "USDG" || meta.symbol === "USDS" || meta.symbol === "JupUSD" || meta.symbol === "EURC") {
+            if (!usdPriceByMint.has(mint)) usdPriceByMint.set(mint, 1);
+          }
+        }
+
+        const rows: KaminoUserPositionRow[] = [];
+        const tEarnAssemble = Date.now();
+        for (const pos of earnEnrichedAll) {
+          const vaultAddress = extractKvaultVaultAddress(pos);
+          if (!vaultAddress || !pos || typeof pos !== "object") {
+            rows.push({ source: "kamino-earn", position: pos });
+            continue;
+          }
+
+          const rec = pos as Record<string, unknown>;
+          const shares = parseDecimal(rec.totalShares);
+          const rate = exchangeRateByVault.get(vaultAddress.trim());
+          const mint = typeof rec.tokenMint === "string" ? rec.tokenMint.trim() : "";
+          const price = mint ? usdPriceByMint.get(mint) : undefined;
+          const aprPct = aprPctByVault.get(vaultAddress.trim());
+
+          if (shares && rate && typeof price === "number" && Number.isFinite(price) && price > 0) {
+            const tokens = shares.mul(rate);
+            const valueUsd = tokens.mul(price).toNumber();
+            const withUsd: Record<string, unknown> = {
+              ...rec,
+              totalUsdValue: valueUsd,
+              totalValueUsd: valueUsd,
+              usdValue: valueUsd,
+              valueUsd: valueUsd,
+              underlyingTokenAmount: tokens.toString(),
+              underlyingTokenPriceUsd: price,
+              aprPct,
+            };
+            rows.push({ source: "kamino-earn", position: withUsd });
+          } else {
+            const withApr =
+              aprPct != null ? ({ ...(rec as Record<string, unknown>), aprPct } as Record<string, unknown>) : rec;
+            rows.push({ source: "kamino-earn", position: withApr });
+          }
+        }
+        markLocal("earnAssemble", tEarnAssemble);
+
+        return rows;
+      })();
+
+      const farmPromise = (async () => {
+        let farmTx: KaminoFarmTx[] = [];
+        const tFarmTx = Date.now();
+        try {
+          farmTx = await fetchAllFarmUserTransactions(address);
+        } catch {
+          farmTx = [];
+        }
+        markLocal("farmTx", tFarmTx);
+
+        const tFarmAgg = Date.now();
+        const farmRows = aggregateFarmPositions(farmTx);
+        const farmRowsWithMeta = await enrichFarmRowsWithTokenMetadata(farmRows);
+        const farmToVault = buildFarmPubkeyToVaultMap(vaultCatalog);
+        const farmRowsResolved = farmRowsWithMeta.map((r) => {
+          if (r.source !== "kamino-farm") return r;
+          const meta = farmToVault.get(r.farmPubkey.trim());
+          if (!meta) return r;
+          return { ...r, vaultAddress: meta.vaultAddress, vaultName: meta.vaultName };
+        });
+        markLocal("farmAgg", tFarmAgg);
+        return { rows: farmRowsResolved, txCount: farmTx.length };
+      })();
+
+      const flat: KaminoUserPositionRow[] = [];
+      let reserveMints: string[] = [];
+      let reserveMetaByMarket = new Map<string, Record<string, ReserveMeta>>();
+      let debugObligations: Array<{ marketPubkey: string; marketName?: string; url: string; obligation: unknown }> = [];
+      let farmTxCount = 0;
+
+      const [lendRes, earnRes, farmRes] = await Promise.allSettled([lendPromise, earnPromise, farmPromise]);
+      if (lendRes.status === "fulfilled") {
+        flat.push(...lendRes.value.rows);
+        reserveMints = lendRes.value.reserveMints;
+        reserveMetaByMarket = lendRes.value.reserveMetaByMarket;
+        debugObligations = lendRes.value.debugObligations;
       }
-    }
+      if (earnRes.status === "fulfilled") {
+        flat.push(...earnRes.value);
+      }
+      if (farmRes.status === "fulfilled") {
+        flat.push(...farmRes.value.rows);
+        farmTxCount = farmRes.value.txCount;
+      }
 
-    const tokenMetaByMint = {
-      ...buildKnownTokenMetaByMint(),
-      ...(await fetchJupiterTokenMetaMap(reserveMints)),
+      timingsLocal.total = Date.now() - tStartLocal;
+      if (timingsLocal.total > 4000) {
+        console.warn("[Kamino] userPositions slow", { address, timingsMs: timingsLocal });
+      }
+
+      return {
+        success: true,
+        data: flat,
+        count: flat.length,
+        meta: {
+          marketsQueried: marketList.length,
+          lendPositions: flat.filter((r) => r.source === "kamino-lend").length,
+          earnPositions: flat.filter((r) => r.source === "kamino-earn").length,
+          farmPositions: flat.filter((r) => r.source === "kamino-farm").length,
+          farmTransactionsFetched: farmTxCount,
+          debug: debugFlag,
+          refreshCache: refreshCacheFlag,
+          timingsMs: timingsLocal,
+        },
+        debug: debugFlag
+          ? {
+              address,
+              reserveMintsCount: Array.from(new Set(reserveMints.map((m) => (m || "").trim()).filter(Boolean))).length,
+              reserveMetaByMarketSizes: Array.from(reserveMetaByMarket.entries()).map(([mk, meta]) => ({
+                marketPubkey: mk,
+                reserveCount: Object.keys(meta || {}).length,
+              })),
+              sampleReserveMeta: Array.from(reserveMetaByMarket.entries()).slice(0, 1).map(([mk, meta]) => ({
+                marketPubkey: mk,
+                firstReserve: Object.entries(meta || {})[0] ?? null,
+              })),
+              obligationsRaw: debugObligations,
+            }
+          : undefined,
+      };
     };
 
-    const debugObligations: Array<{
-      marketPubkey: string;
-      marketName?: string;
-      url: string;
-      obligation: unknown;
-    }> = [];
-
-    for (const { market, obligations } of obligationResults) {
-      if (!obligations.length) continue;
-      for (const obligation of obligations) {
-        const reserveMetaByReserve = reserveMetaByMarket.get((market?.lendingMarket || "").trim()) ?? {};
-        if (debug) {
-          debugObligations.push({
-            marketPubkey: market.lendingMarket,
-            marketName: market.name,
-            url: `${KAMINO_API_BASE_URL}/kamino-market/${market.lendingMarket}/users/${address}/obligations?env=mainnet-beta`,
-            obligation,
+    // SWR cache (no debug): return stale instantly, refresh in background.
+    if (!debug && !refreshCache) {
+      const swr = getGlobalSWRCache();
+      const refreshers = getGlobalRefreshInFlight();
+      const cached = swr.get(address);
+      const now = Date.now();
+      if (cached && now < cached.freshUntilMs) {
+        return NextResponse.json(cached.payload, {
+          headers: { "Cache-Control": "public, max-age=30, s-maxage=30, stale-while-revalidate=900" },
+        });
+      }
+      if (cached && now < cached.staleUntilMs) {
+        if (!refreshers.has(address)) {
+          const p = (async () => {
+            try {
+              const payload = await computePayloadInternal({ debugFlag: false, refreshCacheFlag: false });
+              const next: KaminoUserPositionsSWR = {
+                freshUntilMs: Date.now() + USER_POSITIONS_FRESH_TTL_MS,
+                staleUntilMs: Date.now() + USER_POSITIONS_STALE_TTL_MS,
+                payload,
+              };
+              swr.set(address, next);
+            } catch {
+              // keep stale
+            }
+          })().finally(() => {
+            refreshers.delete(address);
           });
+          refreshers.set(address, p);
         }
-        flat.push({
-          source: "kamino-lend",
-          marketPubkey: market.lendingMarket,
-          marketName: market.name,
-          obligation: slimKaminoObligation(obligation, reserveMetaByReserve, usdPriceByReserveMint, tokenMetaByMint),
+        return NextResponse.json(cached.payload, {
+          headers: { "Cache-Control": "public, max-age=5, s-maxage=5, stale-while-revalidate=900" },
         });
       }
     }
 
-    let earnRaw: unknown[] = [];
+    // Coalesce concurrent requests per address to avoid bursty refresh loops and 429s.
+    const inFlight = getGlobalInFlight();
+    const key = `${address}|refresh=${refreshCache ? "1" : "0"}|debug=${debug ? "1" : "0"}`;
+    const existing = inFlight.get(key);
+    if (existing) {
+      const payload = (await existing) as any;
+      return NextResponse.json(payload);
+    }
+
+    const run = computePayloadInternal({ debugFlag: debug, refreshCacheFlag: refreshCache });
+
+    inFlight.set(key, run);
     try {
-      const kvRes = await fetchWithRetry(
-        `${KAMINO_API_BASE_URL}/kvaults/users/${address}/positions`,
-        {
-          method: "GET",
-          headers: { Accept: "application/json" },
-          cache: "no-store",
-        }
-      );
-      if (kvRes.ok) {
-        const kvJson = await kvRes.json().catch(() => []);
-        earnRaw = Array.isArray(kvJson) ? kvJson : [];
+      const payload = (await run) as KaminoUserPositionsApiResponse;
+      if (!debug) {
+        const swr = getGlobalSWRCache();
+        swr.set(address, {
+          freshUntilMs: Date.now() + USER_POSITIONS_FRESH_TTL_MS,
+          staleUntilMs: Date.now() + USER_POSITIONS_STALE_TTL_MS,
+          payload,
+        });
       }
-    } catch {
-      earnRaw = [];
+      return NextResponse.json(payload);
+    } finally {
+      inFlight.delete(key);
     }
-
-    // Preload rates and token prices for Earn positions.
-    const earnEnrichedAll = earnRaw
-      .filter((pos) => hasEarnVaultBalance(pos))
-      .map((pos) => enrichEarnPositionPayload(pos, vaultMetaByAddress));
-    const earnVaults = earnEnrichedAll
-      .map((p) => extractKvaultVaultAddress(p))
-      .filter((x): x is string => typeof x === "string" && x.trim().length > 0);
-    const exchangeRateByVault = await fetchVaultExchangeRateMap(earnVaults);
-    const aprPctByVault = await fetchVaultAprPctMap(earnVaults);
-    const earnUnderlyingMints = earnEnrichedAll
-      .map((p) => (p && typeof p === "object" ? String((p as Record<string, unknown>).tokenMint ?? "").trim() : ""))
-      .filter(Boolean);
-    const usdPriceByMint = await fetchJupiterUsdPriceMap(earnUnderlyingMints);
-
-    // Always include hardcoded stables if missing from Jupiter.
-    for (const [mint, meta] of Object.entries(KNOWN_SOLANA_TOKEN_BY_MINT)) {
-      if (meta.symbol === "USDC" || meta.symbol === "USDT" || meta.symbol === "USDG" || meta.symbol === "USDS" || meta.symbol === "JupUSD" || meta.symbol === "EURC") {
-        if (!usdPriceByMint.has(mint)) usdPriceByMint.set(mint, 1);
-      }
-    }
-
-    for (const pos of earnEnrichedAll) {
-      const vaultAddress = extractKvaultVaultAddress(pos);
-      if (!vaultAddress || !pos || typeof pos !== "object") {
-        flat.push({ source: "kamino-earn", position: pos });
-        continue;
-      }
-
-      const rec = pos as Record<string, unknown>;
-      const shares = parseDecimal(rec.totalShares);
-      const rate = exchangeRateByVault.get(vaultAddress.trim());
-      const mint = typeof rec.tokenMint === "string" ? rec.tokenMint.trim() : "";
-      const price = mint ? usdPriceByMint.get(mint) : undefined;
-
-      const aprPct = aprPctByVault.get(vaultAddress.trim());
-      if (shares && rate && typeof price === "number" && Number.isFinite(price) && price > 0) {
-        const tokens = shares.mul(rate);
-        const valueUsd = tokens.mul(price).toNumber();
-        const withUsd: Record<string, unknown> = {
-          ...rec,
-          // Keep multiple aliases used by existing UI.
-          totalUsdValue: valueUsd,
-          totalValueUsd: valueUsd,
-          usdValue: valueUsd,
-          valueUsd: valueUsd,
-          // Also expose computed token amount for future UI usage.
-          underlyingTokenAmount: tokens.toString(),
-          underlyingTokenPriceUsd: price,
-          aprPct,
-        };
-        flat.push({ source: "kamino-earn", position: withUsd });
-      } else {
-        const withApr = aprPct != null ? ({ ...(rec as Record<string, unknown>), aprPct } as Record<string, unknown>) : rec;
-        flat.push({ source: "kamino-earn", position: withApr });
-      }
-    }
-
-    let farmTx: KaminoFarmTx[] = [];
-    try {
-      farmTx = await fetchAllFarmUserTransactions(address);
-    } catch {
-      farmTx = [];
-    }
-
-    const farmRows = aggregateFarmPositions(farmTx);
-    const farmRowsWithMeta = await enrichFarmRowsWithTokenMetadata(farmRows);
-
-    const farmToVault = buildFarmPubkeyToVaultMap(vaultCatalog);
-    const farmRowsResolved = farmRowsWithMeta.map((r) => {
-      if (r.source !== "kamino-farm") return r;
-      const meta = farmToVault.get(r.farmPubkey.trim());
-      if (!meta) return r;
-      return {
-        ...r,
-        vaultAddress: meta.vaultAddress,
-        vaultName: meta.vaultName,
-      };
-    });
-    flat.push(...farmRowsResolved);
-
-    return NextResponse.json({
-      success: true,
-      data: flat,
-      count: flat.length,
-      meta: {
-        marketsQueried: marketList.length,
-        lendPositions: flat.filter((r) => r.source === "kamino-lend").length,
-        earnPositions: flat.filter((r) => r.source === "kamino-earn").length,
-        farmPositions: flat.filter((r) => r.source === "kamino-farm").length,
-        farmTransactionsFetched: farmTx.length,
-        debug,
-        refreshCache,
-      },
-      debug: debug
-        ? {
-            address,
-            reserveMintsCount: Array.from(new Set(reserveMints.map((m) => (m || "").trim()).filter(Boolean))).length,
-            reserveMetaByMarketSizes: Array.from(reserveMetaByMarket.entries()).map(([mk, meta]) => ({
-              marketPubkey: mk,
-              reserveCount: Object.keys(meta || {}).length,
-            })),
-            sampleReserveMeta: Array.from(reserveMetaByMarket.entries()).slice(0, 1).map(([mk, meta]) => ({
-              marketPubkey: mk,
-              firstReserve: Object.entries(meta || {})[0] ?? null,
-            })),
-            obligationsRaw: debugObligations,
-          }
-        : undefined,
-    });
   } catch (error) {
     console.error("[Kamino] userPositions error:", error);
     return NextResponse.json(

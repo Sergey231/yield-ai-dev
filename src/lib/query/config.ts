@@ -40,6 +40,8 @@ export const DEFAULT_QUERY_OPTIONS = {
   retry: RETRY_CONFIG.DEFAULT,
   retryDelay: getRetryDelay,
   refetchOnWindowFocus: false,
-  refetchOnMount: true,
+  // Prevent duplicate network requests when multiple components mount the same query
+  // (e.g. Sidebar + Ideas/Portfolio views). Queries will still refetch when stale via explicit invalidation/refresh flows.
+  refetchOnMount: false,
   refetchOnReconnect: true,
 } as const;

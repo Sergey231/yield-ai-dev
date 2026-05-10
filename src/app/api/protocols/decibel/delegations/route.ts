@@ -87,7 +87,8 @@ export async function GET(request: NextRequest) {
       if (normalizeAddress(item.delegatedAccount) !== normalizeAddress(executorAddress)) return false;
       if (item.isExpired) return false;
       const permission = item.permissionType.toLowerCase();
-      return permission.includes('trade') && permission.includes('perp');
+      // Check for trade permissions - 'TradeVaultTokens' or permissions containing both 'trade' and 'perp'
+      return permission.includes('trade') && (permission.includes('perp') || permission.includes('vault'));
     });
 
     return NextResponse.json({

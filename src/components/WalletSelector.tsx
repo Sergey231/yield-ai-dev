@@ -50,6 +50,17 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, externalIni
   const setInjectedDisconnected = useNativeWalletStore((s) => s.setDisconnected);
   const hasAnyConnectedWalletForWebView =
     aptosConnected || solanaConnected || !!injectedAptosAddress || !!injectedSolanaAddress;
+  const isNativeWrapperNow = useCallback(() => {
+    if (typeof window === "undefined") return false;
+    return Boolean(
+      (window as any)?.ReactNativeWebView?.postMessage &&
+      (window as any)?.__YIELDAI_NATIVE_APP__ === true,
+    );
+  }, []);
+  const [isNativeWrapper, setIsNativeWrapper] = useState(false);
+  const hasNativeBridgeNow = useCallback(() => {
+    return isNativeWrapperNow();
+  }, [isNativeWrapperNow]);
 
   // Use external control if provided, otherwise use internal state
   const isDialogOpen = externalOpen !== undefined ? externalOpen : internalDialogOpen;
@@ -58,7 +69,7 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, externalIni
     (open: boolean) => {
       // WebView: only trigger native connect flow when NO wallet is connected.
       // If at least one wallet is already connected, avoid opening native connect UI (e.g. user may be disconnecting).
-      if (open && !hasAnyConnectedWalletForWebView && (window as any)?.ReactNativeWebView?.postMessage) {
+      if (open && !hasAnyConnectedWalletForWebView && hasNativeBridgeNow()) {
         const w = window as any;
         if (w?.YieldAIBridge?.post) {
           w.YieldAIBridge.post("connect_wallet", { chain: pendingChainTab });
@@ -74,7 +85,7 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, externalIni
         setPendingChainTab("aptos");
       }
     },
-    [onExternalOpenChange, pendingChainTab, hasAnyConnectedWalletForWebView],
+    [onExternalOpenChange, pendingChainTab, hasAnyConnectedWalletForWebView, hasNativeBridgeNow],
   );
 
   useEffect(() => {
@@ -121,17 +132,22 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, externalIni
 
   useEffect(() => {
     setMounted(true);
-  }, []);
+    setIsNativeWrapper(isNativeWrapperNow());
+    const onNativeReady = () => setIsNativeWrapper(isNativeWrapperNow());
+    window.addEventListener("yieldai:native-ready", onNativeReady);
+    return () => {
+      window.removeEventListener("yieldai:native-ready", onNativeReady);
+    };
+  }, [isNativeWrapperNow]);
 
   const isInWebView = useMemo(() => {
     if (!mounted) return false;
-    return !!(window as any)?.ReactNativeWebView?.postMessage;
-  }, [mounted]);
+    return isNativeWrapper;
+  }, [mounted, isNativeWrapper]);
 
   const isWebViewNow = useCallback(() => {
-    if (typeof window === "undefined") return false;
-    return Boolean((window as any)?.ReactNativeWebView?.postMessage);
-  }, []);
+    return hasNativeBridgeNow();
+  }, [hasNativeBridgeNow]);
 
   const requestNativeConnectWallet = useCallback((chainTab: WalletConnectChainTab) => {
     const w = window as any;

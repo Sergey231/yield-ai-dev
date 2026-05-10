@@ -481,7 +481,12 @@ export function KaminoPositions() {
   const activeSignTransaction = adapterSignTransaction ?? signTransaction;
   const positionsOwnerAddress = useMemo(() => {
     if (rewardsMockEnabled) {
-      const raw = (searchParams?.get("kaminoAddress") || searchParams?.get("address") || "").trim();
+      const raw = (
+        searchParams?.get("kaminoAddress") ||
+        searchParams?.get("address") ||
+        searchParams?.get("solanaAddress") ||
+        ""
+      ).trim();
       if (raw && isLikelySolanaAddress(raw)) return raw;
     }
     return (solanaProtocolsAddress || "").trim();
@@ -854,13 +859,14 @@ export function KaminoPositions() {
     ]
   );
 
-  if (loading) {
+  // Don't block the page while refreshing; only show a full-page loader on the initial empty load.
+  if (sorted.length === 0 && loading) {
     return <div className="py-4 text-muted-foreground">Loading positions...</div>;
   }
   if (error) {
     return <div className="py-4 text-red-500">{error}</div>;
   }
-  if (sorted.length === 0) {
+  if (sorted.length === 0 && !loading) {
     return <div className="py-4 text-muted-foreground">No positions on Kamino.</div>;
   }
 
@@ -868,6 +874,9 @@ export function KaminoPositions() {
 
   return (
     <div className="w-full min-w-0 max-w-full space-y-4 text-base">
+      {loading && sorted.length > 0 ? (
+        <div className="text-muted-foreground text-sm">Refreshing Kamino positions…</div>
+      ) : null}
       {kaminoDepositModalToken ? (
         <JupiterDepositModal
           isOpen={earnModal === "deposit"}
@@ -892,11 +901,278 @@ export function KaminoPositions() {
       ) : null}
 
       <ScrollArea className="w-full min-w-0 max-w-full">
-        {sorted.map((position) => (
-          <div
-            key={position.id}
-            className="box-border w-full min-w-0 max-w-full overflow-hidden p-3 sm:p-4 border-b last:border-b-0"
-          >
+        {(() => {
+          type RenderBlock =
+            | {
+                kind: "pair";
+                sortKey: number;
+                id: string;
+                supply: { symbol: string; logoUrl?: string; usd: number; mint?: string; amount?: number; price?: number; aprPct?: number };
+                borrow: { symbol: string; logoUrl?: string; usd: number; mint?: string; amount?: number; price?: number; aprPct?: number };
+                health?: { hf: number; collateral: number; liabilities: number };
+              }
+            | { kind: "row"; sortKey: number; row: NormalizedKaminoRow };
+
+          const blocks: RenderBlock[] = [];
+
+          // Build Kamino Lend supply/borrow pairs from raw obligation data (so they stay adjacent like Jupiter).
+          for (const p of positions) {
+            if (p?.source !== "kamino-lend") continue;
+            const obligation = (p as any)?.obligation;
+            const deposit = Array.isArray(obligation?.state?.deposits) ? obligation.state.deposits[0] : null;
+            const borrow = Array.isArray(obligation?.state?.borrows) ? obligation.state.borrows[0] : null;
+            if (!deposit || !borrow) continue;
+
+            const supplyUsd = typeof deposit?.marketValueUsd === "number" ? deposit.marketValueUsd : 0;
+            const borrowUsd = typeof borrow?.marketValueUsd === "number" ? borrow.marketValueUsd : 0;
+            if (!(supplyUsd > 0) || !(borrowUsd > 0)) continue;
+
+            const supplySymbol = String(deposit?.tokenSymbol || "Supply").trim() || "Supply";
+            const borrowSymbol = String(borrow?.tokenSymbol || "Borrow").trim() || "Borrow";
+            const supplyLogoUrl = String(deposit?.tokenLogoUrl || "").trim() || undefined;
+            const borrowLogoUrl = String(borrow?.tokenLogoUrl || "").trim() || undefined;
+            const supplyMint = typeof deposit?.tokenMint === "string" ? deposit.tokenMint : undefined;
+            const borrowMint = typeof borrow?.tokenMint === "string" ? borrow.tokenMint : undefined;
+            const supplyRaw = typeof deposit?.depositedAmount === "string" ? Number(deposit.depositedAmount) : Number(deposit?.depositedAmount);
+            const borrowRaw = typeof borrow?.borrowedAmountOutsideElevationGroups === "string"
+              ? Number(borrow.borrowedAmountOutsideElevationGroups)
+              : Number(borrow?.borrowedAmountOutsideElevationGroups);
+            const supplyDecimals = Number.isFinite(Number(deposit?.tokenDecimals))
+              ? Number(deposit.tokenDecimals)
+              : supplyMint
+                ? Number(solanaTokens.find((t) => (t.address ?? "").trim() === supplyMint)?.decimals)
+                : NaN;
+            const borrowDecimals = Number.isFinite(Number(borrow?.tokenDecimals))
+              ? Number(borrow.tokenDecimals)
+              : borrowMint
+                ? Number(solanaTokens.find((t) => (t.address ?? "").trim() === borrowMint)?.decimals)
+                : NaN;
+            const supplyAmount =
+              Number.isFinite(supplyRaw) && supplyRaw > 0 && Number.isFinite(supplyDecimals) && supplyDecimals >= 0
+                ? supplyRaw / Math.pow(10, supplyDecimals)
+                : undefined;
+            const borrowAmount =
+              Number.isFinite(borrowRaw) && borrowRaw > 0 && Number.isFinite(borrowDecimals) && borrowDecimals >= 0
+                ? borrowRaw / Math.pow(10, borrowDecimals)
+                : undefined;
+            const supplyPrice =
+              typeof supplyAmount === "number" && Number.isFinite(supplyAmount) && supplyAmount > 0 ? supplyUsd / supplyAmount : undefined;
+            const borrowPrice =
+              typeof borrowAmount === "number" && Number.isFinite(borrowAmount) && borrowAmount > 0 ? borrowUsd / borrowAmount : undefined;
+            const supplyAprPct =
+              typeof (deposit as any)?.supplyApyPct === "number" && Number.isFinite((deposit as any).supplyApyPct)
+                ? Number((deposit as any).supplyApyPct)
+                : 0;
+            const borrowAprPct =
+              typeof (borrow as any)?.borrowApyPct === "number" && Number.isFinite((borrow as any).borrowApyPct)
+                ? Number((borrow as any).borrowApyPct)
+                : 0;
+
+            const liqLimit = Number(obligation?.refreshedStats?.borrowLiquidationLimit);
+            const totalBorrow = Number(obligation?.refreshedStats?.userTotalBorrow);
+            const totalDeposit = Number(obligation?.refreshedStats?.userTotalDeposit);
+            const hf =
+              Number.isFinite(liqLimit) && Number.isFinite(totalBorrow) && totalBorrow > 0 ? liqLimit / totalBorrow : null;
+
+            blocks.push({
+              kind: "pair",
+              sortKey: supplyUsd,
+              id: `kamino-lend-pair:${String(p.marketPubkey ?? "")}`,
+              supply: { symbol: supplySymbol, logoUrl: supplyLogoUrl, usd: supplyUsd, mint: supplyMint, amount: supplyAmount, price: supplyPrice, aprPct: supplyAprPct },
+              borrow: { symbol: borrowSymbol, logoUrl: borrowLogoUrl, usd: borrowUsd, mint: borrowMint, amount: borrowAmount, price: borrowPrice, aprPct: borrowAprPct },
+              ...(hf != null
+                ? {
+                    health: {
+                      hf,
+                      collateral: Number.isFinite(totalDeposit) ? totalDeposit : supplyUsd,
+                      liabilities: Number.isFinite(totalBorrow) ? totalBorrow : borrowUsd,
+                    },
+                  }
+                : {}),
+            });
+          }
+
+          // Add all non-lend/borrow rows (we render lend/borrow only via the paired block above).
+          for (const row of sorted) {
+            if (row.kind === "lend" || row.kind === "borrow") continue;
+            blocks.push({ kind: "row", sortKey: row.valueUsd, row });
+          }
+
+          blocks.sort((a, b) => (b.sortKey ?? 0) - (a.sortKey ?? 0));
+
+          return blocks.map((block) => {
+            if (block.kind === "pair") {
+              const { supply, borrow, health } = block;
+              return (
+                <div
+                  key={block.id}
+                  className="box-border w-full min-w-0 max-w-full overflow-hidden p-3 sm:p-4 border-b last:border-b-0"
+                >
+                  {/* Supply row (hover like Jupiter) */}
+                  <div className="rounded-md transition-colors">
+                    <div className="hidden sm:flex justify-between items-center py-2">
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 relative">
+                          <KaminoLogo alt={supply.symbol} externalLogoUrl={supply.logoUrl} symbol={supply.symbol} />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <div className="text-lg font-semibold">{supply.symbol}</div>
+                            <Badge
+                              variant="outline"
+                              className="bg-green-500/10 text-green-600 border-green-500/20 text-xs font-normal px-2 py-0.5 h-5"
+                            >
+                              Supply
+                            </Badge>
+                          </div>
+                          <div className="text-base text-muted-foreground mt-0.5">
+                            {formatCurrency(typeof supply.price === "number" && Number.isFinite(supply.price) ? supply.price : 0, 4)}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="flex items-center justify-end gap-2 mb-1">
+                          <Badge
+                            variant="outline"
+                            className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-xs font-normal px-2 py-0.5 h-5"
+                          >
+                            APR: {formatNumber(typeof supply.aprPct === "number" && Number.isFinite(supply.aprPct) ? supply.aprPct : 0, 2)}%
+                          </Badge>
+                          <div className="text-lg font-bold text-right w-24">{formatCurrency(supply.usd, 2)}</div>
+                        </div>
+                        {typeof supply.amount === "number" && Number.isFinite(supply.amount) && supply.amount > 0 ? (
+                          <div className="text-base text-muted-foreground font-semibold">{formatNumber(supply.amount, 6)}</div>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="block sm:hidden w-full min-w-0 max-w-full space-y-2 py-2">
+                      <div className="flex w-full min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-2">
+                        <div className="relative h-8 w-8 shrink-0">
+                          <KaminoLogo alt={supply.symbol} externalLogoUrl={supply.logoUrl} symbol={supply.symbol} />
+                        </div>
+                        <div className="min-w-0 max-w-full break-words text-base font-semibold [overflow-wrap:anywhere]">
+                          {supply.symbol}
+                        </div>
+                        <Badge
+                          variant="outline"
+                          className="h-4 shrink-0 border-green-500/20 bg-green-500/10 px-1.5 py-0.5 text-xs font-normal text-green-600"
+                        >
+                          Supply
+                        </Badge>
+                        <span className="text-sm text-muted-foreground">
+                          {formatCurrency(typeof supply.price === "number" && Number.isFinite(supply.price) ? supply.price : 0, 4)}
+                        </span>
+                        <span className="text-base font-semibold">
+                          {formatCurrency(typeof supply.price === "number" && Number.isFinite(supply.price) ? supply.price : 0, 4)}
+                        </span>
+                        {typeof supply.amount === "number" && Number.isFinite(supply.amount) && supply.amount > 0 ? (
+                          <span className="min-w-0 max-w-full break-all text-sm text-muted-foreground">
+                            {formatNumber(supply.amount, 6)}
+                          </span>
+                        ) : null}
+                        <span className="text-xs text-blue-600 border border-blue-500/20 bg-blue-500/10 rounded px-1.5 py-0.5 h-4 inline-flex items-center">
+                          APR: {formatNumber(typeof supply.aprPct === "number" && Number.isFinite(supply.aprPct) ? supply.aprPct : 0, 2)}%
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Borrow row (minimal offset, NO divider between supply/borrow) */}
+                  <div className="mt-1">
+                    <div>
+                      <div className="hidden sm:flex justify-between items-center py-2">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 relative">
+                            <KaminoLogo alt={borrow.symbol} externalLogoUrl={borrow.logoUrl} symbol={borrow.symbol} />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <div className="text-lg font-semibold">{borrow.symbol}</div>
+                              <Badge
+                                variant="outline"
+                                className="bg-pink-500/10 text-pink-600 border-pink-500/20 text-xs font-normal px-2 py-0.5 h-5"
+                              >
+                                Borrow
+                              </Badge>
+                            </div>
+                            <div className="text-base text-muted-foreground mt-0.5">
+                              {formatCurrency(typeof borrow.price === "number" && Number.isFinite(borrow.price) ? borrow.price : 0, 4)}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="flex items-center justify-end gap-2 mb-1">
+                            <Badge
+                              variant="outline"
+                              className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-xs font-normal px-2 py-0.5 h-5"
+                            >
+                              APR: {formatNumber(typeof borrow.aprPct === "number" && Number.isFinite(borrow.aprPct) ? borrow.aprPct : 0, 2)}%
+                            </Badge>
+                            <div className="text-lg font-bold text-right w-24">{formatCurrency(borrow.usd, 2)}</div>
+                          </div>
+                          {typeof borrow.amount === "number" && Number.isFinite(borrow.amount) && borrow.amount > 0 ? (
+                            <div className="text-base text-muted-foreground font-semibold">{formatNumber(borrow.amount, 6)}</div>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      <div className="block sm:hidden w-full min-w-0 max-w-full space-y-2 py-2">
+                        <div className="flex w-full min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-2">
+                          <div className="relative h-8 w-8 shrink-0">
+                            <KaminoLogo alt={borrow.symbol} externalLogoUrl={borrow.logoUrl} symbol={borrow.symbol} />
+                          </div>
+                          <div className="min-w-0 max-w-full break-words text-base font-semibold [overflow-wrap:anywhere]">
+                            {borrow.symbol}
+                          </div>
+                          <Badge
+                            variant="outline"
+                            className="h-4 shrink-0 border-pink-500/20 bg-pink-500/10 px-1.5 py-0.5 text-xs font-normal text-pink-600"
+                          >
+                            Borrow
+                          </Badge>
+                          <span className="text-sm text-muted-foreground">
+                            {formatCurrency(typeof borrow.price === "number" && Number.isFinite(borrow.price) ? borrow.price : 0, 4)}
+                          </span>
+                          <span className="text-base font-semibold">
+                            {formatCurrency(typeof borrow.price === "number" && Number.isFinite(borrow.price) ? borrow.price : 0, 4)}
+                          </span>
+                          {typeof borrow.amount === "number" && Number.isFinite(borrow.amount) && borrow.amount > 0 ? (
+                            <span className="min-w-0 max-w-full break-all text-sm text-muted-foreground">
+                              {formatNumber(borrow.amount, 6)}
+                            </span>
+                          ) : null}
+                          <span className="text-xs text-blue-600 border border-blue-500/20 bg-blue-500/10 rounded px-1.5 py-0.5 h-4 inline-flex items-center">
+                            APR: {formatNumber(typeof borrow.aprPct === "number" && Number.isFinite(borrow.aprPct) ? borrow.aprPct : 0, 2)}%
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Account Health attached to this pair (like Jupiter). No extra divider lines. */}
+                    {health ? (
+                      <div>
+                        <AccountHealthSummary
+                          accountHealth={health.hf}
+                          collateral={health.collateral}
+                          liabilities={health.liabilities}
+                          border="none"
+                          compact
+                          showHelp
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            }
+
+            const position = block.row;
+            return (
+              <div
+                key={position.id}
+                className="box-border w-full min-w-0 max-w-full overflow-hidden p-3 sm:p-4 border-b last:border-b-0"
+              >
             <div className="hidden sm:flex justify-between items-center">
               <div className="flex items-center gap-3">
                 <div className="w-8 h-8 relative">
@@ -1060,11 +1336,13 @@ export function KaminoPositions() {
               </div>
             </div>
           </div>
-        ))}
+            );
+          });
+        })()}
       </ScrollArea>
 
       <div className="pt-4">
-        {rewardsLoading ? (
+        {rewardsLoading && rewards.length === 0 ? (
           <div className="text-muted-foreground text-right">Loading rewards...</div>
         ) : rewards.length > 0 ? (
           <div className="text-right">
@@ -1111,18 +1389,6 @@ export function KaminoPositions() {
         <span className="text-xl">Total assets in Kamino:</span>
         <span className="text-xl text-primary font-bold">{formatCurrency(totalValue, 2)}</span>
       </div>
-
-      {(() => {
-        const healthData = calculateHealthFactor();
-        if (!healthData) return null;
-        return (
-          <AccountHealthSummary
-            accountHealth={healthData.healthFactor}
-            collateral={healthData.accountMargin}
-            liabilities={healthData.totalLiabilities}
-          />
-        );
-      })()}
     </div>
   );
 }

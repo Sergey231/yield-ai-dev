@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useWallet as useAptosWallet } from "@aptos-labs/wallet-adapter-react";
 import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
 import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
@@ -18,9 +18,23 @@ export function useEffectiveWalletAddresses(): EffectiveWalletAddresses {
   const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
   const injectedSolanaAddress = useNativeWalletStore((s) => s.solanaAddress);
 
-  const isInWebView = useMemo(() => {
-    if (typeof window === "undefined") return false;
-    return Boolean((window as any)?.ReactNativeWebView?.postMessage);
+  const [isInWebView, setIsInWebView] = useState(false);
+
+  useEffect(() => {
+    const readIsNativeWrapper = () => {
+      if (typeof window === "undefined") return false;
+      return Boolean(
+        (window as any)?.ReactNativeWebView?.postMessage &&
+        (window as any)?.__YIELDAI_NATIVE_APP__ === true,
+      );
+    };
+
+    setIsInWebView(readIsNativeWrapper());
+    const onNativeReady = () => setIsInWebView(readIsNativeWrapper());
+    window.addEventListener("yieldai:native-ready", onNativeReady);
+    return () => {
+      window.removeEventListener("yieldai:native-ready", onNativeReady);
+    };
   }, []);
 
   const effectiveAptosAddress = injectedAptosAddress ?? account?.address?.toString() ?? null;
@@ -34,4 +48,3 @@ export function useEffectiveWalletAddresses(): EffectiveWalletAddresses {
     isInWebView,
   };
 }
-

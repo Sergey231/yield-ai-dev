@@ -9,6 +9,8 @@
     "start": "next start",
     "lint": "next lint",
     "update-tokens": "node scripts/update-token-list.js",
+    "extract:docs": "node scripts/publish-dev-docs.js",
+    "publish:docs:dev": "node scripts/publish-dev-docs.js",
     "verify:kamino-deps": "node scripts/verify-kamino-deps.mjs",
     "postinstall": "node scripts/copy-lightprotocol-wasm.js && node scripts/verify-kamino-deps.mjs"
   },

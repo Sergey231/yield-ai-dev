@@ -26,6 +26,7 @@ export const YIELD_AI_VAULT_VIEWS = {
   getTotalSafes: `${YIELD_AI_VAULT_MODULE}::get_total_safes`,
   // Returns (safe_address, owner, paused, exists) for range [start, start+limit)
   getSafesRangeInfo: `${YIELD_AI_VAULT_MODULE}::get_safes_range_info`,
+  isSafePaused: `${YIELD_AI_VAULT_MODULE}::is_safe_paused`,
 } as const;
 
 export const YIELD_AI_VAULT_ENTRYPOINTS = {

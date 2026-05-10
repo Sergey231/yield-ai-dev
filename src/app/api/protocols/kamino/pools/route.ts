@@ -5,6 +5,8 @@ import { NATIVE_MINT } from "@solana/spl-token";
 import { access } from "node:fs/promises";
 import path from "node:path";
 
+export const dynamic = "force-dynamic";
+
 const KAMINO_API_BASE_URL = "https://api.kamino.finance";
 const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 1200;
@@ -81,12 +83,25 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+    let retryAfterMs = 0;
     try {
       const response = await fetch(url, init);
       if (response.ok) return response;
 
+      const status = response.status;
       const shouldRetry =
-        response.status === 502 || response.status === 503 || response.status === 504;
+        status === 429 || status === 502 || status === 503 || status === 504;
+
+      const retryAfterHeader = response.headers.get("retry-after");
+      retryAfterMs = retryAfterHeader ? Math.max(0, Math.floor(Number(retryAfterHeader) * 1000)) : 0;
+
+      if (status === 429) {
+        console.warn("[Kamino][Pools] rate limited", {
+          url,
+          attempt,
+          retryAfter: retryAfterHeader,
+        });
+      }
 
       if (!shouldRetry || attempt === RETRY_ATTEMPTS) {
         return response;
@@ -96,7 +111,8 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
       if (attempt === RETRY_ATTEMPTS) break;
     }
 
-    await sleep(RETRY_DELAY_MS);
+    const jitter = Math.floor(Math.random() * 250);
+    await sleep(Math.max(RETRY_DELAY_MS, retryAfterMs) + jitter);
   }
 
   throw lastError instanceof Error ? lastError : new Error("Kamino request failed after retries");
@@ -148,8 +164,9 @@ export async function GET() {
     const vaultsRes = await fetchWithRetry(`${KAMINO_API_BASE_URL}/kvaults/vaults`, {
       method: "GET",
       headers: { Accept: "application/json" },
-      // Allow platform caching; endpoint is public and changes relatively slowly.
-      cache: "force-cache",
+      // IMPORTANT: avoid Next.js fetch cache "sticking" stale APR for long periods in some deployments.
+      // We already do our own short in-memory + CDN caching on the route response.
+      cache: "no-store",
     });
 
     if (!vaultsRes.ok) {
@@ -213,7 +230,8 @@ export async function GET() {
             const mr = await fetchWithRetry(`${KAMINO_API_BASE_URL}/kvaults/vaults/${vaultAddress}/metrics`, {
               method: "GET",
               headers: { Accept: "application/json" },
-              cache: "force-cache",
+              // Same reason as above: don't let Next fetch cache persist stale metrics/APY.
+              cache: "no-store",
             });
             if (!mr.ok) return null;
             metrics = (await mr.json().catch(() => null)) as KaminoVaultMetrics | null;

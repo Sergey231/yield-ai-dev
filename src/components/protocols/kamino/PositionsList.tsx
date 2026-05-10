@@ -11,6 +11,7 @@ import { useKaminoPositions } from "@/lib/query/hooks/protocols/kamino/useKamino
 import { useKaminoRewards } from "@/lib/query/hooks/protocols/kamino/useKaminoRewards";
 import { getPreferredJupiterTokenIcon } from "@/lib/services/solana/jupiterTokenIcons";
 import { isLikelySolanaAddress } from "@/lib/kamino/kvaultVaultAddress";
+import { Loader2 } from "lucide-react";
 import {
   computeKaminoPositionsUsd,
   computeKaminoRewardsUsd,
@@ -39,6 +40,7 @@ export function PositionsList({
   onValueRef.current = onPositionsValueChange;
   const onCheckCompleteRef = useRef(onPositionsCheckComplete);
   onCheckCompleteRef.current = onPositionsCheckComplete;
+  const hasCompletedCheckRef = useRef<string | null>(null);
 
   const rewardsMockEnabled =
     process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "1" ||
@@ -47,8 +49,12 @@ export function PositionsList({
   const effectiveAddress = useMemo(() => {
     const base = (address ?? "").trim();
     if (!rewardsMockEnabled) return base;
-    const raw =
-      (searchParams?.get("kaminoAddress") || searchParams?.get("address") || "").trim();
+    const raw = (
+      searchParams?.get("kaminoAddress") ||
+      searchParams?.get("address") ||
+      searchParams?.get("solanaAddress") ||
+      ""
+    ).trim();
     if (raw && isLikelySolanaAddress(raw)) return raw;
     return base;
   }, [address, rewardsMockEnabled, searchParams]);
@@ -157,11 +163,25 @@ export function PositionsList({
       onCheckCompleteRef.current?.();
       return;
     }
-    // "Fetched" can be true from cache while a refetch is still in progress.
-    // We only want to mark the protocol as checked once queries are settled.
-    if (isPositionsFetched && isRewardsFetched && !isPositionsFetching && !isRewardsFetching) {
+    // Mark protocol check completion once we have *any* fetched results for this address.
+    // Background refetching should not keep the sidebar "checking" spinner running.
+    const ready = (isPositionsFetched || isPositionsError) && (isRewardsFetched || isRewardsError);
+    if (!ready) return;
+    if (hasCompletedCheckRef.current === effectiveAddress) return;
+    hasCompletedCheckRef.current = effectiveAddress;
+    onCheckCompleteRef.current?.();
+  }, [effectiveAddress, isPositionsFetched, isRewardsFetched, isPositionsError, isRewardsError]);
+
+  useEffect(() => {
+    // Safety valve: on reconnect, Kamino RPC/API calls can occasionally hang or refetch-loop.
+    // Avoid leaving a permanent "checking Kamino" spinner in the sidebar by force-completing after a timeout.
+    if (!effectiveAddress) return;
+    const isSettled = isPositionsFetched && isRewardsFetched && !isPositionsFetching && !isRewardsFetching;
+    if (isSettled) return;
+    const t = window.setTimeout(() => {
       onCheckCompleteRef.current?.();
-    }
+    }, 30_000);
+    return () => window.clearTimeout(t);
   }, [effectiveAddress, isPositionsFetched, isRewardsFetched, isPositionsFetching, isRewardsFetching]);
 
   const cacheKey = useMemo(() => `proto_has_positions:kamino`, []);
@@ -221,6 +241,14 @@ export function PositionsList({
       positions={positions}
       isLoading={isLoading}
       showManageButton={showManageButton}
+      belowRewardsContent={
+        isFetching && hasAnyData ? (
+          <div className="flex items-center gap-2 px-2 pt-2 text-xs text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            <span>Updating Kamino…</span>
+          </div>
+        ) : null
+      }
     />
   );
 }

@@ -13,6 +13,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { STRATEGY_REGISTRY_ENTRYPOINTS, strategyIdArg, type AiAgentStrategyId } from '@/lib/protocols/yield-ai/strategyRegistry';
+import { toCanonicalAddress } from '@/lib/utils/addressNormalization';
 
 const USDC_DECIMALS = 6;
 const DEFAULT_SAFE_MAX_PER_TX_USDC = '10000';
@@ -25,17 +28,17 @@ const SAFE_CREATED_REFETCH_DELAY_MS = 400;
 async function refetchYieldAiSafesUntilPresent(
   queryClient: QueryClient,
   owner: string
-): Promise<boolean> {
+): Promise<string[] | null> {
   const key = queryKeys.protocols.yieldAi.safes(owner);
   for (let attempt = 0; attempt < SAFE_CREATED_REFETCH_MAX_ATTEMPTS; attempt++) {
     await queryClient.refetchQueries({ queryKey: key });
     const safes = queryClient.getQueryData<string[]>(key);
-    if (safes && safes.length > 0) return true;
+    if (safes && safes.length > 0) return safes;
     if (attempt < SAFE_CREATED_REFETCH_MAX_ATTEMPTS - 1) {
       await new Promise((r) => setTimeout(r, SAFE_CREATED_REFETCH_DELAY_MS));
     }
   }
-  return false;
+  return null;
 }
 
 export interface YieldAiSafeSettingsFormProps {
@@ -54,6 +57,7 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
   const [swapMaxPerTxUSDC, setSwapMaxPerTxUSDC] = useState(DEFAULT_SAFE_MAX_PER_TX_USDC);
   const [swapMaxDailyUSDC, setSwapMaxDailyUSDC] = useState(DEFAULT_SAFE_MAX_DAILY_USDC);
   const [isCreatingSafe, setIsCreatingSafe] = useState(false);
+  const [strategyOnCreate, setStrategyOnCreate] = useState<AiAgentStrategyId>('stablecoin_compound');
 
   const parsedLimits = useMemo(() => {
     const maxPerTx = parseFloat(safeMaxPerTxUSDC);
@@ -141,6 +145,9 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
 
     try {
       setIsCreatingSafe(true);
+      const safesKey = address ? queryKeys.protocols.yieldAi.safes(address) : null;
+      const beforeSafes = safesKey ? (queryClient.getQueryData<string[]>(safesKey) ?? []) : [];
+
       const payload = buildInitVaultPayload({
         maxPerTxBaseUnits,
         maxDailyBaseUnits,
@@ -178,7 +185,37 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
       }
 
       if (address) {
-        await refetchYieldAiSafesUntilPresent(queryClient, address);
+        const afterSafes = await refetchYieldAiSafesUntilPresent(queryClient, address);
+        const createdSafe =
+          afterSafes?.find((s) => !beforeSafes.includes(s)) ?? afterSafes?.[0] ?? null;
+
+        // Make the newly created safe the selected one (best-effort).
+        if (createdSafe) {
+          try {
+            window.localStorage.setItem(`yield-ai:selectedSafe:${address.toLowerCase()}`, createdSafe);
+          } catch {
+            // ignore
+          }
+        }
+
+        // Optional: attach on-chain AI agent strategy tag right after creating the safe.
+        // Default stablecoin_compound is treated as implicit, so we only attach when user selected DN.
+        // No prior tag exists on a fresh safe, so no detach is needed.
+        if (createdSafe && strategyOnCreate === 'decibel_delta_neutral') {
+          try {
+            await signAndSubmitTransaction({
+              data: {
+                function: STRATEGY_REGISTRY_ENTRYPOINTS.attachStrategy as `${string}::${string}::${string}`,
+                typeArguments: [],
+                functionArguments: [toCanonicalAddress(createdSafe), strategyIdArg('decibel_delta_neutral')],
+              },
+              options: { maxGasAmount: 70_000 },
+              transactionSubmitter: gasStationSubmitter as any,
+            });
+          } catch (e) {
+            console.warn('[Yield AI] attach strategy after safe create failed', e);
+          }
+        }
       }
 
       onCreated?.(txHash);
@@ -196,6 +233,19 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
 
   return (
     <div className={cn('space-y-3', className)}>
+      <div className="space-y-1">
+        <Label className="text-[11px] text-muted-foreground">AI agent type</Label>
+        <Select value={strategyOnCreate} onValueChange={(v) => setStrategyOnCreate(v as AiAgentStrategyId)}>
+          <SelectTrigger className="h-9 text-sm">
+            <SelectValue placeholder="Select strategy" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="stablecoin_compound">Stablecoin compound (USD1 + Echelon)</SelectItem>
+            <SelectItem value="decibel_delta_neutral">Decibel delta-neutral</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
       <div className="grid grid-cols-2 gap-2">
         <div className="space-y-1">
           <Label className="text-[11px] text-muted-foreground">Max per transaction (USDC)</Label>

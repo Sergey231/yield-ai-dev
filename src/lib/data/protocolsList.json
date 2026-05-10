@@ -126,34 +126,10 @@
     "description": "Tapp Exchange is a next-generation DEX built on Aptos, introducing a modular approach to trading",
     "depositType": "external",
     "depositUrl": "https://tapp.exchange/pool",
-    "isDepositEnabled": true,
+    "isDepositEnabled": false,
     "managedType": "native",
     "socialMedia": {
       "twitter": "https://x.com/TappExchange"
-    },
-    "airdrop": "points",
-    "airdropInfo": {
-      "title": "🎁 Tapp Points - Season 2",
-      "description": "Tapp Points for liquidity, trading, referrals, and social tasks. Second farming season active, token not launched yet.",
-      "links": [
-        {
-          "text": "Check Points",
-          "url": "https://tapp.exchange/rewards",
-          "type": "app"
-        },
-        {
-          "text": "Points Docs",
-          "url": "https://tapp-exchange.gitbook.io/tapp-exchange/user-guides/earn/points",
-          "type": "docs"
-        }
-      ],
-      "requirements": [
-        "Provide liquidity: 15 points/day per $100 TVL",
-        "Trade: 20 points per $0.01 in fees",
-        "Refer friends: 10%/6%/4% bonus tiers",
-        "Complete social tasks and weekly quests"
-      ],
-      "additionalInfo": "Points accrue per second, real-time updates. Multi-level referral system."
     },
     "contractAddresses": [
       "0x487e905f899ccb6d46fdaec56ba1e0c4cf119862a16c409904b8c78fab1f5e8a"

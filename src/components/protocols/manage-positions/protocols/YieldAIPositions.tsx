@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { cn } from "@/lib/utils";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { useWalletData } from "@/contexts/WalletContext";
 import Image from "next/image";
@@ -23,7 +24,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Copy, ExternalLink, History, Loader2 } from "lucide-react";
+import { Copy, ExternalLink, History, Loader2, PauseCircle, PlayCircle } from "lucide-react";
 import { DepositModal } from "@/components/ui/deposit-modal";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { YieldAIWithdrawModal } from "@/components/ui/yield-ai-withdraw-modal";
@@ -41,7 +42,19 @@ import {
   useYieldAiSafes,
   useYieldAiSafeTokens,
   useDeltaNeutralState,
+  useYieldAiSafePaused,
+  useSelectedYieldAiSafe,
 } from "@/lib/query/hooks/protocols/yield-ai";
+import { useSafeAiAgentStrategy } from "@/lib/query/hooks/protocols/yield-ai/useSafeAiAgentStrategy";
+import { useBatchSafeStrategies } from "@/lib/query/hooks/protocols/yield-ai/useBatchSafeStrategies";
+import { AI_AGENT_STRATEGIES } from "@/lib/protocols/yield-ai/strategyRegistry";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useDecibelUserPositions } from "@/lib/query/hooks/protocols/decibel/useDecibelUserPositions";
 import { useDecibelMarketPrice } from "@/lib/query/hooks/protocols/decibel/useDecibelMarketPrice";
 import { useDecibelPositionLedger } from "@/lib/query/hooks/protocols/decibel/useDecibelPositionLedger";
@@ -72,6 +85,7 @@ import {
 import {
   buildVaultExecuteWithdrawFullAsOwnerPayload,
   buildVaultExecuteWithdrawAllEchelonFaAsOwnerPayload,
+  buildSetSafePausedPayload,
 } from "@/lib/protocols/yield-ai/vaultDeposit";
 import {
   HEDGE_FA,
@@ -80,6 +94,8 @@ import {
 } from "@/lib/protocols/decibel/hedgePrefill";
 import { SwapModal, type SwapModalPrefill } from "@/components/ui/swap-modal";
 import { PnlSummaryRow } from "@/components/ui/pnl-summary-row";
+import { DecibelOnboardingCard } from "@/components/protocols/yield-ai/DecibelOnboardingCard";
+import { useDecibelSubaccounts } from "@/lib/query/hooks/protocols/decibel/useDecibelSubaccounts";
 
 const USDC_LOGO_APTOS = "https://assets.panora.exchange/tokens/aptos/USDC.svg";
 const MIN_VISIBLE_USD = 0.0001;
@@ -127,16 +143,6 @@ export function YieldAIPositions() {
   const [isExecutingEchelonWithdrawToSafe, setIsExecutingEchelonWithdrawToSafe] = useState(false);
   const [echelonAdapterAddress, setEchelonAdapterAddress] = useState<string | null>(null);
   const [echelonAdapterLoadError, setEchelonAdapterLoadError] = useState<string | null>(null);
-  const [decibelSubaccounts, setDecibelSubaccounts] = useState<string[]>([]);
-  const [selectedDecibelSubaccount, setSelectedDecibelSubaccount] = useState<string>("");
-  const [delegationStatusLoading, setDelegationStatusLoading] = useState(false);
-  const [delegateSubmitting, setDelegateSubmitting] = useState(false);
-  const [executorAddress, setExecutorAddress] = useState<string | null>(null);
-  const [isDelegatedToExecutor, setIsDelegatedToExecutor] = useState(false);
-  const [delegationStatusError, setDelegationStatusError] = useState<string | null>(null);
-  const [delegationDetails, setDelegationDetails] = useState<
-    { delegatedAccount: string; permissionType: string; expirationTimeS: number | null; isExpired: boolean }[]
-  >([]);
   const [executorAsset] = useState<"BTC">("BTC");
   const [executorSizeUsd, setExecutorSizeUsd] = useState<string>("10");
   const [executorSubmitting, setExecutorSubmitting] = useState(false);
@@ -153,6 +159,7 @@ export function YieldAIPositions() {
   const [closeDeltaNeutralSubmitting, setCloseDeltaNeutralSubmitting] = useState(false);
   const [swapResidualOpen, setSwapResidualOpen] = useState(false);
   const [swapResidualSubmitting, setSwapResidualSubmitting] = useState(false);
+  const [isPauseToggling, setIsPauseToggling] = useState(false);
 
   const executorHedgeUsdcOk = useMemo(() => {
     if (!executorHedgeHint) return false;
@@ -165,12 +172,34 @@ export function YieldAIPositions() {
     error: safesError,
   } = useYieldAiSafes(walletAddress, { refetchOnMount: "always" });
 
-  const safeAddr = safeAddresses[0];
+  const {
+    selectedSafeAddress: safeAddr,
+    setSelectedSafeAddress: setSelectedSafeAddr,
+    safeAddresses: normalizedSafes,
+  } = useSelectedYieldAiSafe({
+    owner: walletAddress,
+    safeAddresses,
+  });
+
+  const { data: isPaused = false } = useYieldAiSafePaused(safeAddr ?? undefined);
+
+  const { data: aiAgentStrategy } = useSafeAiAgentStrategy(safeAddr ?? undefined);
+  const activeStrategyId = aiAgentStrategy?.activeStrategyId ?? "stablecoin_compound";
+  const isDeltaNeutralStrategy = activeStrategyId === "decibel_delta_neutral";
+
+  // Get strategies for all safe addresses for better safe selector display
+  const { strategiesMap, isLoading: strategiesLoading } = useBatchSafeStrategies(normalizedSafes);
+
+  // Get Decibel subaccounts for executor functionality
+  const { data: decibelSubaccounts = [] } = useDecibelSubaccounts(walletAddress);
+  const primaryDecibelSubaccount = decibelSubaccounts.find(sub => sub.is_primary && sub.is_active)?.subaccount_address ||
+                                   decibelSubaccounts.find(sub => sub.is_active)?.subaccount_address ||
+                                   '';
 
   const {
     data: tokens = [],
     isLoading: safeTokensLoading,
-  } = useYieldAiSafeTokens(safeAddr, {
+  } = useYieldAiSafeTokens(safeAddr ?? undefined, {
     enabled: Boolean(safeAddr),
     refetchOnMount: "always",
   });
@@ -179,14 +208,14 @@ export function YieldAIPositions() {
     data: deltaNeutral,
     isLoading: deltaNeutralLoading,
     error: deltaNeutralError,
-  } = useDeltaNeutralState(safeAddr);
+  } = useDeltaNeutralState(safeAddr ?? undefined);
   const { data: decibelPositions = [], isLoading: decibelPositionsLoading } = useDecibelUserPositions(walletAddress);
 
-  const { data: moarPositions = [], isLoading: moarPositionsLoading } = useMoarPositions(safeAddr, {
+  const { data: moarPositions = [], isLoading: moarPositionsLoading } = useMoarPositions(safeAddr ?? undefined, {
     refetchOnMount: "always",
     enabled: Boolean(safeAddr),
   });
-  const { data: rewardsResponse, isLoading: moarRewardsLoading } = useMoarRewards(safeAddr, {
+  const { data: rewardsResponse, isLoading: moarRewardsLoading } = useMoarRewards(safeAddr ?? undefined, {
     refetchOnMount: "always",
     enabled: Boolean(safeAddr),
   });
@@ -198,7 +227,7 @@ export function YieldAIPositions() {
     rewardsValueUsd: echelonRewardsValueUsd,
     isLoading: echelonLoading,
     echelonRewardRows,
-  } = useEchelonProtocolCardModel(safeAddr, {
+  } = useEchelonProtocolCardModel(safeAddr ?? undefined, {
     enabled: Boolean(safeAddr),
     refetchOnMount: "always",
   });
@@ -279,141 +308,8 @@ export function YieldAIPositions() {
     }
   }, [queryClient, walletAddress, safeAddr]);
 
-  const loadDecibelSubaccounts = useCallback(async () => {
-    const walletAddress = account?.address?.toString();
-    if (!walletAddress) {
-      setDecibelSubaccounts([]);
-      setSelectedDecibelSubaccount("");
-      return;
-    }
-    try {
-      const response = await fetch(
-        `/api/protocols/decibel/subaccounts?address=${encodeURIComponent(walletAddress)}`
-      );
-      const json = await response.json();
-      const data: Array<{ subaccount_address?: string; is_primary?: boolean }> = Array.isArray(json?.data)
-        ? json.data
-        : [];
-      const addresses = data
-        .map((item) => item?.subaccount_address)
-        .filter((value: unknown): value is string => typeof value === "string")
-        .map((value: string) => toCanonicalAddress(value));
-      const primaryAddressRaw = data.find((item) => item?.is_primary)?.subaccount_address;
-      const primaryAddress =
-        typeof primaryAddressRaw === "string" ? toCanonicalAddress(primaryAddressRaw) : "";
-      setDecibelSubaccounts(addresses);
-      setSelectedDecibelSubaccount((prev) => {
-        if (prev && addresses.some((it) => areAddressesEqual(it, prev))) {
-          return toCanonicalAddress(prev);
-        }
-        if (primaryAddress && addresses.some((it) => areAddressesEqual(it, primaryAddress))) {
-          return primaryAddress;
-        }
-        return addresses[0] ?? "";
-      });
-    } catch {
-      setDecibelSubaccounts([]);
-      setSelectedDecibelSubaccount("");
-    }
-  }, [account?.address]);
 
-  const loadDelegationStatus = async (subaccount: string) => {
-    if (!subaccount) {
-      setDelegationStatusError(null);
-      setIsDelegatedToExecutor(false);
-      setExecutorAddress(null);
-      setDelegationDetails([]);
-      return;
-    }
-    try {
-      setDelegationStatusLoading(true);
-      setDelegationStatusError(null);
-      const response = await fetch(
-        `/api/protocols/decibel/delegations?subaccount=${encodeURIComponent(subaccount)}`
-      );
-      const json = await response.json();
-      if (!response.ok || !json?.success) {
-        throw new Error(json?.error || "Failed to load delegation status");
-      }
-      setIsDelegatedToExecutor(Boolean(json?.isDelegatedToExecutor));
-      setExecutorAddress(typeof json?.executorAddress === "string" ? json.executorAddress : null);
-      setDelegationDetails(Array.isArray(json?.data) ? json.data : []);
-    } catch (err) {
-      setIsDelegatedToExecutor(false);
-      setExecutorAddress(null);
-      setDelegationDetails([]);
-      setDelegationStatusError(
-        err instanceof Error ? err.message : "Failed to load delegation status"
-      );
-    } finally {
-      setDelegationStatusLoading(false);
-    }
-  };
 
-  const handleDelegate = async () => {
-    if (!account?.address) {
-      toast({
-        title: "Wallet not connected",
-        description: "Connect your wallet to delegate trading.",
-        variant: "destructive",
-      });
-      return;
-    }
-    if (!selectedDecibelSubaccount) {
-      toast({
-        title: "Subaccount required",
-        description: "Select a Decibel subaccount first.",
-        variant: "destructive",
-      });
-      return;
-    }
-    if (!executorAddress) {
-      toast({
-        title: "Executor is not configured",
-        description: "Try refreshing delegation status and try again.",
-        variant: "destructive",
-      });
-      return;
-    }
-    if (!signAndSubmitTransaction) {
-      toast({
-        title: "Unsupported wallet",
-        description: "Current wallet cannot sign and submit transactions.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    try {
-      setDelegateSubmitting(true);
-      const payload = buildDelegateTradingPayload({
-        subaccountAddr: selectedDecibelSubaccount,
-        accountToDelegateTo: executorAddress,
-        expirationTimestampSecs: null,
-      });
-      const result = await signAndSubmitTransaction({
-        data: {
-          function: payload.function as `${string}::${string}::${string}`,
-          typeArguments: payload.typeArguments,
-          functionArguments: payload.functionArguments as (string | number | null)[],
-        },
-        options: { maxGasAmount: 20000 },
-      });
-      const txHash = typeof result?.hash === "string" ? result.hash : "";
-      toast({
-        title: "Delegation submitted",
-        description: txHash
-          ? `Transaction ${txHash.slice(0, 6)}...${txHash.slice(-4)}`
-          : "Transaction submitted successfully.",
-      });
-      await loadDelegationStatus(selectedDecibelSubaccount);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to delegate trading";
-      toast({ title: "Delegation failed", description: msg, variant: "destructive" });
-    } finally {
-      setDelegateSubmitting(false);
-    }
-  };
 
   const handleExecutorOpenShort = async () => {
     if (!account?.address) {
@@ -424,10 +320,10 @@ export function YieldAIPositions() {
       });
       return;
     }
-    if (!selectedDecibelSubaccount) {
+    if (!primaryDecibelSubaccount) {
       toast({
         title: "Subaccount required",
-        description: "Select a Decibel subaccount first.",
+        description: "No active Decibel subaccount found.",
         variant: "destructive",
       });
       return;
@@ -448,7 +344,7 @@ export function YieldAIPositions() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           owner: account.address.toString(),
-          subaccount: selectedDecibelSubaccount,
+          subaccount: primaryDecibelSubaccount,
           asset: executorAsset,
           sizeUsd,
         }),
@@ -497,10 +393,10 @@ export function YieldAIPositions() {
       });
       return;
     }
-    if (!selectedDecibelSubaccount) {
+    if (!primaryDecibelSubaccount) {
       toast({
         title: "Subaccount required",
-        description: "Select a Decibel subaccount first.",
+        description: "No active Decibel subaccount found.",
         variant: "destructive",
       });
       return;
@@ -521,7 +417,7 @@ export function YieldAIPositions() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           owner: account.address.toString(),
-          subaccount: selectedDecibelSubaccount,
+          subaccount: primaryDecibelSubaccount,
           safeAddress: safeAddr,
           asset: "BTC",
           sizeUsd,
@@ -751,18 +647,12 @@ export function YieldAIPositions() {
       (deltaNeutralResidualSwapUsable || deltaNeutralSpotTokenHuman > 0)
   );
 
+  const showDeltaNeutralCard = Boolean(
+    safeAddr && deltaNeutral?.recordExists && isDeltaNeutralStrategy
+  );
+
   // No initial fetch here: safe and token data are via useQuery (cached).
 
-  useEffect(() => {
-    if (!SHOW_EXECUTOR_TRADE_BLOCK) return;
-    void loadDecibelSubaccounts();
-  }, [loadDecibelSubaccounts]);
-
-  useEffect(() => {
-    if (!SHOW_EXECUTOR_TRADE_BLOCK) return;
-    if (!selectedDecibelSubaccount) return;
-    void loadDelegationStatus(selectedDecibelSubaccount);
-  }, [selectedDecibelSubaccount]);
 
   useEffect(() => {
     const handleRefresh: EventListener = (evt) => {
@@ -779,6 +669,35 @@ export function YieldAIPositions() {
     if (symbol === "APT") return "0x1::aptos_coin::AptosCoin";
     if (symbol === "USDC") return "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b";
     return symbol;
+  };
+
+  const handleTogglePause = async () => {
+    if (!safeAddr || !signAndSubmitTransaction) return;
+    setIsPauseToggling(true);
+    const newPaused = !isPaused;
+    try {
+      const payload = buildSetSafePausedPayload(safeAddr, newPaused);
+      await signAndSubmitTransaction({
+        data: {
+          function: payload.function as `${string}::${string}::${string}`,
+          typeArguments: payload.typeArguments,
+          functionArguments: payload.functionArguments,
+        },
+      });
+      queryClient.setQueryData(queryKeys.protocols.yieldAi.safePaused(safeAddr), newPaused);
+      toast({
+        title: newPaused ? "Agent paused" : "Agent resumed",
+        description: newPaused
+          ? "Rebalancing stopped. Withdrawals still work."
+          : "Agent will resume rebalancing on next cycle.",
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed";
+      toast({ title: newPaused ? "Pause failed" : "Resume failed", description: msg, variant: "destructive" });
+    } finally {
+      setIsPauseToggling(false);
+      queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safePaused(safeAddr) });
+    }
   };
 
   const handleMoarWithdrawConfirm = async () => {
@@ -991,6 +910,16 @@ export function YieldAIPositions() {
     (sum, p) => sum + parseFloat(p.value || "0"),
     0
   );
+  // Extract USDC balance for onboarding checks
+  const safeUsdcBalance = useMemo(() => {
+    const usdcToken = tokens.find(
+      (t) =>
+        normalizeAddress(t.address) === normalizeAddress(USDC_FA_METADATA_MAINNET) ||
+        t.symbol === 'USDC'
+    );
+    return usdcToken ? parseFloat(usdcToken.value || '0') : 0;
+  }, [tokens]);
+
   const totalValue =
     tokens.reduce((sum, t) => sum + (t.value ? parseFloat(t.value) : 0), 0) +
     moarPositionsValue +
@@ -998,7 +927,7 @@ export function YieldAIPositions() {
     echelonTotalValue;
 
   const { data: depositHistory, isLoading: historyLoading, isFetching: historyFetching } = useYieldAiDepositHistory(
-    safeAddr,
+    safeAddr ?? undefined,
     Number.isFinite(totalValue) ? totalValue : null,
     { enabled: Boolean(safeAddr) }
   );
@@ -1039,7 +968,22 @@ export function YieldAIPositions() {
     );
   }
   if (safesLoading && safeAddresses.length === 0) {
-    return <div className="py-4 text-muted-foreground">Loading safe assets...</div>;
+    return (
+      <div className="py-4 text-muted-foreground flex items-center gap-2">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        Loading AI agent wallets...
+      </div>
+    );
+  }
+
+  // Show loading when switching safes
+  if (safeAddr && safeTokensLoading && tokens.length === 0) {
+    return (
+      <div className="py-4 text-muted-foreground flex items-center gap-2">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        Loading safe assets for {safeAddr.slice(0, 6)}…{safeAddr.slice(-4)}...
+      </div>
+    );
   }
   if (safeAddresses.length === 0) {
     return (
@@ -1055,8 +999,41 @@ export function YieldAIPositions() {
         <div className="flex flex-wrap items-center justify-between gap-3 gap-y-2">
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="text-sm font-medium text-muted-foreground">
-              Safe {safeAddresses[0].slice(0, 6)}...{safeAddresses[0].slice(-4)}
+              {safeAddr ? (
+                <>
+                  Safe {safeAddr.slice(0, 6)}...{safeAddr.slice(-4)}
+                </>
+              ) : (
+                <>Safe —</>
+              )}
             </span>
+            {normalizedSafes.length > 1 ? (
+              <Select value={safeAddr ?? ""} onValueChange={setSelectedSafeAddr}>
+                <SelectTrigger className="h-7 w-[240px]">
+                  <SelectValue placeholder="Select safe" />
+                </SelectTrigger>
+                <SelectContent>
+                  {normalizedSafes.map((s) => {
+                    const strategy = strategiesMap.get(s);
+                    const strategyLabel = strategy?.activeStrategyId
+                      ? AI_AGENT_STRATEGIES[strategy.activeStrategyId]?.label || 'Unknown'
+                      : 'Stablecoin compound'; // default
+                    return (
+                      <SelectItem key={s} value={s}>
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">
+                            {strategyLabel}
+                          </span>
+                          <span className="text-muted-foreground text-xs">
+                            {s.slice(0, 6)}…{s.slice(-4)}
+                          </span>
+                        </div>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+            ) : null}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -1065,7 +1042,7 @@ export function YieldAIPositions() {
                   className="h-6 w-6 shrink-0"
                   onClick={() => {
                     navigator.clipboard
-                      .writeText(safeAddresses[0])
+                      .writeText(safeAddr ?? "")
                       .then(() =>
                         toast({
                           title: "Copied",
@@ -1088,34 +1065,83 @@ export function YieldAIPositions() {
                 <p>Copy safe address</p>
               </TooltipContent>
             </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className={cn(
+                    "h-7 gap-1.5 px-2 text-xs",
+                    isPaused && "border-amber-500/50 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20 hover:text-amber-700"
+                  )}
+                  disabled={isPauseToggling}
+                  onClick={handleTogglePause}
+                  aria-label={isPaused ? "Resume agent" : "Pause agent"}
+                >
+                  {isPauseToggling ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : isPaused ? (
+                    <PlayCircle className="h-3.5 w-3.5" />
+                  ) : (
+                    <PauseCircle className="h-3.5 w-3.5" />
+                  )}
+                  {isPaused ? "Paused" : "Pause"}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>
+                  {isPaused
+                    ? "Resume agent rebalancing"
+                    : "Pause agent — stops rebalancing, withdrawals still work"}
+                </p>
+              </TooltipContent>
+            </Tooltip>
           </div>
-          {!tokens.some(
-            (t) =>
-              t.symbol === "USDC" ||
-              normalizeAddress(t.address) === normalizeAddress(USDC_FA_METADATA_MAINNET)
-          ) && (
-            <div className="flex items-center gap-2">
-              <Button size="sm" variant="default" onClick={() => setShowDepositModal(true)}>
-                Deposit USDC
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setShowHistoryModal(true)}
-                className="h-9 px-2"
-                aria-label="Open deposit history"
-              >
-                <History className="h-4 w-4" />
-              </Button>
-            </div>
-          )}
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="default" onClick={() => setShowDepositModal(true)}>
+              Deposit USDC
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setShowHistoryModal(true)}
+              className="h-9 px-2"
+              aria-label="Open deposit history"
+            >
+              <History className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
-        <p className="text-sm font-normal text-muted-foreground">
-          AI agent rebalances positions every hour
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge
+            variant="outline"
+            className={cn(
+              "text-xs font-medium",
+              isDeltaNeutralStrategy
+                ? "bg-purple-500/10 text-purple-700 dark:text-purple-300 border-purple-500/30"
+                : "bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/30"
+            )}
+          >
+            AI agent: {AI_AGENT_STRATEGIES[activeStrategyId].label}
+          </Badge>
+          <p className="text-sm font-normal text-muted-foreground">
+            {isDeltaNeutralStrategy
+              ? "Manual delta-neutral strategy on Decibel"
+              : "AI agent rebalances positions every hour"}
+          </p>
+        </div>
       </div>
 
-      {safeAddr && (
+      {isDeltaNeutralStrategy && (
+        <DecibelOnboardingCard
+          ownerAddress={walletAddress}
+          safeAddress={safeAddr ?? undefined}
+          safeBalance={safeUsdcBalance}
+          onDepositClick={() => setShowDepositModal(true)}
+        />
+      )}
+
+      {showDeltaNeutralCard && (
         <div className="rounded-lg border bg-card p-3 sm:p-4 space-y-3">
           <div className="flex items-start justify-between gap-2">
             <div>
@@ -1141,9 +1167,7 @@ export function YieldAIPositions() {
             <div className="text-sm text-destructive">
               {deltaNeutralError instanceof Error ? deltaNeutralError.message : "Failed to load state"}
             </div>
-          ) : !deltaNeutral?.recordExists ? (
-            <div className="text-sm text-muted-foreground">No delta-neutral vault record for this safe.</div>
-          ) : !deltaNeutral.isOpen ? (
+          ) : !deltaNeutral ? null : !deltaNeutral.isOpen ? (
             <div className="space-y-3 text-sm">
               <p className="text-muted-foreground">
                 Last position was closed on-chain. Open a new one from the executor block below when enabled.
@@ -1855,116 +1879,8 @@ export function YieldAIPositions() {
         </div>
       )}
 
-      {SHOW_EXECUTOR_TRADE_BLOCK && (
+      {SHOW_EXECUTOR_TRADE_BLOCK && isDeltaNeutralStrategy && (
         <>
-          <div className="rounded-lg border bg-card p-3 sm:p-4 space-y-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="font-medium">Decibel Delegation</div>
-                <div className="text-sm text-muted-foreground">
-                  Delegate selected subaccount to executor for AI trading.
-                </div>
-              </div>
-              <Badge
-                variant="outline"
-                className={
-                  isDelegatedToExecutor
-                    ? "bg-green-500/10 text-green-600 border-green-500/20"
-                    : "bg-muted text-muted-foreground"
-                }
-              >
-                {delegationStatusLoading
-                  ? "Checking..."
-                  : isDelegatedToExecutor
-                    ? "Delegated"
-                    : "Not delegated"}
-              </Badge>
-            </div>
-
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <Select
-                value={selectedDecibelSubaccount}
-                onValueChange={setSelectedDecibelSubaccount}
-                disabled={decibelSubaccounts.length === 0 || delegateSubmitting}
-              >
-                <SelectTrigger className="w-full sm:w-[380px]">
-                  <SelectValue placeholder="Select Decibel subaccount" />
-                </SelectTrigger>
-                <SelectContent>
-                  {decibelSubaccounts.map((sub) => (
-                    <SelectItem key={sub} value={sub}>
-                      {sub.slice(0, 8)}...{sub.slice(-6)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  variant="default"
-                  onClick={handleDelegate}
-                  disabled={
-                    delegateSubmitting ||
-                    !account?.address ||
-                    !selectedDecibelSubaccount ||
-                    !executorAddress
-                  }
-                >
-                  {delegateSubmitting ? "Delegating..." : "Delegate"}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    if (selectedDecibelSubaccount) {
-                      void loadDelegationStatus(selectedDecibelSubaccount);
-                    }
-                  }}
-                  disabled={delegationStatusLoading || !selectedDecibelSubaccount}
-                >
-                  Refresh status
-                </Button>
-              </div>
-            </div>
-
-            {executorAddress && (
-              <div className="text-xs text-muted-foreground">
-                Executor: {executorAddress.slice(0, 8)}...{executorAddress.slice(-6)}
-              </div>
-            )}
-            {delegationDetails.length > 0 && (
-              <div className="text-xs text-muted-foreground space-y-1">
-                <div className="font-medium text-foreground/80">Active permissions</div>
-                <div className="space-y-0.5">
-                  {delegationDetails.map((d, idx) => (
-                    <div key={`${d.delegatedAccount}-${d.permissionType}-${idx}`} className="flex flex-wrap gap-2">
-                      <span className="font-mono">
-                        {d.delegatedAccount.slice(0, 8)}...{d.delegatedAccount.slice(-6)}
-                      </span>
-                      <span className={d.permissionType.toLowerCase().includes("perp") ? "text-green-600" : ""}>
-                        {d.permissionType}
-                      </span>
-                      {d.isExpired && <span className="text-destructive">expired</span>}
-                    </div>
-                  ))}
-                </div>
-                {!delegationDetails.some((d) => d.permissionType.toLowerCase().includes("perp")) && (
-                  <div className="text-destructive">
-                    Perps permission is missing. Re-delegate and then refresh status (Decibel API may lag indexing).
-                  </div>
-                )}
-              </div>
-            )}
-            {decibelSubaccounts.length === 0 && (
-              <div className="text-xs text-muted-foreground">
-                No Decibel subaccounts found for this wallet.
-              </div>
-            )}
-            {delegationStatusError && (
-              <div className="text-xs text-destructive">{delegationStatusError}</div>
-            )}
-          </div>
 
           <div className="rounded-lg border bg-card p-3 sm:p-4 space-y-3">
             <div>
@@ -1987,31 +1903,19 @@ export function YieldAIPositions() {
                 disabled={executorSubmitting}
               />
               <Button
-                variant="default"
-                onClick={handleExecutorOpenShort}
-                disabled={
-                  executorSubmitting ||
-                  !selectedDecibelSubaccount
-                }
-              >
-                {executorSubmitting ? "Submitting..." : "Open short 1x"}
-              </Button>
-            </div>
-            <div className="flex flex-col sm:flex-row gap-2">
-              <Button
                 type="button"
-                variant="secondary"
+                variant="default"
                 onClick={handleExecutorOpenDeltaNeutral}
-                disabled={executorSubmitting || !selectedDecibelSubaccount || !safeAddr}
+                disabled={executorSubmitting || !primaryDecibelSubaccount || !safeAddr}
               >
                 {executorSubmitting ? "Submitting..." : "Open delta-neutral (BTC → xBTC in safe)"}
               </Button>
-              {!safeAddr && (
-                <div className="text-xs text-muted-foreground self-center">
-                  Create a safe first.
-                </div>
-              )}
             </div>
+            {!safeAddr && (
+              <div className="text-xs text-muted-foreground">
+                Create a safe first.
+              </div>
+            )}
           </div>
 
           {executorHedgeHint && (
@@ -2709,7 +2613,7 @@ export function YieldAIPositions() {
           address: USDC_FA_METADATA_MAINNET,
         }}
         priceUSD={walletUsdcPriceUsd}
-        yieldAiSafeAddress={safeAddresses[0]}
+        yieldAiSafeAddress={safeAddr ?? undefined}
       />
 
       <YieldAIWithdrawModal
@@ -2719,16 +2623,50 @@ export function YieldAIPositions() {
           setSelectedWithdrawToken(null);
         }}
         token={selectedWithdrawToken}
-        safeAddress={safeAddresses[0]}
+        safeAddress={safeAddr ?? undefined}
       />
 
-      <YieldAiHistoryModal
-        isOpen={showHistoryModal}
-        onClose={() => setShowHistoryModal(false)}
-        safeAddress={safeAddresses[0]}
-        history={depositHistory}
-        currentValueUsd={Number.isFinite(totalValue) ? totalValue : null}
-      />
+      {isDeltaNeutralStrategy ? (
+        <Dialog
+          open={showHistoryModal}
+          onOpenChange={(open) => (!open ? setShowHistoryModal(false) : undefined)}
+        >
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Delta-neutral history</DialogTitle>
+              <DialogDescription>
+                {safeAddr ? (
+                  <span>
+                    Safe {safeAddr.slice(0, 8)}...{safeAddr.slice(-6)}
+                  </span>
+                ) : (
+                  "Yield AI safe"
+                )}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3 text-sm text-muted-foreground">
+              <p>History for delta-neutral positions is coming soon.</p>
+              <p>
+                In the meantime, the closed-position recap card below shows the latest realized
+                Decibel perp PnL, funding, and fees aggregated from trade history.
+              </p>
+            </div>
+            <div className="flex justify-end pt-2">
+              <Button variant="outline" onClick={() => setShowHistoryModal(false)}>
+                Close
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      ) : (
+        <YieldAiHistoryModal
+          isOpen={showHistoryModal}
+          onClose={() => setShowHistoryModal(false)}
+          safeAddress={safeAddr ?? undefined}
+          history={depositHistory}
+          currentValueUsd={Number.isFinite(totalValue) ? totalValue : null}
+        />
+      )}
 
       <AlertDialog
         open={closeDeltaNeutralOpen}

@@ -115,10 +115,12 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
     }
   }, [allowSolanaAddressOverride]);
 
-  const { tokens: solanaTokens, refresh: refreshSolana } = useSolanaPortfolio({ overrideAddress: solanaAddressOverride });
+  const { address: solanaConnectedAddress, tokens: solanaTokens, refresh: refreshSolana } = useSolanaPortfolio({
+    overrideAddress: solanaAddressOverride,
+  });
 
   // Protocols that are closed/winding down must not appear in Ideas pools filter
-  const HIDDEN_IDEAS_PROTOCOLS = new Set(["Earnium", "Auro Finance", "Aries", "Meso Finance", "Moar Market"]);
+  const HIDDEN_IDEAS_PROTOCOLS = new Set(["Earnium", "Auro Finance", "Aries", "Meso Finance", "Moar Market", "Tapp Exchange"]);
 
   // New states for progressive loading
   // Initialize loading states immediately to show tabs and skeletons right away
@@ -126,7 +128,6 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
     'Joule': false,
     'Hyperion': true,
     'Thala': true,
-    'Tapp Exchange': true,
     'Amnis Finance': true,
     'Kofi Finance': true,
     'Echelon': true,
@@ -143,7 +144,6 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
     'Joule': '/protocol_ico/joule.png',
     'Hyperion': '/protocol_ico/hyperion.png',
     'Thala': '/protocol_ico/thala.png',
-    'Tapp Exchange': '/protocol_ico/tappexchange.png',
     'Amnis Finance': '/protocol_ico/amnis.png',
     'Kofi Finance': '/protocol_ico/kofi.png',
     'Echelon': '/protocol_ico/echelon.png',
@@ -176,6 +176,25 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
   const { getClaimableRewardsSummary, fetchRewards, fetchPositions, rewardsLoading, rewards } = useWalletStore();
   const { account } = useWallet();
   const { setActiveTab: setMobileTab } = useMobileManagement();
+
+  const hasAptosWallet = Boolean(account?.address);
+  const hasSolanaWallet = Boolean(solanaConnectedAddress);
+  const isSolanaProtocolName = (name: string) => name === "Jupiter" || name === "Kamino";
+  const uiProtocolsLoading = (() => {
+    // Ideas "Checking pools" indicator should reflect connected chains:
+    // - only Solana connected -> show only Solana protocols
+    // - only Aptos connected -> show only Aptos protocols
+    // - both connected -> show all
+    // - none connected -> keep showing all (Ideas can still load pools)
+    if (!hasAptosWallet && !hasSolanaWallet) return protocolsLoading;
+    if (hasAptosWallet && hasSolanaWallet) return protocolsLoading;
+    const out: Record<string, boolean> = {};
+    for (const [k, v] of Object.entries(protocolsLoading)) {
+      const isSol = isSolanaProtocolName(k);
+      out[k] = hasSolanaWallet ? (isSol ? v : false) : hasAptosWallet ? (!isSol ? v : false) : v;
+    }
+    return out;
+  })();
 
   // Load rewards and positions data when wallet is connected
   useEffect(() => {
@@ -331,67 +350,6 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
                   tvlUSD: parseFloat(pool.tvlUSD || "0"),
                   token1Info: token1Info,
                   token2Info: token2Info
-                };
-              });
-            }
-          },
-          {
-            name: 'Tapp Exchange',
-            url: '/api/protocols/tapp/pools',
-			logoUrl: '/protocol_ico/tappexchange.png',
-            transform: (data: any) => {
-              const filtered = (data.data || [])
-                .filter((pool: any) => {
-                  const dailyVolume = parseFloat(pool.volume_7d || "0") / 7;
-                  return dailyVolume > 1000;
-                });
-
-              return filtered.map((pool: any) => {
-                const totalAPY = parseFloat(pool.apr || "0") * 100;
-
-                const token1Info = {
-                  symbol: pool.token_a || 'Unknown',
-                  name: pool.token_a || 'Unknown',
-                  logoUrl: pool.tokens?.[0]?.img || undefined,
-                  decimals: 8
-                };
-
-                const token2Info = {
-                  symbol: pool.token_b || 'Unknown',
-                  name: pool.token_b || 'Unknown',
-                  logoUrl: pool.tokens?.[1]?.img || undefined,
-                  decimals: 8
-                };
-
-                const tokensInfo = Array.isArray(pool.tokens)
-                  ? pool.tokens.slice(0, 3).map((t: any) => ({
-                      symbol: t?.symbol || 'Unknown',
-                      name: t?.symbol || 'Unknown',
-                      logoUrl: t?.img || undefined,
-                      decimals: 8
-                    }))
-                  : undefined;
-
-                const assetSymbols = Array.isArray(pool.tokens)
-                  ? pool.tokens.slice(0, 3).map((t: any) => t?.symbol || 'Unknown').join('/')
-                  : `${token1Info.symbol}/${token2Info.symbol}`;
-
-                return {
-                  asset: assetSymbols,
-                  provider: 'Tapp Exchange',
-                  totalAPY: totalAPY,
-                  depositApy: totalAPY,
-                  borrowAPY: 0,
-                  token: pool.pool_id || pool.poolId,
-                  protocol: 'Tapp Exchange',
-                  dailyVolumeUSD: parseFloat(pool.volume_7d || "0") / 7,
-                  tvlUSD: parseFloat(pool.tvl || "0"),
-                  token1Info: token1Info,
-                  token2Info: token2Info,
-                  tokensInfo: tokensInfo,
-                  poolType: 'DEX',
-                  feeTier: parseFloat(pool.fee_tier || "0"),
-                  volume7d: parseFloat(pool.volume_7d || "0")
                 };
               });
             }
@@ -960,7 +918,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
   }
 
   // Show loading indicators for protocols that are still loading
-  const showLoadingIndicators = loading && Object.values(protocolsLoading).some(Boolean);
+  const showLoadingIndicators = loading && Object.values(uiProtocolsLoading).some(Boolean);
   // Use protocolsLoading keys to show all protocols immediately, fallback to protocolsData if available
   const protocolNames = [
     ...new Set([
@@ -978,7 +936,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
         className={className}
         activeTab={activeTab}
         onTabChange={setActiveTab}
-        protocolsLoading={protocolsLoading}
+        protocolsLoading={uiProtocolsLoading}
         protocolsError={protocolsError}
         protocolsData={protocolsData}
         protocolsLogos={protocolsLogos}
@@ -1037,10 +995,10 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
           {loading && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <div className="flex items-center gap-1">
-                {Object.values(protocolsLoading).filter(Boolean).length > 0 && (
+                {Object.values(uiProtocolsLoading).filter(Boolean).length > 0 && (
                   <>
                     <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
-                    <span>Loading {Object.values(protocolsLoading).filter(Boolean).length} protocols...</span>
+                    <span>Loading {Object.values(uiProtocolsLoading).filter(Boolean).length} protocols...</span>
                   </>
                 )}
               </div>

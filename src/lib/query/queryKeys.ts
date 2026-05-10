@@ -100,6 +100,12 @@ export const queryKeys = {
      * Get investment pools/opportunities
      */
     pools: () => ['aptos', 'pools'] as const,
+
+    /**
+     * Lightweight check: does the account have any on-chain tx?
+     * Used to skip protocol checking for empty derived accounts.
+     */
+    hasTransactions: (address: string) => ["aptos", "hasTransactions", address] as const,
   },
 
   /**
@@ -172,6 +178,12 @@ export const queryKeys = {
           fromUnixMs,
           toUnixMs ?? 'open',
         ] as const,
+      subaccounts: (address: string) =>
+        ['protocols', 'decibel', 'subaccounts', address] as const,
+      delegation: (subaccount: string) =>
+        ['protocols', 'decibel', 'delegation', subaccount] as const,
+      accountBalance: (address: string) =>
+        ['protocols', 'decibel', 'accountBalance', address] as const,
     },
 
     /**
@@ -207,6 +219,12 @@ export const queryKeys = {
         ['protocols', 'yield-ai', 'depositHistory', safeAddress, currentValue ?? null] as const,
       deltaNeutralState: (safeAddress: string) =>
         ['protocols', 'yield-ai', 'deltaNeutralState', safeAddress] as const,
+      safePaused: (safeAddress: string) =>
+        ['protocols', 'yield-ai', 'safePaused', safeAddress] as const,
+      strategyRegistryInitialized: () =>
+        ['protocols', 'yield-ai', 'strategyRegistryInitialized'] as const,
+      safeActiveStrategy: (safeAddress: string) =>
+        ['protocols', 'yield-ai', 'safeActiveStrategy', safeAddress] as const,
     },
 
     /**
@@ -305,6 +323,8 @@ export const queryKeys = {
       pools: () => ['protocols', 'jupiter', 'pools'] as const,
       userPositions: (address: string) =>
         ['protocols', 'jupiter', 'userPositions', address] as const,
+      borrow: (address: string) =>
+        ['protocols', 'jupiter', 'borrow', address] as const,
     },
 
     /**

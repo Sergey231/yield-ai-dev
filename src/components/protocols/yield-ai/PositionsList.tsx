@@ -13,7 +13,7 @@ import {
 } from "@/lib/query/hooks/protocols/moar";
 import { mapMoarPositionsToProtocolPositionsAiAgent } from "./mapMoarToProtocolPositionsAiAgent";
 import { queryKeys } from "@/lib/query/queryKeys";
-import { useYieldAiSafes, useYieldAiSafeTokens } from "@/lib/query/hooks/protocols/yield-ai";
+import { useYieldAiSafes, useYieldAiSafeTokens, useSelectedYieldAiSafe } from "@/lib/query/hooks/protocols/yield-ai";
 import { useEchelonProtocolCardModel } from "@/lib/query/hooks/protocols/echelon/useEchelonProtocolCardModel";
 import { mapYieldAiSafeTokensToProtocolPositions } from "./mapYieldAiSafeTokensToProtocolPositions";
 import { mapEchelonProtocolPositionsToAiAgent } from "./mapEchelonToProtocolPositionsAiAgent";
@@ -45,13 +45,16 @@ export function PositionsList({
   const { data: safeAddresses = [], isLoading: safesLoading, isFetching: safesFetching } =
     useYieldAiSafes(walletAddress);
 
-  const safeAddress = safeAddresses[0];
+  const { selectedSafeAddress: safeAddress } = useSelectedYieldAiSafe({
+    owner: walletAddress,
+    safeAddresses,
+  });
 
   const {
     data: safeTokens = [],
     isLoading: safeTokensLoading,
     isFetching: safeTokensFetching,
-  } = useYieldAiSafeTokens(safeAddress, {
+  } = useYieldAiSafeTokens(safeAddress ?? undefined, {
     refetchOnMount: refreshKey != null ? "always" : undefined,
     enabled: Boolean(safeAddress),
   });
@@ -61,7 +64,7 @@ export function PositionsList({
     isLoading: moarPositionsLoading,
     isFetching: moarPositionsFetching,
     error: moarPositionsError,
-  } = useMoarPositions(safeAddress, {
+  } = useMoarPositions(safeAddress ?? undefined, {
     refetchOnMount: refreshKey != null ? "always" : undefined,
     enabled: Boolean(safeAddress),
   });
@@ -69,7 +72,7 @@ export function PositionsList({
     data: rewardsResponse,
     isLoading: moarRewardsLoading,
     isFetching: moarRewardsFetching,
-  } = useMoarRewards(safeAddress, {
+  } = useMoarRewards(safeAddress ?? undefined, {
     enabled: Boolean(safeAddress),
   });
   const { data: poolsResponse } = useMoarPools();
@@ -80,7 +83,7 @@ export function PositionsList({
     rewardsValueUsd: echelonRewardsValueUsd,
     isLoading: echelonLoading,
     isFetching: echelonFetching,
-  } = useEchelonProtocolCardModel(safeAddress, {
+  } = useEchelonProtocolCardModel(safeAddress ?? undefined, {
     enabled: Boolean(safeAddress),
     refetchOnMount: refreshKey != null ? "always" : undefined,
   });
@@ -185,7 +188,7 @@ export function PositionsList({
         queryKey: queryKeys.protocols.echelon.rewards(safeAddress),
       });
     }
-  }, [refreshKey, safeAddress, queryClient]);
+  }, [refreshKey, safeAddress ?? undefined, queryClient]);
 
   useEffect(() => {
     const handleRefresh: EventListener = (evt) => {
@@ -201,7 +204,7 @@ export function PositionsList({
     };
     window.addEventListener("refreshPositions", handleRefresh);
     return () => window.removeEventListener("refreshPositions", handleRefresh);
-  }, [safeAddress, queryClient]);
+  }, [safeAddress ?? undefined, queryClient]);
 
   useEffect(() => {
     if (!isFetching) {

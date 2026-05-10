@@ -538,6 +538,7 @@ export function SwapModal({
   const [tokenPickerQuery, setTokenPickerQuery] = useState<string>("");
   const [tokenPickerTab, setTokenPickerTab] = useState<TokenPickerTab>("all");
   const [chartToken, setChartToken] = useState<{ mint: string; symbol: string; logoUrl?: string; chain: SwapChain } | null>(null);
+  const [isMobileViewport, setIsMobileViewport] = useState(false);
 
   // Local optimistic balances override for UI after successful swap
   const [balancesOverride, setBalancesOverride] = useState<Record<string, number>>({});
@@ -583,6 +584,15 @@ export function SwapModal({
 
   const aptosTotalWithProtocolsUsd = useWalletStore((s) => s.totalAssets);
   const solanaTotalWithProtocolsUsd = useWalletStore((s) => s.solanaTotalAssets);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const media = window.matchMedia("(max-width: 639px)");
+    const update = () => setIsMobileViewport(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   // Default chain selection (UI only): choose the chain with higher assets, or the only connected chain.
   useEffect(() => {
@@ -2171,10 +2181,20 @@ export function SwapModal({
     );
   };
 
+  const toggleChartToken = (nextToken: { mint: string; chain: SwapChain; symbol: string; logoUrl?: string }) => {
+    setChartToken((prev) => {
+      if (prev && prev.mint === nextToken.mint && prev.chain === nextToken.chain) return null;
+      return nextToken;
+    });
+  };
+
   return (
     <>
-    <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="fixed left-1/2 top-1/2 z-[60] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 sm:w-auto sm:max-w-[440px] max-h-[90dvh] overflow-y-auto rounded-2xl border bg-background p-0 shadow-lg [&>button:last-child]:hidden">
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className={cn(
+        "fixed left-1/2 top-1/2 z-[60] w-[calc(100vw-1rem)] -translate-x-1/2 -translate-y-1/2 sm:w-auto sm:max-w-[440px] max-h-[95dvh] overflow-hidden rounded-2xl border bg-background p-0 shadow-lg [&>button:last-child]:hidden",
+        chartToken && "lg:max-w-[1120px]"
+      )}>
         {/* Hidden a11y title */}
         <DialogTitle className="sr-only">
           {variantTitle ?? (chainSelection === "solana" ? "Swap Tokens" : "Gasless Swap Tokens")}
@@ -2286,8 +2306,12 @@ export function SwapModal({
           </div>
         )}
 
+        <div className={cn(
+          "flex min-h-0 max-h-[95dvh] flex-col overflow-hidden lg:grid",
+          chartToken && "lg:grid-cols-[420px_minmax(0,640px)]"
+        )}>
         {/* ── Main modal content ── */}
-        <div className="min-h-0">
+        <div className="min-h-0 flex-1 overflow-y-auto">
           {/* Header */}
           <div className="flex flex-col gap-3 px-4 pt-4 sm:flex-row sm:items-center sm:justify-between sm:px-5 sm:pt-5">
             <div className="flex min-w-0 items-center gap-2">
@@ -2339,19 +2363,21 @@ export function SwapModal({
               >
                 <Settings className="h-4 w-4" />
               </Button>
-              <Button
-                onClick={onClose}
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8"
-              >
-                <X className="h-4 w-4" />
-              </Button>
+              {!chartToken && (
+                <Button
+                  onClick={onClose}
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              )}
             </div>
           </div>
 
           {/* Body */}
-          <div className="flex flex-col gap-1 px-4 pb-4 pt-3 sm:px-5 sm:pb-5 sm:pt-4">
+          <div className="flex flex-col gap-0.5 px-4 pb-3 pt-2.5 sm:px-5 sm:pb-4 sm:pt-3">
             {/* Slippage panel */}
             {showSlippage && (
               <div className="mb-2 rounded-xl border bg-muted/40 p-3">
@@ -2401,15 +2427,21 @@ export function SwapModal({
                 {(() => {
                   const chart = chartAddressForBirdeye(fromToken, chainSelection);
                   if (!chart || !fromToken) return null;
+                  const isActiveChart =
+                    chartToken?.mint === chart.address &&
+                    chartToken?.chain === chart.chain;
                   return (
                     <Button
                       type="button"
                       variant="ghost"
                       size="icon"
-                      className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
+                      className={cn(
+                        "h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground",
+                        isActiveChart && "bg-muted text-foreground ring-1 ring-border"
+                      )}
                       title="Price chart"
                       aria-label={`${fromToken.symbol} price chart`}
-                      onClick={() => setChartToken({ mint: chart.address, chain: chart.chain, symbol: fromToken.symbol, logoUrl: (fromToken as any)?.logoUrl })}
+                      onClick={() => toggleChartToken({ mint: chart.address, chain: chart.chain, symbol: fromToken.symbol, logoUrl: (fromToken as any)?.logoUrl })}
                     >
                       <LineChart className="h-4 w-4" />
                     </Button>
@@ -2478,12 +2510,12 @@ export function SwapModal({
             </div>
 
             {/* Swap direction */}
-            <div className="relative z-10 -my-0.5 flex justify-center">
+            <div className="relative z-20 -my-3 flex justify-center">
               <button
                 type="button"
                 onClick={swapTokens}
                 disabled={!fromToken || !toToken}
-                className="flex h-8 w-8 items-center justify-center rounded-full border-2 bg-background shadow-sm text-muted-foreground transition-all hover:border-foreground/30 hover:text-foreground disabled:opacity-40"
+                className="flex h-10 w-10 items-center justify-center rounded-full border-2 bg-background shadow-md text-muted-foreground transition-all hover:border-foreground/30 hover:text-foreground disabled:opacity-40"
               >
                 <ArrowLeftRight className="h-3.5 w-3.5" />
               </button>
@@ -2510,15 +2542,21 @@ export function SwapModal({
                 {(() => {
                   const chart = chartAddressForBirdeye(toToken, chainSelection);
                   if (!chart || !toToken) return null;
+                  const isActiveChart =
+                    chartToken?.mint === chart.address &&
+                    chartToken?.chain === chart.chain;
                   return (
                     <Button
                       type="button"
                       variant="ghost"
                       size="icon"
-                      className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
+                      className={cn(
+                        "h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground",
+                        isActiveChart && "bg-muted text-foreground ring-1 ring-border"
+                      )}
                       title="Price chart"
                       aria-label={`${toToken.symbol} price chart`}
-                      onClick={() => setChartToken({ mint: chart.address, chain: chart.chain, symbol: toToken.symbol, logoUrl: (toToken as any)?.logoUrl })}
+                      onClick={() => toggleChartToken({ mint: chart.address, chain: chart.chain, symbol: toToken.symbol, logoUrl: (toToken as any)?.logoUrl })}
                     >
                       <LineChart className="h-4 w-4" />
                     </Button>
@@ -2670,12 +2708,13 @@ export function SwapModal({
             )}
 
             {/* Action button */}
+            <div className="sticky bottom-0 -mx-4 mt-0.5 border-t bg-background/95 px-4 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] pt-2.5 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:-mx-5 sm:px-5 sm:pb-2">
             <button
               type="button"
               onClick={getButtonConfig().action ?? undefined}
               disabled={loading || getButtonConfig().disabled}
               className={cn(
-                "mt-1 flex w-full items-center justify-center gap-2 rounded-xl py-3 sm:py-3.5 text-sm font-semibold transition-opacity disabled:opacity-40 disabled:cursor-not-allowed",
+                "flex w-full items-center justify-center gap-2 rounded-xl py-2.5 sm:py-3 text-sm font-semibold transition-opacity disabled:opacity-40 disabled:cursor-not-allowed",
                 swapResult?.success
                   ? "bg-green-600 text-white hover:opacity-90"
                   : "bg-foreground text-background hover:opacity-85"
@@ -2686,6 +2725,7 @@ export function SwapModal({
                 ? getButtonConfig().text === "Get Quote" ? "Getting Quote…" : "Executing…"
                 : getButtonConfig().text}
             </button>
+            </div>
 
             {/* Refresh quote */}
             {swapQuote && !loading && !hasDataChanged() && !swapResult?.success && (
@@ -2716,10 +2756,38 @@ export function SwapModal({
               : `Gasless · no APT required for gas · ${panoraFee}% swap fee`}
           </div>
         </div>
+
+        {chartToken && (
+        <div className="hidden min-h-0 flex-col border-l bg-muted/20 lg:flex">
+          <div className="flex items-center justify-between border-b px-4 py-3">
+            <div className="min-w-0">
+              <div className="text-sm font-semibold">
+                {chartToken.symbol} price chart
+              </div>
+              <div className="text-xs text-muted-foreground">Historical price data (if available).</div>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={onClose}
+              title="Close swap"
+              aria-label="Close swap"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            <SwapTokenChart mint={chartToken.mint} chain={chartToken.chain} symbol={chartToken.symbol} />
+          </div>
+        </div>
+        )}
+        </div>
       </DialogContent>
     </Dialog>
-    <Dialog open={chartToken != null} onOpenChange={(open) => !open && setChartToken(null)}>
-      <DialogContent className="z-[120] sm:max-w-[720px]">
+    <Dialog open={isMobileViewport && chartToken != null} onOpenChange={(open) => !open && setChartToken(null)}>
+      <DialogContent className="z-[120] sm:hidden">
         <DialogHeader>
           <DialogTitle>
             <span className="flex items-center gap-2">

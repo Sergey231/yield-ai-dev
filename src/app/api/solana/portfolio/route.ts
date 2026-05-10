@@ -11,6 +11,14 @@ function getPortfolioCache(): Map<string, CacheEntry> {
   return g.__solanaPortfolioCache;
 }
 
+function getPortfolioInFlight(): Map<string, Promise<SolanaPortfolioResponse>> {
+  const g = globalThis as unknown as {
+    __solanaPortfolioInFlight?: Map<string, Promise<SolanaPortfolioResponse>>;
+  };
+  g.__solanaPortfolioInFlight ??= new Map<string, Promise<SolanaPortfolioResponse>>();
+  return g.__solanaPortfolioInFlight;
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const address = searchParams.get("address");
@@ -38,8 +46,27 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const portfolioService = SolanaPortfolioService.getInstance();
-    const portfolio = await portfolioService.getPortfolio(address);
+    // In-flight coalescing: if multiple requests hit the API simultaneously for the same address,
+    // they should share a single upstream fetch (RPC + Jupiter) to avoid bursts and 429s.
+    const inFlight = getPortfolioInFlight();
+    const existing = inFlight.get(address);
+    const portfolioPromise =
+      existing ??
+      (async () => {
+        try {
+          const portfolioService = SolanaPortfolioService.getInstance();
+          return await portfolioService.getPortfolio(address);
+        } finally {
+          // Ensure we don't leak promises on errors or long runtimes.
+          inFlight.delete(address);
+        }
+      })();
+
+    if (!existing) {
+      inFlight.set(address, portfolioPromise);
+    }
+
+    const portfolio = await portfolioPromise;
 
     const hasAnyPriced = Array.isArray(portfolio?.tokens)
       ? portfolio.tokens.some((t: any) => t?.price != null || t?.value != null)

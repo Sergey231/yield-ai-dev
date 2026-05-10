@@ -52,6 +52,8 @@ export function useKaminoRewards(
     staleTime: STALE_TIME.POSITIONS,
     enabled,
     refetchOnMount: options?.refetchOnMount,
+    // Avoid brief empty states on quick refreshes / background refetches.
+    placeholderData: (prev) => prev ?? [],
   });
 }
 

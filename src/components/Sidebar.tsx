@@ -43,6 +43,7 @@ import { cn } from "@/lib/utils";
 import { formatCurrency } from "@/lib/utils/numberFormat";
 import { isDerivedAptosWalletReliable } from "@/lib/aptosWalletUtils";
 import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
+import { useAptosHasTransactions } from "@/lib/query/hooks/aptos/useAptosHasTransactions";
 
 function shortenHexAddress(addr: string, head = 4, tail = 4): string {
   if (!addr) return "Unknown";
@@ -69,6 +70,11 @@ export default function Sidebar() {
   const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
   const injectedSolanaAddress = useNativeWalletStore((s) => s.solanaAddress);
   const effectiveAptosAddress = injectedAptosAddress ?? account?.address?.toString() ?? null;
+  const isAptosDerived = isDerivedAptosWalletReliable(aptosWallet);
+  const aptosHasTxQuery = useAptosHasTransactions(effectiveAptosAddress ?? undefined, {
+    enabled: Boolean(effectiveAptosAddress) && isAptosDerived,
+  });
+  const shouldCheckAptosProtocols = !isAptosDerived || Boolean(aptosHasTxQuery.data?.hasTransactions);
 
   const allowSolanaAddressOverride =
     process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "1" ||
@@ -89,7 +95,8 @@ export default function Sidebar() {
     }
   }, [allowSolanaAddressOverride]);
 
-  const effectiveSolanaOverrideAddress = injectedSolanaAddress ?? solanaAddressOverride;
+  /** URL `solanaAddress` (when enabled) beats native-injected Solana for read-only viewing. */
+  const effectiveSolanaOverrideAddress = solanaAddressOverride ?? injectedSolanaAddress;
 
   const {
     address: solanaAddress,
@@ -121,7 +128,10 @@ export default function Sidebar() {
   const [jupiterValue, setJupiterValue] = useState(0);
   const [kaminoValue, setKaminoValue] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [checkingProtocols, setCheckingProtocols] = useState<string[]>([]);
+  const [checkingAptosProtocols, setCheckingAptosProtocols] = useState<string[]>([]);
+  const [checkingSolanaProtocols, setCheckingSolanaProtocols] = useState<string[]>([]);
+  const [aptosCheckRunId, setAptosCheckRunId] = useState(0);
+  const [solanaCheckRunId, setSolanaCheckRunId] = useState(0);
   const [refreshKey, setRefreshKey] = useState(0);
 
   const setTotalAssetsStore = useWalletStore((s) => s.setTotalAssets);
@@ -155,13 +165,35 @@ export default function Sidebar() {
           .filter(Boolean)
       : null;
 
-  const resetChecking = useCallback(() => {
-    setCheckingProtocols(
-      solanaProtocolsAddress
-        ? [...APTOS_PROTOCOL_NAMES, ...SOLANA_PROTOCOL_NAMES]
-        : [...APTOS_PROTOCOL_NAMES]
-    );
-  }, [solanaProtocolsAddress]);
+  const resetAptosChecking = useCallback(() => {
+    setAptosCheckRunId((x) => x + 1);
+    setCheckingAptosProtocols(shouldCheckAptosProtocols ? [...APTOS_PROTOCOL_NAMES] : []);
+  }, [shouldCheckAptosProtocols]);
+
+  const resetSolanaChecking = useCallback(() => {
+    setSolanaCheckRunId((x) => x + 1);
+    setCheckingSolanaProtocols([...SOLANA_PROTOCOL_NAMES]);
+  }, []);
+
+  // Safety valve: switching wallets without full reload can interrupt protocol list lifecycles.
+  // Ensure "checking" icons never stay stuck indefinitely.
+  useEffect(() => {
+    if (!effectiveAptosAddress || checkingAptosProtocols.length === 0) return;
+    const runId = aptosCheckRunId;
+    const t = window.setTimeout(() => {
+      setCheckingAptosProtocols((prev) => (aptosCheckRunId === runId ? [] : prev));
+    }, 30_000);
+    return () => window.clearTimeout(t);
+  }, [aptosCheckRunId, checkingAptosProtocols.length, effectiveAptosAddress]);
+
+  useEffect(() => {
+    if (!solanaAddress || checkingSolanaProtocols.length === 0) return;
+    const runId = solanaCheckRunId;
+    const t = window.setTimeout(() => {
+      setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? [] : prev));
+    }, 30_000);
+    return () => window.clearTimeout(t);
+  }, [solanaCheckRunId, checkingSolanaProtocols.length, solanaAddress]);
 
   const loadPortfolio = useCallback(async () => {
     if (!effectiveAptosAddress) {
@@ -220,25 +252,35 @@ export default function Sidebar() {
     setYieldAIValue(0);
     setJupiterValue(0);
     setKaminoValue(0);
-    resetChecking();
+    if (effectiveAptosAddress) resetAptosChecking();
+    if (solanaAddress) resetSolanaChecking();
     setRefreshKey((k) => k + 1);
-  }, [loadPortfolio, resetChecking]);
+  }, [effectiveAptosAddress, loadPortfolio, resetAptosChecking, resetSolanaChecking, solanaAddress]);
 
   useEffect(() => {
     loadPortfolio();
     // Initialize checking list when account changes
     if (effectiveAptosAddress) {
-      resetChecking();
+      resetAptosChecking();
     } else {
-      setCheckingProtocols([]);
+      setCheckingAptosProtocols([]);
     }
-  }, [loadPortfolio, effectiveAptosAddress, resetChecking]);
+  }, [loadPortfolio, effectiveAptosAddress, resetAptosChecking]);
 
   useEffect(() => {
+    // Keep Aptos checking list in sync when Aptos wallet changes
     if (!effectiveAptosAddress) return;
-    // Keep checking list in sync when Solana wallet connects/disconnects
-    resetChecking();
-  }, [effectiveAptosAddress, solanaProtocolsAddress, resetChecking]);
+    resetAptosChecking();
+  }, [effectiveAptosAddress, resetAptosChecking]);
+
+  useEffect(() => {
+    // Keep Solana checking list in sync when Solana wallet connects/disconnects
+    if (!solanaAddress) {
+      setCheckingSolanaProtocols([]);
+      return;
+    }
+    resetSolanaChecking();
+  }, [resetSolanaChecking, solanaAddress]);
 
   const handleHyperionValueChange = useCallback((value: number) => {
     setHyperionValue(Number.isFinite(value) ? value : 0);
@@ -379,16 +421,16 @@ export default function Sidebar() {
         onRefresh={handleRefresh}
         isRefreshing={isRefreshing}
         hasSolanaWallet={!!solanaAddress}
-        isDerived={isDerivedAptosWalletReliable(aptosWallet)}
+        isDerived={isAptosDerived}
         hideSmallAssets={hideSmallAssets}
         onHideSmallAssetsChange={setHideSmallAssets}
         showHeaderControls={false}
       />
-      {checkingProtocols.length > 0 && (
+      {checkingAptosProtocols.length > 0 && (
         <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
           <span className="whitespace-nowrap">Checking positions on</span>
           <div className="flex items-center gap-1">
-            {checkingProtocols.map((name) => {
+            {checkingAptosProtocols.map((name) => {
               const proto = getProtocolByName(name);
               const logo =
                 name === "Kamino" ? "/protocol_ico/kamino.png" : proto?.logoUrl || "/favicon.ico";
@@ -405,7 +447,7 @@ export default function Sidebar() {
           </div>
         </div>
       )}
-      {(() => {
+      {shouldCheckAptosProtocols ? (() => {
         const positionsListItems = [
           { component: HyperionPositionsList, value: hyperionValue, name: "Hyperion" },
           { component: EchelonPositionsList, value: echelonValue, name: "Echelon" },
@@ -475,12 +517,13 @@ export default function Sidebar() {
                                                 : undefined
               }
               onMainnetValueChange={name === "Decibel" ? handleDecibelMainnetValueChange : undefined}
-              onPositionsCheckComplete={() =>
-                setCheckingProtocols((prev) => prev.filter((p) => p !== name))
-              }
+              onPositionsCheckComplete={() => {
+                const runId = aptosCheckRunId;
+                setCheckingAptosProtocols((prev) => (aptosCheckRunId === runId ? prev.filter((p) => p !== name) : prev));
+              }}
             />
           ));
-      })()}
+      })() : null}
     </div>
   ) : (
     <div className="mt-4 p-4 bg-muted rounded-lg space-y-2">
@@ -500,6 +543,20 @@ export default function Sidebar() {
         hideSmallAssets={hideSmallAssets}
         onHideSmallAssetsChange={setHideSmallAssets}
       />
+      {checkingSolanaProtocols.length > 0 && (
+        <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
+          <span className="whitespace-nowrap">Checking positions on</span>
+          <div className="flex items-center gap-1">
+            {checkingSolanaProtocols.map((name) => {
+              const proto = getProtocolByName(name);
+              const logo = name === "Kamino" ? "/protocol_ico/kamino.png" : proto?.logoUrl || "/favicon.ico";
+              return (
+                <ProtocolIcon key={name} logoUrl={logo} name={name} size="sm" isLoading={true} />
+              );
+            })}
+          </div>
+        </div>
+      )}
       {(
         [
           {
@@ -510,9 +567,10 @@ export default function Sidebar() {
                 key="Jupiter"
                 address={solanaProtocolsAddress ?? undefined}
                 onPositionsValueChange={handleJupiterValueChange}
-                onPositionsCheckComplete={() =>
-                  setCheckingProtocols((prev) => prev.filter((p) => p !== "Jupiter"))
-                }
+                onPositionsCheckComplete={() => {
+                  const runId = solanaCheckRunId;
+                  setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Jupiter") : prev));
+                }}
               />
             ),
           },
@@ -524,9 +582,10 @@ export default function Sidebar() {
                 key="Kamino"
                 address={solanaProtocolsAddress ?? undefined}
                 onPositionsValueChange={handleKaminoValueChange}
-                onPositionsCheckComplete={() =>
-                  setCheckingProtocols((prev) => prev.filter((p) => p !== "Kamino"))
-                }
+                onPositionsCheckComplete={() => {
+                  const runId = solanaCheckRunId;
+                  setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Kamino") : prev));
+                }}
               />
             ),
           },

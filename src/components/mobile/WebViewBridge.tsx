@@ -18,6 +18,7 @@ type NativeCommand = {
 };
 
 type WindowWithBridge = Window & {
+  __YIELDAI_NATIVE_APP__?: boolean;
   ReactNativeWebView?: {
     postMessage: (message: string) => void;
   };
@@ -54,6 +55,7 @@ export function WebViewBridge() {
   useEffect(() => {
     const w = window as WindowWithBridge;
     const isInWebView = !!w.ReactNativeWebView?.postMessage;
+    w.__YIELDAI_NATIVE_APP__ = false;
 
     if (!isInWebView) {
       console.log("[Bridge] ReactNativeWebView not found — running in browser");
@@ -136,6 +138,8 @@ export function WebViewBridge() {
             sessionNonce.current = nonce;
             console.log("[Bridge] Session nonce received");
           }
+          w.__YIELDAI_NATIVE_APP__ = true;
+          window.dispatchEvent(new Event("yieldai:native-ready"));
           // emit initial route after handshake completes
           emitRouteChange();
           return;
@@ -199,6 +203,7 @@ export function WebViewBridge() {
     window.addEventListener("yieldai:native-command", onNativeCommand);
 
     return () => {
+      w.__YIELDAI_NATIVE_APP__ = false;
       history.pushState = originalPushState;
       history.replaceState = originalReplaceState;
 

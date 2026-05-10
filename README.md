@@ -66,6 +66,7 @@ We built a **privacy-preserving cross-chain bridge** from Solana to Aptos, integ
 - **Wallet Integration**: Connect Aptos wallets to view balances and execute transactions
 - **Mobile wallet Solana (MWA)**: In the mobile layout, a smartphone-icon button next to the main wallet control lets you connect a Solana wallet via the **Mobile Wallet Adapter (MWA)**—primarily for **Solana Seeker** on Android Chrome. The button is shown only on Android Chrome and opens the Solana wallet picker.
 - **AI Chat Assistant**: Get help and execute actions through an AI-powered chat interface
+- **AI Agent Wallets (Safes)**: Create multiple AI agent wallets and switch between them. Each safe can have a different strategy tag (compound vs delta-neutral).
 
 ### Investment Dashboard
 - **Top Investment Opportunities**: View the highest APY opportunities across all protocols
@@ -302,6 +303,11 @@ To refresh it, see `docs/panora-token-list.md`.
    # or
    npm install
    ```
+
+## 📚 Yield AI Agent docs
+
+- [AI Agent Strategies (Safe + Strategy Tags)](./docs/ai-agent-strategies.md)
+- [Strategy Registry + Delta-Neutral Decibel V2 Integration](./docs/strategy-registry-and-dn-v2.md)
 
 3. **Set up environment variables**
    ```bash

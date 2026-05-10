@@ -109,6 +109,26 @@ export function buildVaultExecuteWithdrawFullAsOwnerPayload(params: {
 }
 
 /**
+ * Builds the payload for vault::set_safe_paused (owner-only).
+ * When paused=true, executor operations abort with E_VAULT_PAUSED; owner withdrawals still work.
+ * Arguments: safe_address (address), paused (bool).
+ */
+export function buildSetSafePausedPayload(
+  safeAddress: string,
+  paused: boolean
+): {
+  function: string;
+  typeArguments: string[];
+  functionArguments: [string, boolean];
+} {
+  return {
+    function: `${YIELD_AI_VAULT_MODULE}::set_safe_paused`,
+    typeArguments: [],
+    functionArguments: [safeAddress, paused],
+  };
+}
+
+/**
  * Owner emergency path: full Echelon FA market exit back into the safe (no executor).
  * Function: {MODULE}::execute_withdraw_all_echelon_fa_as_owner
  * Arguments: safe_address, adapter_address, market_obj (Object<Market>).

@@ -27,6 +27,93 @@ const KNOWN_TOKENS: Record<string, { symbol: string; name: string; logoUrl?: str
   [WRAPPED_SOL_MINT]: { symbol: "SOL", name: "Solana", logoUrl: "/token_ico/sol.png" },
 };
 
+type JupiterPortfolioTokenInfo = {
+  address?: string;
+  symbol?: string;
+  name?: string;
+  decimals?: number;
+  logoURI?: string;
+  logoUrl?: string;
+};
+
+type JupiterPortfolioTokenSnapshot = {
+  amount?: number; // ui amount
+  price?: number; // usd per token
+  value?: number; // usd value
+  yields?: unknown;
+  tokenInfo?: JupiterPortfolioTokenInfo;
+};
+
+function getJupiterApiKey(): string | undefined {
+  return (
+    process.env.JUP_API_KEY ||
+    process.env.NEXT_PUBLIC_JUP_API_KEY ||
+    process.env.JUPITER_API_KEY ||
+    undefined
+  )?.trim() || undefined;
+}
+
+function isLikelySolanaMint(input: string): boolean {
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(input);
+}
+
+async function fetchJupiterPortfolioWalletSnapshot(
+  address: string
+): Promise<Map<string, JupiterPortfolioTokenSnapshot> | null> {
+  const apiKey = getJupiterApiKey();
+  if (!apiKey) return null;
+  try {
+    const url = `https://api.jup.ag/portfolio/v1/positions/${encodeURIComponent(address)}`;
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json", "x-api-key": apiKey },
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const json = (await res.json().catch(() => null)) as any;
+    const elements: any[] = Array.isArray(json?.elements)
+      ? json.elements
+      : Array.isArray(json?.data?.elements)
+        ? json.data.elements
+        : [];
+    const tokenInfoSolana: Record<string, JupiterPortfolioTokenInfo> =
+      (json?.tokenInfo?.solana && typeof json.tokenInfo.solana === "object" ? json.tokenInfo.solana : {}) as any;
+
+    // Find the "Wallet" element (type=multiple,label=Wallet) if present.
+    const walletEl = elements.find(
+      (e) => String(e?.label ?? "").toLowerCase() === "wallet" || String(e?.name ?? "").toLowerCase() === "wallet"
+    );
+    const assets: any[] = Array.isArray(walletEl?.data?.assets)
+      ? walletEl.data.assets
+      : Array.isArray(walletEl?.data?.tokens)
+        ? walletEl.data.tokens
+        : [];
+
+    const out = new Map<string, JupiterPortfolioTokenSnapshot>();
+    for (const a of assets) {
+      if (!a || typeof a !== "object") continue;
+      const type = String((a as any).type ?? "").trim();
+      if (type && type !== "token") continue;
+      const mint = String((a as any)?.data?.address ?? "").trim();
+      if (!mint || !isLikelySolanaMint(mint)) continue;
+      const amount = Number((a as any)?.data?.amount);
+      const price = Number((a as any)?.data?.price);
+      const value = Number((a as any)?.value);
+      const tokenInfo = tokenInfoSolana[mint];
+      out.set(mint, {
+        amount: Number.isFinite(amount) ? amount : undefined,
+        price: Number.isFinite(price) ? price : undefined,
+        value: Number.isFinite(value) ? value : undefined,
+        yields: (a as any)?.data?.yields,
+        tokenInfo,
+      });
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 export interface SolanaPortfolio {
   tokens: Token[];
   totalValueUsd: number;
@@ -201,11 +288,17 @@ export class SolanaPortfolioService {
   async getPortfolio(address: string): Promise<SolanaPortfolio> {
     const owner = new PublicKey(address);
 
+    // Fast metadata/price snapshot from Jupiter (paid) to reduce token metadata search calls and
+    // sometimes avoid price lookups for common tokens.
+    const jupWalletSnapshot = await fetchJupiterPortfolioWalletSnapshot(address);
+
     const loaded = await this.fetchParsedTokenAccountsWithLamports(owner);
     const parsedTokenAccounts = loaded.accounts;
     const lamports = loaded.lamports;
 
     const tokens: Token[] = [];
+    /** wSOL mint balances from SPL token accounts (owner may also hold native SOL in lamports). */
+    let wrappedSolRawFromAtas = 0n;
 
     for (const { account } of parsedTokenAccounts) {
       const parsed = account.data as {
@@ -236,8 +329,24 @@ export class SolanaPortfolioService {
       }
 
       const rawAmount = tokenAmount.amount ?? "0";
+      let rawBig: bigint;
+      try {
+        rawBig = BigInt(String(rawAmount).split(".")[0] || "0");
+      } catch {
+        continue;
+      }
+      if (rawBig <= 0n) {
+        continue;
+      }
+
       const uiAmount = tokenAmount.uiAmount ?? parseFloat(tokenAmount.uiAmountString ?? "0");
       const decimals = tokenAmount.decimals ?? 0;
+
+      // wSOL is merged with native lamports below (avoid XOR: dust wSOL ATA + large native SOL).
+      if (mint === WRAPPED_SOL_MINT) {
+        wrappedSolRawFromAtas += rawBig;
+        continue;
+      }
 
       if (!uiAmount || uiAmount <= 0) {
         continue;
@@ -254,14 +363,15 @@ export class SolanaPortfolioService {
       });
     }
 
-    const hasWrappedSol = tokens.some((token) => token.address === WRAPPED_SOL_MINT);
-    if (!hasWrappedSol && lamports > 0) {
+    const nativeLamportsBig = BigInt(Math.max(0, Math.floor(Number(lamports) || 0)));
+    const totalSolRaw = nativeLamportsBig + wrappedSolRawFromAtas;
+    if (totalSolRaw > 0n) {
       tokens.push({
         address: WRAPPED_SOL_MINT,
         name: KNOWN_TOKENS[WRAPPED_SOL_MINT].name,
         symbol: KNOWN_TOKENS[WRAPPED_SOL_MINT].symbol,
         decimals: 9,
-        amount: lamports.toString(),
+        amount: totalSolRaw.toString(),
         price: null,
         value: null,
       });
@@ -279,19 +389,48 @@ export class SolanaPortfolioService {
       });
     });
 
+    // 1) Apply metadata and known prices from Jupiter Portfolio snapshot (if available).
+    const mintsMissingMeta: string[] = [];
+    const priceMapFromJup: Record<string, number> = {};
+    for (const token of tokens) {
+      const mint = token.address;
+      const snap = jupWalletSnapshot?.get(mint);
+      const ti = snap?.tokenInfo;
+      if (ti) {
+        if (ti.symbol) token.symbol = ti.symbol;
+        if (ti.name) token.name = ti.name;
+        if (typeof ti.decimals === "number" && Number.isFinite(ti.decimals)) token.decimals = ti.decimals;
+        const logo = (ti.logoURI || ti.logoUrl || "").trim();
+        if (logo) token.logoUrl = logo;
+      }
+      if (typeof snap?.price === "number" && Number.isFinite(snap.price) && snap.price > 0) {
+        priceMapFromJup[mint] = snap.price;
+      }
+      if (!ti && mint !== WRAPPED_SOL_MINT) {
+        mintsMissingMeta.push(mint);
+      }
+    }
+
+    // Always seed SOL metadata with local fallback.
+    for (const token of tokens) {
+      if (token.address !== WRAPPED_SOL_MINT) continue;
+      token.symbol = KNOWN_TOKENS[WRAPPED_SOL_MINT].symbol;
+      token.name = KNOWN_TOKENS[WRAPPED_SOL_MINT].name;
+      token.decimals = 9;
+      token.logoUrl = KNOWN_TOKENS[WRAPPED_SOL_MINT].logoUrl;
+    }
+
+    // 2) Only for missing mints, call Jupiter token metadata search (can be rate-limited).
     const metadataService = JupiterTokenMetadataService.getInstance();
-    // Avoid depending on Jupiter metadata for SOL (frequently rate-limited); use known local fallback.
-    const requestedMints = tokens.map((token) => token.address).filter((m) => m !== WRAPPED_SOL_MINT);
-    console.log(`[SolanaPortfolio] 🔍 Requesting metadata for ${requestedMints.length} mints:`, requestedMints);
-    
-    const metadataMap = await metadataService.getMetadataMap(requestedMints);
-    // Seed SOL metadata with local fallback so UI never shows sticky N/A for SOL.
-    metadataMap[WRAPPED_SOL_MINT] = {
-      symbol: KNOWN_TOKENS[WRAPPED_SOL_MINT]?.symbol,
-      name: KNOWN_TOKENS[WRAPPED_SOL_MINT]?.name,
-      logoUrl: KNOWN_TOKENS[WRAPPED_SOL_MINT]?.logoUrl,
-      decimals: 9,
-    };
+    const metadataMap = await metadataService.getMetadataMap(mintsMissingMeta);
+    for (const token of tokens) {
+      const metadata = metadataMap[token.address];
+      if (!metadata) continue;
+      if (metadata.symbol) token.symbol = metadata.symbol;
+      if (metadata.name) token.name = metadata.name;
+      if (metadata.logoUrl) token.logoUrl = metadata.logoUrl;
+      if (typeof metadata.decimals === "number" && Number.isFinite(metadata.decimals)) token.decimals = metadata.decimals;
+    }
     
     console.log(`[SolanaPortfolio] 📦 Received metadataMap with ${Object.keys(metadataMap).length} entries:`, 
       Object.keys(metadataMap).map(mint => ({
@@ -355,7 +494,7 @@ export class SolanaPortfolioService {
     const uniqueMints = Array.from(new Set(tokens.map((token) => token.address)));
     console.log(`[SolanaPortfolio] 💰 Fetching prices for ${uniqueMints.length} unique mints:`, uniqueMints);
 
-    const priceMap = await this.fetchUsdPrices(uniqueMints);
+    const priceMap = { ...(await this.fetchUsdPrices(uniqueMints)), ...priceMapFromJup };
     console.log(`[SolanaPortfolio] 💰 Received priceMap with ${Object.keys(priceMap).length} prices:`, 
       Object.entries(priceMap).map(([mint, price]) => ({ mint, price }))
     );

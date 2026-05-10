@@ -41,22 +41,36 @@ function pickFirstNumber(obj: unknown, paths: string[], fallback = 0): number {
 type KaminoBorrowRow = {
   borrowReserve: string;
   borrowedAmountSf?: string;
+  borrowedAmountOutsideElevationGroups?: string;
   marketValueSf?: string;
   marketValueUsd?: number;
   tokenMint?: string;
   tokenSymbol?: string;
   tokenLogoUrl?: string;
+  tokenDecimals?: number;
+  borrowApyPct?: number;
 };
 
 type KaminoDepositRow = {
   depositReserve: string;
   depositedAmountSf?: string;
+  depositedAmount?: string;
   marketValueSf?: string;
   marketValueUsd?: number;
   tokenMint?: string;
   tokenSymbol?: string;
   tokenLogoUrl?: string;
+  tokenDecimals?: number;
+  supplyApyPct?: number;
 };
+
+function baseUnitsToUiAmount(raw: unknown, decimals: unknown): number | null {
+  const n = Number(raw);
+  const d = Number(decimals);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (!Number.isFinite(d) || d < 0) return null;
+  return n / Math.pow(10, d);
+}
 
 function extractKaminoBorrows(obligation: unknown): KaminoBorrowRow[] {
   const raw = getDeep(obligation, "state.borrows");
@@ -144,6 +158,8 @@ export function mapKaminoToProtocolPositions(
             (symbol ? `/token_ico/${symbol.toLowerCase()}.png` : "") ||
             getPreferredJupiterTokenIcon(symbol, d.tokenLogoUrl) ||
             "";
+          const amount = baseUnitsToUiAmount(d.depositedAmount, d.tokenDecimals);
+          const price = typeof amount === "number" && Number.isFinite(amount) && amount > 0 ? v / amount : undefined;
           out.push({
             id: `kamino-deposit-${d.depositReserve}-${out.length}`,
             label: symbol || "Supply",
@@ -151,6 +167,11 @@ export function mapKaminoToProtocolPositions(
             logoUrl: icon || undefined,
             logoUrlFallback: d.tokenLogoUrl || undefined,
             badge: PositionBadge.Supply,
+            price: typeof price === "number" && Number.isFinite(price) && price > 0 ? price : undefined,
+            subLabel: typeof amount === "number" && Number.isFinite(amount) && amount > 0 ? formatNumber(amount, 4) : undefined,
+            apr: (
+              typeof d.supplyApyPct === "number" && Number.isFinite(d.supplyApyPct) ? d.supplyApyPct : 0
+            ).toFixed(2),
           });
         }
       } else {
@@ -166,6 +187,9 @@ export function mapKaminoToProtocolPositions(
           label: r.marketName || `Lend ${shortKey(r.marketPubkey)}`,
           value,
           badge: PositionBadge.Supply,
+          // If we couldn't map per-reserve line items, we still show an APR badge as requested.
+          // The reserve-level supply APY isn't available in this fallback row, so default to 0.00%.
+          apr: "0.00",
         });
       }
 
@@ -178,6 +202,8 @@ export function mapKaminoToProtocolPositions(
           (symbol ? `/token_ico/${symbol.toLowerCase()}.png` : "") ||
           getPreferredJupiterTokenIcon(symbol, b.tokenLogoUrl) ||
           "";
+        const amount = baseUnitsToUiAmount(b.borrowedAmountOutsideElevationGroups, b.tokenDecimals);
+        const price = typeof amount === "number" && Number.isFinite(amount) && amount > 0 ? v / amount : undefined;
         out.push({
           id: `kamino-borrow-${b.borrowReserve}-${out.length}`,
           label: symbol || "Borrow",
@@ -185,6 +211,11 @@ export function mapKaminoToProtocolPositions(
           logoUrl: icon || undefined,
           logoUrlFallback: b.tokenLogoUrl || undefined,
           badge: PositionBadge.Borrow,
+          price: typeof price === "number" && Number.isFinite(price) && price > 0 ? price : undefined,
+          subLabel: typeof amount === "number" && Number.isFinite(amount) && amount > 0 ? formatNumber(amount, 4) : undefined,
+          apr: (
+            typeof b.borrowApyPct === "number" && Number.isFinite(b.borrowApyPct) ? b.borrowApyPct : 0
+          ).toFixed(2),
         });
       }
       continue;

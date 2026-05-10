@@ -28,18 +28,24 @@ export const WalletProvider = ({ children }: PropsWithChildren) => {
       const error = event.reason;
       const name = error?.name || '';
       const message = error?.message || String(error) || '';
+      const lower = message.toLowerCase();
       
       // List of benign wallet errors that should be suppressed
       const isBenignWalletError = 
         name === 'WalletNotConnectedError' ||
         name === 'WalletDisconnectedError' ||
         name === 'WalletNotSelectedError' ||
+        name === 'UnauthorizedError' ||
         message === 'Unexpected error' ||
         message.includes('WalletNotConnectedError') ||
         message.includes('WalletDisconnectedError') ||
         message.includes('WalletNotSelectedError') ||
         message.includes('User has rejected the request') ||
         message.includes('User rejected') ||
+        lower.includes('not been authorized by the user') ||
+        lower.includes('not authorized by the user') ||
+        lower.includes('requested method and/or account has not been authorized') ||
+        lower.includes('unauthorized') ||
         message.includes('Unexpected error');
       
       if (isBenignWalletError) {
@@ -114,6 +120,7 @@ export const WalletProvider = ({ children }: PropsWithChildren) => {
       onError={(error) => {
         const message = typeof error === "string" ? error : (error?.message ?? "Unknown wallet error");
         const name = (error as { name?: string })?.name;
+        const lower = String(message).toLowerCase();
         
         // Debug log all errors
         console.log('[WalletProvider] onError called:', { name, message, error });
@@ -124,6 +131,7 @@ export const WalletProvider = ({ children }: PropsWithChildren) => {
         if (
           message === "Unexpected error" ||
           message === "User has rejected the request" ||
+          name === "UnauthorizedError" ||
           name === "WalletDisconnectedError" ||
           name === "WalletNotConnectedError" ||
           name === "WalletNotSelectedError" ||
@@ -131,6 +139,10 @@ export const WalletProvider = ({ children }: PropsWithChildren) => {
             message.includes("WalletDisconnectedError") || 
             message.includes("WalletNotConnectedError") || 
             message.includes("WalletNotSelectedError") ||
+            lower.includes("not been authorized by the user") ||
+            lower.includes("not authorized by the user") ||
+            lower.includes("requested method and/or account has not been authorized") ||
+            lower.includes("unauthorized") ||
             message.includes("disconnect") ||
             message.includes("Disconnect") ||
             message.includes("already connected")

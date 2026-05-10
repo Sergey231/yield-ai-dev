@@ -3,7 +3,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import Image from 'next/image';
 import { useWalletData } from '@/contexts/WalletContext';
+import { useWallet } from '@aptos-labs/wallet-adapter-react';
 import { useYieldAiSafes } from '@/lib/query/hooks/protocols/yield-ai';
+import { useSelectedYieldAiSafe } from '@/lib/query/hooks/protocols/yield-ai/useSelectedYieldAiSafe';
+import { useQueryClient } from '@tanstack/react-query';
+import { queryKeys } from '@/lib/query/queryKeys';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
@@ -16,6 +20,13 @@ import { normalizeAddress } from '@/lib/utils/addressNormalization';
 import { Copy, X } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Badge } from '@/components/ui/badge';
+import { useSafeAiAgentStrategy } from '@/lib/query/hooks/protocols/yield-ai/useSafeAiAgentStrategy';
+import { AI_AGENT_STRATEGIES, type AiAgentStrategyId } from '@/lib/protocols/yield-ai/strategyRegistry';
+import { STRATEGY_REGISTRY_ENTRYPOINTS, strategyIdArg } from '@/lib/protocols/yield-ai/strategyRegistry';
+import { GasStationService } from '@/lib/services/gasStation';
+import { toCanonicalAddress } from '@/lib/utils/addressNormalization';
 
 export interface YieldAiAgentWalletBlockProps {
   className?: string;
@@ -25,16 +36,19 @@ const USDC_LOGO_APTOS = 'https://assets.panora.exchange/tokens/aptos/USDC.svg';
 
 export function YieldAiAgentWalletBlock({ className }: YieldAiAgentWalletBlockProps) {
   const { address, tokens } = useWalletData();
+  const { signAndSubmitTransaction } = useWallet();
   const protocol = getProtocolByName('AI agent');
   const [logoError, setLogoError] = useState(false);
   const { toast } = useToast();
+  const queryClient = useQueryClient();
 
   const { data: safeAddresses = [], isLoading: safesLoading } = useYieldAiSafes(address, {
     enabled: Boolean(address),
     refetchOnMount: 'always',
   });
 
-  const safeAddress = safeAddresses[0];
+  const { selectedSafeAddress: safeAddress, setSelectedSafeAddress, safeAddresses: normalizedSafes } =
+    useSelectedYieldAiSafe({ owner: address, safeAddresses });
   const hasSafe = Boolean(safeAddress);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -45,8 +59,77 @@ export function YieldAiAgentWalletBlock({ className }: YieldAiAgentWalletBlockPr
     if (!address) return 'Connect your wallet to create and fund an AI agent wallet.';
     if (safesLoading) return 'Checking wallet…';
     if (!hasSafe) return 'Create an AI agent wallet (safe) with spending limits.';
-    return `Safe ${safeAddress.slice(0, 6)}...${safeAddress.slice(-4)}`;
+    return `Safe ${safeAddress?.slice(0, 6)}...${safeAddress?.slice(-4)}`;
   }, [address, safesLoading, hasSafe, safeAddress]);
+
+  const { data: safeStrategy } = useSafeAiAgentStrategy(safeAddress ?? undefined, { enabled: Boolean(safeAddress) });
+  const activeStrategyId: AiAgentStrategyId | null = safeStrategy?.activeStrategyId ?? null;
+
+  const switchStrategy = async (next: AiAgentStrategyId) => {
+    if (!safeAddress) return;
+    if (!signAndSubmitTransaction) {
+      toast({
+        title: 'Wallet required',
+        description: 'Connect your Aptos wallet to switch AI agent strategy.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    try {
+      const gasStationSubmitter = GasStationService.getInstance().getTransactionSubmitter();
+      if (!gasStationSubmitter) {
+        throw new Error('Gas Station is not available. Configure NEXT_PUBLIC_APTOS_GAS_STATION_KEY.');
+      }
+
+      const attach = async (strategyId: string) => {
+        await signAndSubmitTransaction({
+          data: {
+            function: STRATEGY_REGISTRY_ENTRYPOINTS.attachStrategy as `${string}::${string}::${string}`,
+            typeArguments: [],
+            functionArguments: [toCanonicalAddress(safeAddress), strategyIdArg(strategyId)],
+          },
+          options: { maxGasAmount: 70_000 },
+          transactionSubmitter: gasStationSubmitter as any,
+        });
+      };
+      const detach = async (strategyId: string) => {
+        await signAndSubmitTransaction({
+          data: {
+            function: STRATEGY_REGISTRY_ENTRYPOINTS.detachStrategy as `${string}::${string}::${string}`,
+            typeArguments: [],
+            functionArguments: [toCanonicalAddress(safeAddress), strategyIdArg(strategyId)],
+          },
+          options: { maxGasAmount: 70_000 },
+          transactionSubmitter: gasStationSubmitter as any,
+        });
+      };
+
+      const attachedIds = safeStrategy?.activeStrategyIds ?? [];
+      const opposite: AiAgentStrategyId =
+        next === 'decibel_delta_neutral' ? 'stablecoin_compound' : 'decibel_delta_neutral';
+
+      await attach(next);
+      // Only detach the opposite canonical tag if it is actually attached.
+      if (attachedIds.includes(opposite)) {
+        await detach(opposite);
+      }
+
+      toast({
+        title: 'Strategy updated',
+        description: `Active AI agent: ${AI_AGENT_STRATEGIES[next].label}`,
+      });
+
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.protocols.yieldAi.safeActiveStrategy(safeAddress),
+      });
+    } catch (err) {
+      toast({
+        title: 'Failed to switch strategy',
+        description: err instanceof Error ? err.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    }
+  };
 
   const walletUsdcPriceUsd = useMemo(() => {
     const usdc = tokens?.find(
@@ -93,6 +176,25 @@ export function YieldAiAgentWalletBlock({ className }: YieldAiAgentWalletBlockPr
                 <h3 className="text-lg font-semibold text-primary">Yield AI agent</h3>
                 <div className="flex items-center gap-1.5 min-w-0">
                   <p className="text-sm text-muted-foreground truncate">{subtitle}</p>
+                  {hasSafe && normalizedSafes.length > 1 ? (
+                    <Select value={safeAddress ?? ''} onValueChange={setSelectedSafeAddress}>
+                      <SelectTrigger className="h-7 w-[190px] ml-2">
+                        <SelectValue placeholder="Select safe" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {normalizedSafes.map((s) => (
+                          <SelectItem key={s} value={s}>
+                            {s.slice(0, 6)}…{s.slice(-4)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : null}
+                  {hasSafe && activeStrategyId ? (
+                    <Badge variant="secondary" className="ml-2">
+                      {AI_AGENT_STRATEGIES[activeStrategyId].label}
+                    </Badge>
+                  ) : null}
                   {hasSafe && safeAddress && (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -141,14 +243,32 @@ export function YieldAiAgentWalletBlock({ className }: YieldAiAgentWalletBlockPr
                   Create AI agent wallet
                 </Button>
               ) : (
-                <Button
-                  size="sm"
-                  className="bg-success text-success-foreground hover:bg-success/90"
-                  onClick={() => setDepositOpen(true)}
-                  disabled={!address}
-                >
-                  Deposit
-                </Button>
+                <>
+                  {/* Temporarily hidden - Create new safe button */}
+                  {false && (
+                    <Button size="sm" variant="outline" onClick={() => setSettingsOpen(true)} disabled={!address}>
+                      Create new safe
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    className="bg-success text-success-foreground hover:bg-success/90"
+                    onClick={() => setDepositOpen(true)}
+                    disabled={!address}
+                  >
+                    Deposit
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      switchStrategy(activeStrategyId === 'decibel_delta_neutral' ? 'stablecoin_compound' : 'decibel_delta_neutral')
+                    }
+                    disabled={!address || !activeStrategyId}
+                  >
+                    Switch strategy
+                  </Button>
+                </>
               )}
             </div>
           </div>
@@ -209,7 +329,7 @@ export function YieldAiAgentWalletBlock({ className }: YieldAiAgentWalletBlockPr
           address: USDC_FA_METADATA_MAINNET,
         }}
         priceUSD={walletUsdcPriceUsd}
-        yieldAiSafeAddress={safeAddress}
+        yieldAiSafeAddress={safeAddress ?? undefined}
       />
     </>
   );

@@ -4,6 +4,10 @@ import { YIELD_AI_VAULT_VIEWS } from "@/lib/constants/yieldAiVault";
 import { loadStrategyConfigFromDisk, buildRunContext } from "./engine/configLoader";
 import { computeStateForSafe } from "./engine/stateComputer";
 import { executeActionDag } from "./engine/dagExecutor";
+import {
+  STRATEGY_REGISTRY_VIEWS,
+  bytesToUtf8String,
+} from "@/lib/protocols/yield-ai/strategyRegistry";
 
 export type YieldAiVaultCronRunResult = {
   runId: string;
@@ -39,6 +43,11 @@ export type YieldAiVaultCronRunResult = {
     safeAddress: string;
     actionId: string;
     error: string;
+  }>;
+  /** Safes that were intentionally skipped (e.g. by strategy tags). */
+  skippedSafes: Array<{
+    safeAddress: string;
+    reason: string;
   }>;
   dryRun: boolean;
 };
@@ -159,6 +168,7 @@ export async function runYieldAiVaultCronPass(options: {
     withdraw: [] as string[],
   };
   const errors: Array<{ safeAddress: string; actionId: string; error: string }> = [];
+  const skippedSafes: Array<{ safeAddress: string; reason: string }> = [];
 
   let processedSafes = 0;
   let txCount = 0;
@@ -173,6 +183,24 @@ export async function runYieldAiVaultCronPass(options: {
 
   const config = await loadStrategyConfigFromDisk();
   const aptos = buildAptos(config.global.rpcUrl);
+
+  // Best-effort: if Strategy Registry is initialized, we can gate cron actions
+  // based on on-chain tags (e.g. skip stablecoin compounding when DN is active).
+  let strategyRegistryInitialized = false;
+  try {
+    const raw = await aptos.view({
+      payload: {
+        function: STRATEGY_REGISTRY_VIEWS.initialized,
+        typeArguments: [],
+        functionArguments: [],
+      },
+    });
+    const v = Array.isArray(raw) ? raw[0] : raw;
+    strategyRegistryInitialized = v === true || v === "true";
+  } catch (err) {
+    console.warn("[Yield AI] cron: strategy registry init view failed; proceeding without gating", err);
+    strategyRegistryInitialized = false;
+  }
 
   const safeFilter =
     Array.isArray(options.safeAddresses) && options.safeAddresses.length > 0
@@ -223,6 +251,39 @@ export async function runYieldAiVaultCronPass(options: {
 
     const configured = configuredByAddress.get(discovered.safeAddress.toLowerCase());
     if (configured && configured.enabled === false) continue;
+
+    // Strategy gating:
+    // - Default behavior: if no tag / registry unavailable → run stablecoin compound implementation.
+    // - If DN tag is active, skip this safe entirely (no cron automation).
+    if (strategyRegistryInitialized) {
+      try {
+        const raw = await aptos.view({
+          payload: {
+            function: STRATEGY_REGISTRY_VIEWS.getSafeActiveStrategies,
+            typeArguments: [],
+            functionArguments: [discovered.safeAddress],
+          },
+        });
+        const vec = Array.isArray(raw) ? raw[0] : raw;
+        const list = Array.isArray(vec) ? vec : [];
+        const decoded = list
+          .map((b) => bytesToUtf8String(b))
+          .filter((x): x is string => Boolean(x && x.length > 0));
+        if (decoded.includes("decibel_delta_neutral")) {
+          skippedSafes.push({
+            safeAddress: discovered.safeAddress,
+            reason: "Skipped: decibel_delta_neutral strategy tag is ACTIVE (no stablecoin compounding cron).",
+          });
+          continue;
+        }
+      } catch (err) {
+        // If tag read fails, do not block compounding (best-effort gating only).
+        console.warn("[Yield AI] cron: get_safe_active_strategies failed; continuing", {
+          safeAddress: discovered.safeAddress,
+          err,
+        });
+      }
+    }
 
     const strategyId = configured?.strategyId ?? defaultStrategyId;
     const strategy = config.strategies?.[strategyId];
@@ -339,6 +400,7 @@ export async function runYieldAiVaultCronPass(options: {
     withdrawnSafes,
     txHashes,
     errors,
+    skippedSafes,
     dryRun,
   } satisfies YieldAiVaultCronRunResult;
 }

@@ -52,7 +52,8 @@ export function useSolanaPortfolio(options?: UseSolanaPortfolioOptions): SolanaP
   const enabled = options?.enabled ?? true;
   const overrideAddress = options?.overrideAddress?.trim() || null;
   const injectedSolanaAddress = useNativeWalletStore((s) => s.solanaAddress);
-  const effectiveOverrideAddress = injectedSolanaAddress?.trim() || overrideAddress;
+  /** Explicit `overrideAddress` (e.g. `?solanaAddress=` read-only) wins over native-injected Solana. */
+  const effectiveOverrideAddress = overrideAddress || injectedSolanaAddress?.trim() || null;
   // 1) Aptos cross-chain wallet (Trust / derived) — даёт solanaWallet внутри себя.
   const { wallet: aptosWallet } = useAptosWallet();
   // 2) Обычный Solana-адаптер — независимое подключение Solana.

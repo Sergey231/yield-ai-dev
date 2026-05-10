@@ -2043,11 +2043,7 @@ function BridgePageContent() {
               <ArrowLeft className="h-4 w-4" />
               Back to Dashboard
             </button>
-            <Link href="/privacy-bridge">
-              <Button variant="outline" size="sm" className="bg-black text-white border-black hover:bg-gray-800 hover:text-white hover:border-gray-800">
-                Privacy Bridge
-              </Button>
-            </Link>
+            {/* Privacy Bridge is disabled */}
           </div>
 
           <BridgeView

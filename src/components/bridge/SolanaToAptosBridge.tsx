@@ -1,6 +1,6 @@
 "use client";
 
-import { PublicKey, Transaction, Keypair } from "@solana/web3.js";
+import { PublicKey, Transaction, Keypair, ComputeBudgetProgram } from "@solana/web3.js";
 import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { USDC_MINT, TOKEN_MESSENGER_MINTER_PROGRAM_ID } from "@/lib/cctp-mint-pdas";
 import { createDepositForBurnInstructionManual } from "@/lib/cctp-deposit-for-burn";
@@ -56,6 +56,11 @@ export async function executeSolanaToAptosBridge(
   aptosAddress: string,
   onStatusUpdateOrOptions: ((status: string) => void) | SolanaToAptosBridgeTmpOptions
 ): Promise<string> {
+  // Priority fee to reduce "block height exceeded" confirmations under congestion.
+  // microLamports per compute unit; small value is usually enough to nudge inclusion.
+  const PRIORITY_FEE_MICROLAMPORTS = 5_000;
+  const COMPUTE_UNIT_LIMIT = 200_000;
+
   // TMP MODE: burn from tmp wallet using keypairs only (no wallet adapter)
   if (typeof onStatusUpdateOrOptions !== "function" && onStatusUpdateOrOptions?.mode === "tmp") {
     const { tmpKeypair, feePayerKeypair, onStatusUpdate } = onStatusUpdateOrOptions;
@@ -101,6 +106,10 @@ export async function executeSolanaToAptosBridge(
     );
 
     const tx = new Transaction();
+    tx.add(
+      ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICROLAMPORTS }),
+    );
     tx.add(instruction);
     tx.feePayer = feePayerKeypair.publicKey;
 
@@ -168,6 +177,10 @@ export async function executeSolanaToAptosBridge(
     // Note: Service wallet for gas payment is only used for Aptos transactions (in /api/aptos/mint-cctp)
     // For Solana burn transaction, user pays for gas
     const transaction = new Transaction();
+    transaction.add(
+      ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICROLAMPORTS }),
+    );
     transaction.add(instruction);
     transaction.feePayer = solanaPublicKey;
 

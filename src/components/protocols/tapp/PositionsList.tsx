@@ -10,6 +10,7 @@ import Image from "next/image";
 import { ManagePositionsButton } from "../ManagePositionsButton";
 import { useCollapsible } from "@/contexts/CollapsibleContext";
 import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
+import { ProtocolClosureNotice } from "@/components/ui/protocol-closure-notice";
 
 interface PositionsListProps {
   address?: string;
@@ -200,7 +201,10 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
                 />
               </div>
             )}
-            <CardTitle className="text-lg">Tapp Exchange</CardTitle>
+            <CardTitle className="text-lg flex items-center gap-1">
+              Tapp Exchange
+              <ProtocolClosureNotice protocolKey="tapp" stopPropagation className="-ml-1" />
+            </CardTitle>
           </div>
           <div className="flex items-center gap-2">
             <div className="text-lg whitespace-nowrap">{formatUsd(totalValue)}</div>
