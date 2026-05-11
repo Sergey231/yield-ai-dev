@@ -3,13 +3,6 @@ import type { NextRequest } from 'next/server';
 
 export function middleware(request: NextRequest) {
   const { pathname, hostname } = request.nextUrl;
-  // Hide Privacy Bridge page, but keep code intact for future re-enable.
-  if (pathname === '/privacy-bridge' || pathname.startsWith('/privacy-bridge/')) {
-    const url = request.nextUrl.clone();
-    url.pathname = '/bridge';
-    url.search = '';
-    return NextResponse.redirect(url, 302);
-  }
   
   // Check if we're on the main domain
   const isMainDomain = hostname === 'yieldai.app' || hostname === 'www.yieldai.app';

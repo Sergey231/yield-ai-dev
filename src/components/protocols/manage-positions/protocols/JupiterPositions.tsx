@@ -31,6 +31,12 @@ import { isLikelySolanaAddress } from "@/lib/kamino/kvaultVaultAddress";
 import { useJupiterBorrow } from "@/lib/query/hooks/protocols/jupiter/useJupiterBorrow";
 import { AccountHealthSummary } from "@/components/protocols/manage-positions/AccountHealthSummary";
 import { Loader2 } from "lucide-react";
+import {
+  isYieldAiNativeAppNow,
+  serializeUnsignedSolanaTxToBase64,
+  signAndSubmitSolanaTransaction,
+} from "@/lib/mobile/nativeBridge";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 type JupiterPosition = {
   token?: {
@@ -227,8 +233,11 @@ export function JupiterPositions() {
   const activeSignTransaction = signTransaction ?? adapterSignTransaction;
   const activeSendTransaction = sendTransaction ?? adapterSendTransaction;
   const isTrustWallet = (solanaWallet?.adapter?.name || "").toLowerCase().includes("trust");
+  const injectedSolanaAddress = useNativeWalletStore((s) => s.solanaAddress);
+  const trimmedInjectedSolanaAddress = (injectedSolanaAddress ?? "").trim();
   const hasAnySolanaSession =
     !!effectiveSignerAddress ||
+    !!trimmedInjectedSolanaAddress ||
     !!solanaAddress ||
     !!derivedSolanaAddress ||
     !!solanaConnecting ||
@@ -483,6 +492,111 @@ export function JupiterPositions() {
   const handleDeposit = async (amountUi: number) => {
     if (!selectedPosition) return;
     setIsDepositing(true);
+
+    // WebView native flow: build wrap WSOL (if needed) and Jupiter deposit txs,
+    // route them through the native sign_and_submit_transaction bridge call.
+    if (isYieldAiNativeAppNow() && trimmedInjectedSolanaAddress) {
+      const nativeSignerAddress = trimmedInjectedSolanaAddress;
+      try {
+        if (!Number.isFinite(amountUi) || amountUi <= 0) {
+          toast({ title: "Invalid amount", description: "Enter a valid deposit amount.", variant: "destructive" });
+          return;
+        }
+        const { decimals, mint, symbol, canonicalSymbol } = selectedMeta;
+        if (!mint) {
+          toast({ title: "Token error", description: "Jupiter token address is missing.", variant: "destructive" });
+          return;
+        }
+        const amountBaseUnits = Math.floor(amountUi * Math.pow(10, decimals));
+        if (!Number.isFinite(amountBaseUnits) || amountBaseUnits <= 0) {
+          toast({ title: "Amount too small", description: "Increase amount to meet token precision.", variant: "destructive" });
+          return;
+        }
+
+        const normalizedMint = normalizeMint(mint);
+        const canonicalMint = JUPITER_MINT_BY_SYMBOL[canonicalSymbol || ""] || normalizedMint;
+        const preferLegacyInstruction =
+          JUPITER_PREFER_LEGACY_DEPOSIT_MINTS.has(canonicalMint) ||
+          JUPITER_PREFER_LEGACY_SYMBOLS.has(canonicalSymbol || "");
+        const isWsolDeposit = canonicalMint === WSOL_MINT || canonicalSymbol === "WSOL";
+
+        const connection = new Connection(rpcEndpoint, "confirmed");
+
+        if (isWsolDeposit) {
+          const maxSpendableSol = Math.max(0, selectedWalletAmount - SOL_FEE_RESERVE_UI);
+          if (amountUi > maxSpendableSol + 1e-12) {
+            toast({
+              title: "Leave SOL for fees",
+              description: `For SOL deposits, keep about ${SOL_FEE_RESERVE_UI} SOL for network fees. Max now: ${maxSpendableSol.toFixed(6)} SOL.`,
+              variant: "destructive",
+            });
+            return;
+          }
+          const owner = new PublicKey(nativeSignerAddress);
+          const wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, owner, false);
+          const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+          const wrapTx = new Transaction();
+          wrapTx.feePayer = owner;
+          wrapTx.recentBlockhash = blockhash;
+          wrapTx.add(createAssociatedTokenAccountIdempotentInstruction(owner, wsolAta, owner, NATIVE_MINT));
+          wrapTx.add(SystemProgram.transfer({ fromPubkey: owner, toPubkey: wsolAta, lamports: amountBaseUnits }));
+          wrapTx.add(createSyncNativeInstruction(wsolAta));
+
+          const wrapBase64 = serializeUnsignedSolanaTxToBase64(wrapTx);
+          const wrapSignature = await signAndSubmitSolanaTransaction(wrapBase64);
+          const wrapConfirmation = await connection.confirmTransaction(
+            { signature: wrapSignature, blockhash, lastValidBlockHeight },
+            "confirmed",
+          );
+          if (wrapConfirmation.value.err) {
+            throw new Error(`SOL wrap failed: ${JSON.stringify(wrapConfirmation.value.err)}`);
+          }
+        }
+
+        const txResp = await fetch("/api/protocols/jupiter/deposit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            asset: canonicalMint || normalizedMint || mint,
+            signer: nativeSignerAddress,
+            amount: String(amountBaseUnits),
+            preferLegacyInstruction,
+          }),
+        });
+        const txData = await txResp.json().catch(() => null);
+        if (!txResp.ok || !txData?.success || !txData?.data?.transaction) {
+          throw new Error(txData?.error || `Deposit prepare failed: ${txResp.status}`);
+        }
+
+        const signature = await signAndSubmitSolanaTransaction(String(txData.data.transaction));
+
+        toast({
+          title: "Deposit submitted",
+          description: `Deposited ${amountUi} ${symbol || "token"}.`,
+          action: (
+            <ToastAction altText="View on Solscan" onClick={() => window.open(`https://solscan.io/tx/${signature}`, "_blank")}>
+              View on Solscan
+            </ToastAction>
+          ),
+        });
+        await refreshSolana();
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "jupiter" } }));
+        }
+        closeDeposit();
+      } catch (error) {
+        const message = getErrorMessage(error);
+        if (message.toLowerCase().includes("user rejected")) {
+          toast({ title: "Transaction cancelled", description: "Request was rejected in wallet." });
+        } else {
+          toast({ title: "Deposit failed", description: message, variant: "destructive" });
+        }
+      } finally {
+        setIsDepositing(false);
+      }
+      return;
+    }
+
     const session = await waitForReadySolanaSession();
     let resolvedSignerAddress = session.signerAddress || effectiveSignerAddress;
     let resolvedSendTransaction = session.sendTransaction ?? activeSendTransaction;
@@ -854,6 +968,105 @@ export function JupiterPositions() {
   const handleWithdraw = async (amountUi: number) => {
     if (!selectedPosition) return;
     setIsWithdrawing(true);
+
+    // WebView native flow: build withdraw tx via Jupiter API, submit through bridge.
+    if (isYieldAiNativeAppNow() && trimmedInjectedSolanaAddress) {
+      const nativeSignerAddress = trimmedInjectedSolanaAddress;
+      try {
+        if (!Number.isFinite(amountUi) || amountUi <= 0) {
+          toast({ title: "Invalid amount", description: "Enter a valid withdraw amount.", variant: "destructive" });
+          return;
+        }
+        const { mint, symbol, amount: suppliedAmount, decimals, canonicalSymbol } = selectedMeta;
+        if (!mint) {
+          toast({ title: "Token error", description: "Jupiter token address is missing.", variant: "destructive" });
+          return;
+        }
+        if (amountUi > suppliedAmount + 1e-12) {
+          toast({
+            title: "Amount too high",
+            description: `Withdraw amount exceeds supplied balance (${formatNumber(suppliedAmount, 6)} ${symbol}).`,
+            variant: "destructive",
+          });
+          return;
+        }
+        const amountBaseUnits = Math.floor(amountUi * Math.pow(10, decimals));
+        if (!Number.isFinite(amountBaseUnits) || amountBaseUnits <= 0) {
+          toast({ title: "Amount too small", description: "Increase amount to meet token precision.", variant: "destructive" });
+          return;
+        }
+        const normalizedWithdrawMint = normalizeMint(mint);
+        const canonicalWithdrawMint = JUPITER_MINT_BY_SYMBOL[canonicalSymbol || ""] || normalizedWithdrawMint;
+        const preferLegacyWithdrawInstruction =
+          JUPITER_PREFER_LEGACY_DEPOSIT_MINTS.has(canonicalWithdrawMint) ||
+          JUPITER_PREFER_LEGACY_SYMBOLS.has(canonicalSymbol || "");
+
+        const txResp = await fetch("/api/protocols/jupiter/withdraw", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            asset: mint,
+            signer: nativeSignerAddress,
+            amount: String(amountBaseUnits),
+            preferLegacyInstruction: preferLegacyWithdrawInstruction,
+          }),
+        });
+        const txData = await txResp.json().catch(() => null);
+        if (!txResp.ok || !txData?.success || !txData?.data?.transaction) {
+          throw new Error(txData?.error || `Withdraw prepare failed: ${txResp.status}`);
+        }
+
+        const signature = await signAndSubmitSolanaTransaction(String(txData.data.transaction));
+
+        // For SOL withdraw, Jupiter returns WSOL; unwrap WSOL back to native SOL.
+        if (mint === WSOL_MINT) {
+          try {
+            const connection = new Connection(rpcEndpoint, "confirmed");
+            const owner = new PublicKey(nativeSignerAddress);
+            const wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, owner, false);
+            const wsolBalance = await connection.getTokenAccountBalance(wsolAta).catch(() => null);
+            const rawAmount = Number(wsolBalance?.value?.amount || 0);
+            if (Number.isFinite(rawAmount) && rawAmount > 0) {
+              const { blockhash } = await connection.getLatestBlockhash("confirmed");
+              const unwrapTx = new Transaction();
+              unwrapTx.feePayer = owner;
+              unwrapTx.recentBlockhash = blockhash;
+              unwrapTx.add(createCloseAccountInstruction(wsolAta, owner, owner));
+              const unwrapBase64 = serializeUnsignedSolanaTxToBase64(unwrapTx);
+              await signAndSubmitSolanaTransaction(unwrapBase64);
+            }
+          } catch (unwrapError) {
+            console.warn("[Jupiter][Withdraw] WSOL unwrap step failed", unwrapError);
+          }
+        }
+
+        toast({
+          title: "Withdraw submitted",
+          description: `Withdrew ${amountUi} ${symbol || "token"}.`,
+          action: (
+            <ToastAction altText="View on Solscan" onClick={() => window.open(`https://solscan.io/tx/${signature}`, "_blank")}>
+              View on Solscan
+            </ToastAction>
+          ),
+        });
+        await refreshSolana();
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "jupiter" } }));
+        }
+        closeWithdraw();
+      } catch (error) {
+        const message = getErrorMessage(error);
+        if (message.toLowerCase().includes("user rejected")) {
+          toast({ title: "Transaction cancelled", description: "Request was rejected in wallet." });
+        } else {
+          toast({ title: "Withdraw failed", description: message, variant: "destructive" });
+        }
+      } finally {
+        setIsWithdrawing(false);
+      }
+      return;
+    }
+
     const session = await waitForReadySolanaSession();
     let resolvedSignerAddress = session.signerAddress || effectiveSignerAddress;
     let resolvedSendTransaction = session.sendTransaction ?? activeSendTransaction;

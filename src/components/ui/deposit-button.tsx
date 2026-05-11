@@ -42,6 +42,12 @@ import { ToastAction } from "@/components/ui/toast";
 import { Token as SolanaToken } from "@/lib/types/token";
 import { getSafeSolanaRpcEndpoint } from "@/lib/solana/solanaRpcEndpoint";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
+import {
+  isYieldAiNativeAppNow,
+  serializeUnsignedSolanaTxToBase64,
+  signAndSubmitSolanaTransaction,
+} from "@/lib/mobile/nativeBridge";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 interface DepositButtonProps {
   protocol: Protocol;
@@ -201,6 +207,7 @@ export function DepositButton({
   const solanaTokens = solanaTokensOverride ?? hookedSolanaTokens;
   const refreshSolana = refreshSolanaOverride ?? hookedRefreshSolana;
   const { toast } = useToast();
+  const injectedSolanaAddress = useNativeWalletStore((s) => s.solanaAddress);
 
   const jupiterSymbol = canonicalJupiterSymbol(tokenIn?.symbol);
   const jupiterDisplaySymbol = jupiterSymbol === "WSOL" ? "SOL" : (tokenIn?.symbol || "");
@@ -219,8 +226,14 @@ export function DepositButton({
   const adapterPublicKey = (solanaWallet?.adapter?.publicKey as PublicKey | null) ?? null;
   const adapterAddress = toBase58Address(adapterPublicKey);
   const derivedSolanaAddress = getSolanaWalletAddress(aptosWallet ?? null) ?? "";
+  const trimmedInjectedSolanaAddress = (injectedSolanaAddress ?? "").trim();
   const effectiveSolanaAddress =
-    toBase58Address(solanaPublicKey) || adapterAddress || hookedSolanaAddress || derivedSolanaAddress || "";
+    toBase58Address(solanaPublicKey) ||
+    adapterAddress ||
+    trimmedInjectedSolanaAddress ||
+    hookedSolanaAddress ||
+    derivedSolanaAddress ||
+    "";
   const adapterSendTransaction =
     typeof adapterAny?.sendTransaction === "function"
       ? adapterAny.sendTransaction.bind(adapterAny)
@@ -235,6 +248,7 @@ export function DepositButton({
   const adapterSeemsReady = !!solanaWallet?.adapter?.connected || (!!adapterAddress && hasSolanaSigner);
   const hasAnySolanaSession =
     !!adapterAddress ||
+    !!trimmedInjectedSolanaAddress ||
     !!hookedSolanaAddress ||
     !!derivedSolanaAddress ||
     !!solanaConnecting ||
@@ -558,6 +572,12 @@ export function DepositButton({
       return;
     }
     if (isJupiterProtocol) {
+      // WebView native flow: signing/sending happens via native bridge — no adapter required.
+      if (isYieldAiNativeAppNow() && trimmedInjectedSolanaAddress) {
+        await refreshSolana();
+        setIsJupiterDialogOpen(true);
+        return;
+      }
       const session = resolveSolanaSession();
       if (!session.signerAddress || !session.hasSigner) {
         if (session.hasSession || hasAnySolanaSession || !!effectiveSolanaAddress) {
@@ -579,6 +599,12 @@ export function DepositButton({
     }
 
     if (isKaminoKvVaultFlow) {
+      // WebView native flow: open modal immediately when injected Solana address is present.
+      if (isYieldAiNativeAppNow() && trimmedInjectedSolanaAddress) {
+        await refreshSolana();
+        setIsKaminoVaultDialogOpen(true);
+        return;
+      }
       const session = resolveSolanaSession();
       if (!session.signerAddress || !session.hasSigner) {
         if (session.hasSession || hasAnySolanaSession || !!effectiveSolanaAddress) {
@@ -641,6 +667,123 @@ export function DepositButton({
       setIsJupiterDepositing(false);
       return;
     }
+
+    // WebView native flow: build wrap WSOL (if needed) and Jupiter deposit txs,
+    // route them through the native sign_and_submit_transaction bridge call.
+    if (isYieldAiNativeAppNow() && trimmedInjectedSolanaAddress) {
+      const nativeSignerAddress = trimmedInjectedSolanaAddress;
+      if (!Number.isFinite(amountUi) || amountUi <= 0) {
+        toast({ title: "Invalid amount", description: "Enter a valid deposit amount.", variant: "destructive" });
+        setIsJupiterDepositing(false);
+        return;
+      }
+      if (jupiterSymbol === "WSOL") {
+        const maxSpendableSol = Math.max(0, jupiterWalletAmount - SOL_FEE_RESERVE_UI);
+        if (amountUi > maxSpendableSol + 1e-12) {
+          toast({
+            title: "Leave SOL for fees",
+            description: `For SOL deposits, keep about ${SOL_FEE_RESERVE_UI} SOL for network fees. Max now: ${maxSpendableSol.toFixed(6)} SOL.`,
+            variant: "destructive",
+          });
+          setIsJupiterDepositing(false);
+          return;
+        }
+      }
+      if (amountUi > jupiterWalletAmount + 1e-12) {
+        toast({
+          title: "Insufficient balance",
+          description: `Available: ${jupiterWalletAmount.toFixed(6)} ${jupiterDisplaySymbol || tokenIn?.symbol || "token"}.`,
+          variant: "destructive",
+        });
+        setIsJupiterDepositing(false);
+        return;
+      }
+      const decimals = tokenIn?.decimals ?? 0;
+      const amountBaseUnits = Math.floor(amountUi * Math.pow(10, decimals));
+      if (!Number.isFinite(amountBaseUnits) || amountBaseUnits <= 0) {
+        toast({ title: "Amount too small", description: "Increase amount to meet token precision.", variant: "destructive" });
+        setIsJupiterDepositing(false);
+        return;
+      }
+
+      try {
+        isJupiterDepositInFlightRef.current = true;
+        const connection = new Connection(getSafeSolanaRpcEndpoint(), "confirmed");
+
+        // Step 1: wrap SOL -> WSOL via native bridge (separate tx).
+        if (jupiterSymbol === "WSOL") {
+          const owner = new PublicKey(nativeSignerAddress);
+          const wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, owner, false);
+          const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+          const wrapTx = new Transaction();
+          wrapTx.feePayer = owner;
+          wrapTx.recentBlockhash = blockhash;
+          wrapTx.add(createAssociatedTokenAccountIdempotentInstruction(owner, wsolAta, owner, NATIVE_MINT));
+          wrapTx.add(SystemProgram.transfer({ fromPubkey: owner, toPubkey: wsolAta, lamports: amountBaseUnits }));
+          wrapTx.add(createSyncNativeInstruction(wsolAta));
+
+          const wrapBase64 = serializeUnsignedSolanaTxToBase64(wrapTx);
+          const wrapSignature = await signAndSubmitSolanaTransaction(wrapBase64);
+          const wrapConfirmation = await connection.confirmTransaction(
+            { signature: wrapSignature, blockhash, lastValidBlockHeight },
+            "confirmed",
+          );
+          if (wrapConfirmation.value.err) {
+            throw new Error(`SOL wrap failed: ${JSON.stringify(wrapConfirmation.value.err)}`);
+          }
+        }
+
+        // Step 2: build deposit tx on the server using injected signer address.
+        const txResp = await fetch("/api/protocols/jupiter/deposit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            asset: depositAssetMint,
+            signer: nativeSignerAddress,
+            amount: String(amountBaseUnits),
+            preferLegacyInstruction: JUPITER_PREFER_LEGACY_SYMBOLS.has(jupiterSymbol),
+          }),
+        });
+        const txData = await txResp.json().catch(() => null);
+        if (!txResp.ok || !txData?.success || !txData?.data?.transaction) {
+          throw new Error(txData?.error || `Deposit prepare failed: ${txResp.status}`);
+        }
+
+        // Server already returns a fully built unsigned tx in base64; pass it as-is.
+        const signature = await signAndSubmitSolanaTransaction(String(txData.data.transaction));
+
+        await refreshSolana();
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "jupiter" } }));
+          window.setTimeout(() => {
+            void refreshSolana();
+            window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "jupiter" } }));
+          }, 10000);
+        }
+        toast({
+          title: "Deposit submitted",
+          description: `Deposited ${amountUi} ${tokenIn?.symbol || jupiterDisplaySymbol || "token"}.`,
+          action: (
+            <ToastAction altText="View on Solscan" onClick={() => window.open(`https://solscan.io/tx/${signature}`, "_blank")}>
+              View on Solscan
+            </ToastAction>
+          ),
+        });
+        setIsJupiterDialogOpen(false);
+      } catch (error) {
+        const message = getErrorText(error);
+        if (message.toLowerCase().includes("user rejected")) {
+          toast({ title: "Transaction cancelled", description: "Request was rejected in wallet." });
+        } else {
+          toast({ title: "Deposit failed", description: message, variant: "destructive" });
+        }
+      } finally {
+        isJupiterDepositInFlightRef.current = false;
+        setIsJupiterDepositing(false);
+      }
+      return;
+    }
+
     const session = await waitForReadySolanaSession();
     const signerAddress = session.signerAddress || toBase58Address(solanaPublicKey) || adapterAddress || "";
     const runtimeSendTransaction = session.sendTransaction ?? activeSendTransaction;
@@ -947,6 +1090,63 @@ export function DepositButton({
     if (isKaminoVaultDepositing) return;
     const vault = kaminoVaultAddress?.trim();
     if (!vault) return;
+
+    // WebView native flow: build tx on server using injected signer, then submit via native bridge.
+    if (isYieldAiNativeAppNow() && trimmedInjectedSolanaAddress) {
+      const nativeSignerAddress = trimmedInjectedSolanaAddress;
+      if (!Number.isFinite(amountUi) || amountUi <= 0) {
+        toast({ title: "Invalid amount", description: "Enter a valid deposit amount.", variant: "destructive" });
+        return;
+      }
+      if (amountUi > kaminoWalletAmount + 1e-12) {
+        toast({
+          title: "Insufficient balance",
+          description: `Available: ${kaminoWalletAmount.toFixed(6)} ${tokenIn?.symbol || "token"}.`,
+          variant: "destructive",
+        });
+        return;
+      }
+      setIsKaminoVaultDepositing(true);
+      try {
+        const txResp = await fetch("/api/protocols/kamino/deposit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            vaultAddress: vault,
+            signer: nativeSignerAddress,
+            amountUi,
+          }),
+        });
+        const txData = await txResp.json().catch(() => null);
+        if (!txResp.ok || !txData?.success || !txData?.data?.transaction) {
+          throw new Error(txData?.error || `Deposit prepare failed: ${txResp.status}`);
+        }
+
+        const signature = await signAndSubmitSolanaTransaction(String(txData.data.transaction));
+
+        if (typeof window !== "undefined") {
+          window.setTimeout(() => {
+            void refreshSolana();
+            window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "kamino" } }));
+          }, 10000);
+        }
+        toast({
+          title: "Deposit submitted",
+          description: `Deposited ${amountUi} ${tokenIn?.symbol || "token"}.`,
+          action: (
+            <ToastAction altText="View on Solscan" onClick={() => window.open(`https://solscan.io/tx/${signature}`, "_blank")}>
+              View on Solscan
+            </ToastAction>
+          ),
+        });
+        setIsKaminoVaultDialogOpen(false);
+      } catch (error) {
+        toast({ title: "Deposit failed", description: getErrorText(error), variant: "destructive" });
+      } finally {
+        setIsKaminoVaultDepositing(false);
+      }
+      return;
+    }
 
     const session = await waitForReadySolanaSession();
     // IMPORTANT: signer address must match the wallet adapter used to sign.

@@ -19,6 +19,11 @@ import { useWallet as useSolanaWallet, useConnection as useSolanaConnection } fr
 import { isUserRejectedError } from '@/lib/utils/errors';
 import { getTokenUsdValue } from "@/lib/utils/tokenUsdValue";
 import { useSolanaPortfolio } from "@/hooks/useSolanaPortfolio";
+import {
+  isYieldAiNativeAppNow,
+  signAndSubmitSolanaTransaction,
+} from "@/lib/mobile/nativeBridge";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 import { Token } from '@/lib/types/panora';
 import tokenList from '@/lib/data/tokenList.json';
 import { getProtocolsList } from '@/lib/protocols/getProtocolsList';
@@ -514,6 +519,22 @@ export function SwapModal({
       (solanaAddress ?? null)
     );
   }, [solanaAddress, solanaConnected, solanaPublicKey, solanaResolved.publicKey]);
+
+  const injectedSolanaAddress = useNativeWalletStore((s) => s.solanaAddress);
+  const trimmedInjectedSolanaAddress = (injectedSolanaAddress ?? "").trim();
+
+  // Keep "is native app?" reactive: WebViewBridge emits yieldai:native-ready
+  // once the bridge handshake completes, after which isYieldAiNativeAppNow()
+  // starts returning true. We re-evaluate on that event so disabled flags
+  // (like the Execute Swap button) stop being stale.
+  const [isNativeApp, setIsNativeApp] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const evaluate = () => setIsNativeApp(isYieldAiNativeAppNow());
+    evaluate();
+    window.addEventListener("yieldai:native-ready", evaluate);
+    return () => window.removeEventListener("yieldai:native-ready", evaluate);
+  }, []);
 
   const solanaCanSign = useMemo(() => {
     return Boolean(solanaResolved.signTx && solanaResolved.publicKey);
@@ -1308,7 +1329,14 @@ export function SwapModal({
       // Solana execute:
       // - gaslessSwapEnabled=true: server-side fee payer (existing flow)
       // - otherwise: user pays gas via their wallet (Jupiter swap tx fee payer = user)
-      if (!solanaCanSign || !solanaTakerAddress) {
+      // - WebView native flow: gas-station path is bypassed; we always use user-gas
+      //   path and route signing/sending through the native bridge.
+      const nativeFlowActive = isYieldAiNativeAppNow() && !!trimmedInjectedSolanaAddress;
+      if (!solanaCanSign && !nativeFlowActive) {
+        setError("Solana wallet not connected. Please connect your Solana wallet first.");
+        return;
+      }
+      if (!solanaTakerAddress) {
         setError("Solana wallet not connected. Please connect your Solana wallet first.");
         return;
       }
@@ -1324,7 +1352,9 @@ export function SwapModal({
         const amt = Number(amount);
         const baseUnits = BigInt(Math.floor(amt * Math.pow(10, decimals))).toString();
 
-        if (!gaslessSwapEnabled) {
+        const effectiveGaslessSwap = gaslessSwapEnabled && !nativeFlowActive;
+
+        if (!effectiveGaslessSwap) {
           if (!solanaConnection) {
             throw new Error("Solana connection not available");
           }
@@ -1357,18 +1387,28 @@ export function SwapModal({
           const swapTxB64 = String(swapJson?.swapTransaction || "").trim();
           if (!swapTxB64) throw new Error("Jupiter swap response missing swapTransaction");
 
-          const { VersionedTransaction } = await import("@solana/web3.js");
-          const tx = VersionedTransaction.deserialize(Buffer.from(swapTxB64, "base64"));
-          const signTx = solanaResolved.signTx;
-          if (!signTx) throw new Error("Wallet does not support signTransaction");
-          const signed = await signTx(tx);
           let sig = "";
-          try {
-            sig = await solanaConnection.sendRawTransaction(signed.serialize(), { skipPreflight: false });
-            await solanaConnection.confirmTransaction(sig, "confirmed");
-          } catch (sendErr) {
-            console.error("[SwapModal:solana] send/confirm failed", sendErr);
-            throw sendErr;
+          if (nativeFlowActive) {
+            // Native bridge already handles sign + submit + broadcast.
+            sig = await signAndSubmitSolanaTransaction(swapTxB64);
+            try {
+              await solanaConnection.confirmTransaction(sig, "confirmed");
+            } catch (confirmErr) {
+              console.warn("[SwapModal:solana] native confirm failed", confirmErr);
+            }
+          } else {
+            const { VersionedTransaction } = await import("@solana/web3.js");
+            const tx = VersionedTransaction.deserialize(Buffer.from(swapTxB64, "base64"));
+            const signTx = solanaResolved.signTx;
+            if (!signTx) throw new Error("Wallet does not support signTransaction");
+            const signed = await signTx(tx);
+            try {
+              sig = await solanaConnection.sendRawTransaction(signed.serialize(), { skipPreflight: false });
+              await solanaConnection.confirmTransaction(sig, "confirmed");
+            } catch (sendErr) {
+              console.error("[SwapModal:solana] send/confirm failed", sendErr);
+              throw sendErr;
+            }
           }
 
           try {
@@ -1762,7 +1802,13 @@ export function SwapModal({
     return {
       text: 'Execute Swap',
       action: executeSwap,
-      disabled: chainSelection === "solana" ? !solanaCanSign : false,
+      // In WebView native flow we don't have a wallet-adapter signer,
+      // but signing+submitting is handled by the native bridge as long as
+      // we have an injected Solana address (== solanaTakerAddress).
+      disabled:
+        chainSelection === "solana"
+          ? !solanaCanSign && !(isNativeApp && !!trimmedInjectedSolanaAddress)
+          : false,
       variant: 'default' as const
     };
   };

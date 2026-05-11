@@ -1,7 +1,5 @@
-// @ts-nocheck
 "use client";
 
-import { notFound } from "next/navigation";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -53,9 +51,6 @@ type TmpWallet = {
 };
 
 function PrivacyBridgeContent() {
-  // Feature disabled: keep route closed in production/test deployments.
-  notFound();
-
   const router = useRouter();
   const { toast } = useToast();
   const { connection: solanaConnection } = useConnection();
@@ -286,9 +281,8 @@ function PrivacyBridgeContent() {
 
   /** По умолчанию в поле withdraw — весь баланс (реальное значение, не placeholder) */
   useEffect(() => {
-    const bal: number = Number(privacyBalanceUsdc ?? 0);
-    if (Number.isFinite(bal) && bal > 0) {
-      setWithdrawAmount(String(bal.toFixed(6)));
+    if (privacyBalanceUsdc != null && privacyBalanceUsdc > 0) {
+      setWithdrawAmount(privacyBalanceUsdc.toFixed(6));
     } else {
       setWithdrawAmount("");
     }
@@ -299,10 +293,9 @@ function PrivacyBridgeContent() {
     (solanaWallet as { name?: string })?.name ??
     "";
   const isDerivedWallet = useMemo(() => {
-    const aw = aptosWallet;
-    if (aw) {
-      if (isDerivedAptosWalletReliable(aw)) return true;
-      return Boolean(solanaWalletNameForDerived && aw.name === solanaWalletNameForDerived);
+    if (aptosWallet) {
+      if (isDerivedAptosWalletReliable(aptosWallet)) return true;
+      return Boolean(solanaWalletNameForDerived && aptosWallet.name === solanaWalletNameForDerived);
     }
     const stored = getAptosWalletNameFromStorage();
     return Boolean(stored != null && stored !== "" && String(stored).trim().endsWith(" (Solana)"));

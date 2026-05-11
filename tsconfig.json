@@ -23,8 +23,5 @@
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": [
-    "node_modules",
-    "src/app/privacy-bridge/**"
-  ]
+  "exclude": ["node_modules"]
 }

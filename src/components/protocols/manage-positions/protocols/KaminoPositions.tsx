@@ -25,6 +25,11 @@ import { useKaminoPositions } from "@/lib/query/hooks/protocols/kamino/useKamino
 import { useKaminoRewards } from "@/lib/query/hooks/protocols/kamino/useKaminoRewards";
 import { useSearchParams } from "next/navigation";
 import { AccountHealthSummary } from "@/components/protocols/manage-positions/AccountHealthSummary";
+import {
+  isYieldAiNativeAppNow,
+  signAndSubmitSolanaTransaction,
+} from "@/lib/mobile/nativeBridge";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 const KAMINO_LEND_URL = "https://kamino.com/lend";
 const KAMINO_LOCAL_ICON = "/protocol_ico/kamino.png";
@@ -470,7 +475,9 @@ export function KaminoPositions() {
   const adapterPublicKey = (solanaWallet?.adapter?.publicKey as PublicKey | null) ?? null;
   const adapterAddress = toBase58Address(adapterPublicKey);
   const hookAddress = toBase58Address(publicKey);
-  const effectiveSignerAddress = adapterAddress || hookAddress || "";
+  const injectedSolanaAddress = useNativeWalletStore((s) => s.solanaAddress);
+  const trimmedInjectedSolanaAddress = (injectedSolanaAddress ?? "").trim();
+  const effectiveSignerAddress = adapterAddress || hookAddress || trimmedInjectedSolanaAddress || "";
 
   const adapterSignTransaction =
     typeof (solanaWallet?.adapter as { signTransaction?: unknown } | undefined)?.signTransaction === "function"
@@ -479,6 +486,13 @@ export function KaminoPositions() {
         }).signTransaction.bind(solanaWallet?.adapter) as (t: VersionedTransaction) => Promise<VersionedTransaction>)
       : undefined;
   const activeSignTransaction = adapterSignTransaction ?? signTransaction;
+  // In the WebView native flow we don't need a wallet adapter signer:
+  // signing+submitting is handled via the native bridge.
+  const canUseNativeSubmit = useMemo(
+    () => isYieldAiNativeAppNow() && !!trimmedInjectedSolanaAddress,
+    [trimmedInjectedSolanaAddress],
+  );
+  const canSubmitTx = !!activeSignTransaction || canUseNativeSubmit;
   const positionsOwnerAddress = useMemo(() => {
     if (rewardsMockEnabled) {
       const raw = (
@@ -759,7 +773,8 @@ export function KaminoPositions() {
         });
         return;
       }
-      if (!activeSignTransaction) {
+      const nativeFlowActive = isYieldAiNativeAppNow() && !!trimmedInjectedSolanaAddress;
+      if (!activeSignTransaction && !nativeFlowActive) {
         toast({
           variant: "destructive",
           title: "Wallet cannot sign",
@@ -790,31 +805,36 @@ export function KaminoPositions() {
           throw new Error(txData?.error || `Transaction prepare failed: ${txResp.status}`);
         }
 
-        const serialized = (() => {
-          const decoded = atob(String(txData.data.transaction));
-          return Uint8Array.from(decoded, (c) => c.charCodeAt(0));
-        })();
-        const txForWallet = (() => {
-          try {
-            return VersionedTransaction.deserialize(serialized);
-          } catch {
-            return Transaction.from(serialized);
-          }
-        })();
+        let sig: string;
+        if (nativeFlowActive) {
+          sig = await signAndSubmitSolanaTransaction(String(txData.data.transaction));
+        } else {
+          const serialized = (() => {
+            const decoded = atob(String(txData.data.transaction));
+            return Uint8Array.from(decoded, (c) => c.charCodeAt(0));
+          })();
+          const txForWallet = (() => {
+            try {
+              return VersionedTransaction.deserialize(serialized);
+            } catch {
+              return Transaction.from(serialized);
+            }
+          })();
 
-        const signed = await activeSignTransaction(txForWallet as any);
-        const sendResp = await fetch("/api/solana/sendRaw", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            txBase64: Buffer.from((signed as any).serialize()).toString("base64"),
-          }),
-        });
-        const sendJson = await sendResp.json().catch(() => null);
-        if (!sendResp.ok || !sendJson?.success || !sendJson?.data?.signature) {
-          throw new Error(sendJson?.error || `Send failed: ${sendResp.status}`);
+          const signed = await activeSignTransaction!(txForWallet as any);
+          const sendResp = await fetch("/api/solana/sendRaw", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              txBase64: Buffer.from((signed as any).serialize()).toString("base64"),
+            }),
+          });
+          const sendJson = await sendResp.json().catch(() => null);
+          if (!sendResp.ok || !sendJson?.success || !sendJson?.data?.signature) {
+            throw new Error(sendJson?.error || `Send failed: ${sendResp.status}`);
+          }
+          sig = String(sendJson.data.signature);
         }
-        const sig = String(sendJson.data.signature);
         const symbol = String(
           (mode === "deposit" ? kaminoDepositModalToken?.symbol : kaminoWithdrawModalToken?.symbol) || ""
         ).trim() || "Token";
@@ -856,6 +876,9 @@ export function KaminoPositions() {
       refreshSolana,
       solanaConnecting,
       schedulePositionsRefresh,
+      trimmedInjectedSolanaAddress,
+      kaminoDepositModalToken?.symbol,
+      kaminoWithdrawModalToken?.symbol,
     ]
   );
 
@@ -1220,7 +1243,7 @@ export function KaminoPositions() {
                         variant="default"
                         className="h-10"
                         onClick={() => openEarnDeposit(position)}
-                        disabled={!effectiveSignerAddress || !activeSignTransaction}
+                        disabled={!effectiveSignerAddress || !canSubmitTx}
                       >
                         Deposit
                       </Button>
@@ -1229,7 +1252,7 @@ export function KaminoPositions() {
                         variant="outline"
                         className="h-10"
                         onClick={() => openEarnWithdraw(position)}
-                        disabled={!effectiveSignerAddress || !activeSignTransaction}
+                        disabled={!effectiveSignerAddress || !canSubmitTx}
                       >
                         Withdraw
                       </Button>
@@ -1297,7 +1320,7 @@ export function KaminoPositions() {
                       variant="default"
                       className="box-border h-10 w-full min-w-0 max-w-full"
                       onClick={() => openEarnDeposit(position)}
-                      disabled={!effectiveSignerAddress || !activeSignTransaction}
+                      disabled={!effectiveSignerAddress || !canSubmitTx}
                     >
                       Deposit
                     </Button>
@@ -1306,7 +1329,7 @@ export function KaminoPositions() {
                       variant="outline"
                       className="box-border h-10 w-full min-w-0 max-w-full"
                       onClick={() => openEarnWithdraw(position)}
-                      disabled={!effectiveSignerAddress || !activeSignTransaction}
+                      disabled={!effectiveSignerAddress || !canSubmitTx}
                     >
                       Withdraw
                     </Button>

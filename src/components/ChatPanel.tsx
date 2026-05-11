@@ -16,18 +16,34 @@ import { useWalletStore } from '@/lib/stores/walletStore';
 import { useToast } from '@/components/ui/use-toast';
 import { useMemo } from 'react';
 import { getSolanaWalletAddress } from '@/lib/wallet/getSolanaWalletAddress';
+import { Connection, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
+import { getSafeSolanaRpcEndpoint } from "@/lib/solana/solanaRpcEndpoint";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
+import {
+  isYieldAiNativeAppNow,
+  postToNative,
+  signAndSubmitSolanaTransaction,
+} from "@/lib/mobile/nativeBridge";
 
 export default function ChatPanel() {
   const [isSwapModalOpen, setIsSwapModalOpen] = useState(false);
   const [isYieldCalcOpen, setIsYieldCalcOpen] = useState(false);
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
-  const { account, wallet } = useWallet();
-  const { connected: solanaConnected, publicKey: solanaPublicKey, wallets: solanaWallets } = useSolanaWallet();
+  const [isSolanaMemoTxPending, setIsSolanaMemoTxPending] = useState(false);
+  const { account, wallet, signMessage: aptosSignMessage } = useWallet();
+  const {
+    connected: solanaConnected,
+    publicKey: solanaPublicKey,
+    wallets: solanaWallets,
+    signMessage: solanaSignMessage,
+    wallet: solanaWallet,
+  } = useSolanaWallet();
   const { tokens } = useWalletData();
   const totalAssetsStore = useWalletStore((s) => s.totalAssets);
   const router = useRouter();
   const searchParams = useSearchParams();
   const { toast } = useToast();
+  const injectedSolanaAddress = useNativeWalletStore((s) => s.solanaAddress);
 
   // Check if any wallet is connected (Solana derived, Aptos derived, Aptos native, or direct Solana)
   const solanaAddress = useMemo(() => getSolanaWalletAddress(wallet), [wallet]);
@@ -85,6 +101,167 @@ export default function ChatPanel() {
       });
     }
   };
+
+  const makeRequestId = useCallback(() => {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    return `req_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  }, []);
+
+  const bytesToBase64 = useCallback((bytes: Uint8Array) => {
+    // Avoid Buffer dependency in the browser runtime
+    let binary = "";
+    bytes.forEach((b) => {
+      binary += String.fromCharCode(b);
+    });
+    return btoa(binary);
+  }, []);
+
+  const getSolanaFeePayerBase58 = useCallback((): string | null => {
+    const injected = injectedSolanaAddress?.trim();
+    if (injected) return injected;
+    if (solanaPublicKey) return solanaPublicKey.toBase58();
+    return null;
+  }, [injectedSolanaAddress, solanaPublicKey]);
+
+  const handleSignSolanaMemoTx = useCallback(async () => {
+    try {
+      if (isSolanaMemoTxPending) {
+        throw new Error("A Solana transaction request is already pending");
+      }
+
+      const feePayerBase58 = getSolanaFeePayerBase58();
+      if (!feePayerBase58) {
+        throw new Error("Solana address is not available");
+      }
+
+      const connection = new Connection(getSafeSolanaRpcEndpoint(), "confirmed");
+      const { blockhash } = await connection.getLatestBlockhash("confirmed");
+
+      const memoProgramId = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
+      const memoData = new TextEncoder().encode(`Hello from Yield AI (memo tx)`);
+
+      const tx = new Transaction();
+      tx.feePayer = new PublicKey(feePayerBase58);
+      tx.recentBlockhash = blockhash;
+      tx.add(
+        new TransactionInstruction({
+          programId: memoProgramId,
+          keys: [],
+          data: Buffer.from(memoData),
+        }),
+      );
+
+      const raw = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
+      const txBase64 = bytesToBase64(raw);
+
+      if (isYieldAiNativeAppNow()) {
+        setIsSolanaMemoTxPending(true);
+        toast({
+          title: "Transaction requested",
+          description: "Please approve the Solana memo transaction in your wallet.",
+        });
+
+        const txid = await signAndSubmitSolanaTransaction(txBase64);
+        toast({
+          title: "Transaction submitted",
+          description: `Tx id: ${txid.slice(0, 12)}...${txid.slice(-12)}`,
+        });
+        return;
+      }
+
+      // Browser fallback: send via wallet adapter if available
+      const adapter = solanaWallet?.adapter as any;
+      if (adapter && typeof adapter.sendTransaction === "function") {
+        await adapter.sendTransaction(tx, connection);
+        toast({ title: "Transaction sent", description: "Solana memo transaction submitted." });
+        return;
+      }
+
+      throw new Error("Solana sendTransaction is not available in this environment");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast({ variant: "destructive", title: "Signing failed", description: msg || "Unknown error" });
+    } finally {
+      setIsSolanaMemoTxPending(false);
+    }
+  }, [
+    bytesToBase64,
+    getSolanaFeePayerBase58,
+    isSolanaMemoTxPending,
+    solanaWallet,
+    toast,
+  ]);
+
+  const handleSignSolanaHello = useCallback(async () => {
+    const message = "Hello from Yield AI";
+    try {
+      if (isYieldAiNativeAppNow()) {
+        const requestId = makeRequestId();
+        const ok = postToNative("sign_message", {
+          chain: "solana",
+          message,
+          requestId,
+        });
+        if (!ok) throw new Error("Native bridge not available");
+        toast({
+          title: "Requested signature",
+          description: `Solana sign-message sent to native (requestId: ${requestId}).`,
+        });
+        return;
+      }
+
+      const adapter =
+        solanaWallet?.adapter && typeof (solanaWallet.adapter as any).signMessage === "function"
+          ? (solanaWallet.adapter as any)
+          : null;
+      const sign = solanaSignMessage ?? (adapter ? (adapter.signMessage as (msg: Uint8Array) => Promise<any>).bind(adapter) : null);
+      if (!sign) {
+        throw new Error("Solana signMessage is not available in this environment");
+      }
+      await sign(new TextEncoder().encode(message));
+      toast({ title: "Message signed", description: "Solana signature created." });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast({ variant: "destructive", title: "Signing failed", description: msg || "Unknown error" });
+    }
+  }, [isYieldAiNativeAppNow, makeRequestId, postToNative, solanaSignMessage, solanaWallet, toast]);
+
+  const handleSignAptosHello = useCallback(async () => {
+    const message = "Hello from Yield AI";
+    try {
+      if (isYieldAiNativeAppNow()) {
+        const requestId = makeRequestId();
+        const ok = postToNative("sign_message", {
+          chain: "aptos",
+          message,
+          requestId,
+        });
+        if (!ok) throw new Error("Native bridge not available");
+        toast({
+          title: "Requested signature",
+          description: `Aptos sign-message sent to native (requestId: ${requestId}).`,
+        });
+        return;
+      }
+
+      if (!aptosSignMessage) {
+        throw new Error("Aptos signMessage is not available in this environment");
+      }
+      await aptosSignMessage({
+        message,
+        nonce: Date.now().toString(),
+        address: true,
+        application: true,
+        chainId: true,
+      } as any);
+      toast({ title: "Message signed", description: "Aptos signature created." });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast({ variant: "destructive", title: "Signing failed", description: msg || "Unknown error" });
+    }
+  }, [aptosSignMessage, isYieldAiNativeAppNow, makeRequestId, postToNative, toast]);
 
   const handleTransfer = () => {
     if (account?.address) {
@@ -227,6 +404,24 @@ export default function ChatPanel() {
               Share Feedback
             </Button>
           </Link>
+
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs"
+              onClick={handleSignSolanaMemoTx}
+              disabled={isSolanaMemoTxPending}
+            >
+              {isSolanaMemoTxPending ? "Submitting..." : "Sign tx (Solana Memo)"}
+            </Button>
+            <Button variant="outline" size="sm" className="text-xs" onClick={handleSignSolanaHello}>
+              Sign message (Solana)
+            </Button>
+            <Button variant="outline" size="sm" className="text-xs" onClick={handleSignAptosHello}>
+              Sign message (Aptos)
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -265,6 +460,24 @@ export default function ChatPanel() {
               Share Feedback
             </Button>
           </Link>
+
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs"
+              onClick={handleSignSolanaMemoTx}
+              disabled={isSolanaMemoTxPending}
+            >
+              {isSolanaMemoTxPending ? "Submitting..." : "Sign tx (Solana Memo)"}
+            </Button>
+            <Button variant="outline" size="sm" className="text-xs" onClick={handleSignSolanaHello}>
+              Sign message (Solana)
+            </Button>
+            <Button variant="outline" size="sm" className="text-xs" onClick={handleSignAptosHello}>
+              Sign message (Aptos)
+            </Button>
+          </div>
         </div>
       </div>
 
