@@ -129,6 +129,40 @@ export function buildSetSafePausedPayload(
 }
 
 /**
+ * Builds the payload for vault::set_fa_swap_limits (owner-signed).
+ * Updates the FA-to-FA swap notional caps for an existing safe — the same
+ * `swap_max_per_tx_usdc` / `swap_max_daily_usdc` values seeded at
+ * init_vault_v2. Both are USDC micro-units (6 decimals).
+ *
+ * Note: the executor cannot change these unless the protocol flag
+ * `protocol::allow_executor_update_swap_limits` is true (currently false on
+ * mainnet), so in practice only the safe owner calls this.
+ *
+ * Function: {MODULE}::vault::set_fa_swap_limits
+ * Arguments: safe_address (address), max_per_tx_usdc (u64), max_daily_usdc (u64).
+ */
+export function buildSetFaSwapLimitsPayload(params: {
+  safeAddress: string;
+  maxPerTxUsdcBaseUnits: bigint | string;
+  maxDailyUsdcBaseUnits: bigint | string;
+}): {
+  function: string;
+  typeArguments: string[];
+  functionArguments: string[];
+} {
+  const { safeAddress, maxPerTxUsdcBaseUnits, maxDailyUsdcBaseUnits } = params;
+  return {
+    function: `${YIELD_AI_VAULT_MODULE}::set_fa_swap_limits`,
+    typeArguments: [],
+    functionArguments: [
+      safeAddress,
+      String(maxPerTxUsdcBaseUnits),
+      String(maxDailyUsdcBaseUnits),
+    ],
+  };
+}
+
+/**
  * Owner emergency path: full Echelon FA market exit back into the safe (no executor).
  * Function: {MODULE}::execute_withdraw_all_echelon_fa_as_owner
  * Arguments: safe_address, adapter_address, market_obj (Object<Market>).

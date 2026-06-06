@@ -9,8 +9,9 @@ type ReferrerStatsResponse = {
   referrer_account: string;
   total_referrals: number;
   total_codes_created: number;
-  is_affiliate: number;
+  is_affiliate: boolean;
   codes: string[];
+  volume_threshold_met: boolean;
 };
 
 /**
@@ -81,8 +82,9 @@ export async function GET(request: NextRequest) {
         referrer_account: data.referrer_account ?? decibelAddr,
         total_referrals: typeof data.total_referrals === 'number' ? data.total_referrals : 0,
         total_codes_created: typeof data.total_codes_created === 'number' ? data.total_codes_created : 0,
-        is_affiliate: typeof data.is_affiliate === 'number' ? data.is_affiliate : 0,
+        is_affiliate: data.is_affiliate === true,
         codes: Array.isArray(data.codes) ? data.codes : [],
+        volume_threshold_met: data.volume_threshold_met === true,
       },
     });
   } catch (error) {

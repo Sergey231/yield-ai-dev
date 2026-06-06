@@ -4,6 +4,8 @@ export enum PositionBadge {
   Inactive = "Inactive",
   Supply = "Supply",
   Borrow = "Borrow",
+  /** Delta-neutral pair-trade (spot leg + Decibel perp short) */
+  DeltaNeutral = "Delta-neutral",
 }
 
 /** Общий тип позиции для отображения в карточке протокола (все протоколы маппят свои данные в этот формат) */

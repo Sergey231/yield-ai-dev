@@ -1,4 +1,4 @@
-import { sdk as hyperionSdk } from "@/lib/hyperion";
+import { sdk as hyperionSdk, unwrapHyperionPoolByTokenPair } from "@/lib/hyperion";
 import { submitExecutorEntryFunction } from "@/lib/protocols/decibel/executorSubmit";
 import {
   SWAP_SQRT_PRICE_LIMIT,
@@ -30,11 +30,12 @@ async function tryGetHyperionPoolSqrtPrice(params: {
 }): Promise<bigint | null> {
   const { token1, token2, feeTier } = params;
   try {
-    const byPair = await hyperionSdk.Pool.getPoolByTokenPairAndFeeTier({
+    const result = await hyperionSdk.Pool.getPoolByTokenPairAndFeeTier({
       token1,
       token2,
       feeTier,
     });
+    const byPair = unwrapHyperionPoolByTokenPair(result);
     const poolId =
       (byPair as any)?.poolId ??
       (byPair as any)?.id ??

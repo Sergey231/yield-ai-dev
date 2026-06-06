@@ -1,6 +1,8 @@
 import { TokenItem } from "@/components/portfolio/TokenItem";
 import { Token } from "@/lib/types/token";
-import { useEffect, useState } from "react";
+import { getYieldRequestKeys } from "@/lib/yields/tokenYields";
+import type { TokenYieldMap } from "@/lib/yields/tokenYields";
+import { useEffect, useMemo, useState } from "react";
 
 interface TokenListProps {
   tokens: Token[];
@@ -11,6 +13,9 @@ interface TokenListProps {
 
 export function TokenList({ tokens, disableDrag = false, getRightBadge }: TokenListProps) {
   const [stakingAprs, setStakingAprs] = useState<Record<string, { aprPct: number; source: string }>>({});
+  const [tokenYields, setTokenYields] = useState<TokenYieldMap>({});
+  const yieldRequestKeys = useMemo(() => getYieldRequestKeys(tokens), [tokens]);
+  const yieldRequestKey = yieldRequestKeys.join(",");
 
   useEffect(() => {
     let isCancelled = false;
@@ -31,6 +36,32 @@ export function TokenList({ tokens, disableDrag = false, getRightBadge }: TokenL
     fetchStakingAprs();
     return () => { isCancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (!yieldRequestKey) {
+      setTokenYields({});
+      return;
+    }
+
+    let isCancelled = false;
+
+    const fetchTokenYields = async () => {
+      try {
+        const response = await fetch(`/api/yields?mints=${encodeURIComponent(yieldRequestKey)}`);
+        if (!response.ok) return;
+        const data = await response.json();
+        if (!isCancelled && data && typeof data === 'object') {
+          setTokenYields(data as TokenYieldMap);
+        }
+      } catch (_) {
+        // silently ignore
+      }
+    };
+
+    fetchTokenYields();
+    return () => { isCancelled = true; };
+  }, [yieldRequestKey]);
+
   // Sort tokens by USD value in descending order (highest first)
   const sortedTokens = [...tokens].sort((a, b) => {
     const valueA = a.value ? parseFloat(a.value) : 0;
@@ -45,10 +76,11 @@ export function TokenList({ tokens, disableDrag = false, getRightBadge }: TokenL
           key={token.address}
           token={token}
           stakingAprs={stakingAprs}
+          tokenYields={tokenYields}
           disableDrag={disableDrag}
           rightBadge={getRightBadge?.(token)}
         />
       ))}
     </div>
   );
-} 
+}

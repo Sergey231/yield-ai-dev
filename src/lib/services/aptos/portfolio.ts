@@ -1,8 +1,11 @@
 import { AptosWalletService } from './wallet';
 import { PanoraPricesService } from '../panora/prices';
 import { FungibleAssetBalance } from '@/lib/types/aptos';
-import { TokenPrice } from '@/lib/types/panora';
 import { normalizeAddress } from '@/lib/utils/addressNormalization';
+import {
+  findAptosPriceForAsset,
+  findAptosTokenByAssetId,
+} from '@/lib/tokens/aptosTokenLookup';
 
 interface PortfolioToken {
   address: string;
@@ -38,6 +41,13 @@ function normalizeAssetTypeForLookup(assetType: string): string {
   const segment = assetType.includes('::') ? assetType.split('::')[0]! : assetType;
   const withPrefix = segment.startsWith('0x') ? segment : `0x${segment}`;
   return normalizeAddress(withPrefix).toLowerCase();
+}
+
+function coerceUsdPrice(value: string | number | null | undefined): string | null {
+  if (value == null) return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'string' && value.length > 0) return value;
+  return null;
 }
 
 function resolveEchelonIconUrl(icon: string | undefined): string | undefined {
@@ -106,25 +116,26 @@ export class AptosPortfolioService {
 
       // Объединяем данные
       const tokens: PortfolioToken[] = balances.map((balance: FungibleAssetBalance) => {
-        const price = prices.find((p: TokenPrice) => 
-          p.tokenAddress === balance.asset_type || 
-          p.faAddress === balance.asset_type
-        );
+        const tokenInfo = findAptosTokenByAssetId(balance.asset_type);
+        const price = findAptosPriceForAsset(prices, balance.asset_type, tokenInfo);
         
         // Если нет цены, используем дефолтные значения
         // Panora can return a placeholder object with null fields; treat it as missing.
-        const hasValidPrice =
-          !!price &&
-          typeof price.usdPrice === 'string' &&
-          price.usdPrice.length > 0 &&
-          typeof price.decimals === 'number' &&
-          Number.isFinite(price.decimals) &&
-          typeof price.symbol === 'string' &&
-          price.symbol.length > 0 &&
-          typeof price.name === 'string' &&
-          price.name.length > 0;
+        const priceUsd =
+          coerceUsdPrice(price?.usdPrice) ??
+          coerceUsdPrice(tokenInfo?.usdPrice);
 
-        if (!hasValidPrice) {
+        const decimals =
+          typeof tokenInfo?.decimals === 'number' && Number.isFinite(tokenInfo.decimals)
+            ? tokenInfo.decimals
+            : typeof price?.decimals === 'number' && Number.isFinite(price.decimals)
+              ? price.decimals
+              : 8;
+
+        const symbol = tokenInfo?.symbol || price?.symbol;
+        const name = tokenInfo?.name || price?.name;
+
+        if (!priceUsd || !symbol || !name) {
           console.log('No price found for token:', balance.asset_type);
           return {
             address: balance.asset_type,
@@ -138,17 +149,18 @@ export class AptosPortfolioService {
         }
 
         // Вычисляем value с учетом decimals
-        const amount = parseFloat(balance.amount) / Math.pow(10, price!.decimals);
-        const value = (amount * parseFloat(price!.usdPrice)).toString();
+        const amount = parseFloat(balance.amount) / Math.pow(10, decimals);
+        const value = (amount * parseFloat(priceUsd)).toString();
 
         return {
           address: balance.asset_type,
-          name: price!.name,
-          symbol: price!.symbol,
-          decimals: price!.decimals,
+          name,
+          symbol,
+          decimals,
           amount: balance.amount,
-          price: price!.usdPrice,
-          value
+          price: priceUsd,
+          value,
+          logoUrl: tokenInfo?.logoUrl || undefined,
         };
       });
 
@@ -207,4 +219,4 @@ export class AptosPortfolioService {
       return { tokens: [] };
     }
   }
-} 
+}

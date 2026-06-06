@@ -5,21 +5,25 @@ import { useDragDrop } from "@/contexts/DragDropContext";
 import { TokenDragData } from "@/types/dragDrop";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { useState, useEffect, useMemo } from "react";
+import { useMemo } from "react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatNumber } from "@/lib/utils/numberFormat";
 import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
 import { normalizeAddress } from "@/lib/utils/addressNormalization";
+import { findAptosTokenByAssetId } from "@/lib/tokens/aptosTokenLookup";
+import { getTokenYield } from "@/lib/yields/tokenYields";
+import type { TokenYieldMap } from "@/lib/yields/tokenYields";
 
 interface TokenItemProps {
   token: Token;
   stakingAprs?: Record<string, { aprPct: number; source: string }>;
+  tokenYields?: TokenYieldMap;
   disableDrag?: boolean;
   /** Optional badge text shown on the right (e.g. "AGENT WALLET") */
   rightBadge?: string;
 }
 
-export function TokenItem({ token, stakingAprs = {}, disableDrag = false, rightBadge }: TokenItemProps) {
+export function TokenItem({ token, stakingAprs = {}, tokenYields = {}, disableDrag = false, rightBadge }: TokenItemProps) {
   const { startDrag, endDrag, state } = useDragDrop();
   const { formatUsd, maskBalance } = usePortfolioAmountsPrivacy();
   const clamp10 = (s: string) => (s.length > 10 ? s.slice(0, 10) : s);
@@ -43,13 +47,20 @@ export function TokenItem({ token, stakingAprs = {}, disableDrag = false, rightB
     }
     // Try faAddress via token list entry (by matching symbol)
     const tokenList = getTokenList(1);
-    const tokenInfo = tokenList.find(t => t.symbol === symbol);
+    const tokenInfo =
+      findAptosTokenByAssetId(token.address, tokenList) ||
+      tokenList.find(t => t.symbol === symbol);
     const faAddress = (tokenInfo as any)?.faAddress as string | undefined;
     if (faAddress && stakingAprs[faAddress]?.aprPct !== undefined) {
       return stakingAprs[faAddress].aprPct as number;
     }
     return 0;
   }, [stakingAprs, token.address, symbol]);
+
+  const tokenYield = useMemo(
+    () => getTokenYield(tokenYields, token),
+    [tokenYields, token.address, token.symbol, token.name]
+  );
 
   // Determine if this is a Solana token (Solana addresses are base58, typically 32-44 chars, no '::' or '0x' prefix)
   // Aptos addresses are hex strings starting with '0x' or Move types with '::'
@@ -61,17 +72,17 @@ export function TokenItem({ token, stakingAprs = {}, disableDrag = false, rightB
       return null; // Solana tokens don't use Aptos token list
     }
     const tokenList = getTokenList(1); // 1 - Aptos chainId
-    return tokenList.find(t => t.symbol === symbol) || null;
-  }, [isSolanaToken, symbol]);
+    return findAptosTokenByAssetId(token.address, tokenList) || tokenList.find(t => t.symbol === symbol) || null;
+  }, [isSolanaToken, symbol, token.address]);
   
   // For Solana tokens, use logoUrl directly from Jupiter API (already set in SolanaPortfolioService)
   // For Aptos tokens, try to find in token list as fallback
   // IMPORTANT: token.logoUrl should be set by SolanaPortfolioService from Jupiter API
-  const logoUrl = (() => {
+  const logoUrl: string | undefined = (() => {
     if (token.logoUrl) return token.logoUrl;
     if (isAetToken) return aetIconUrl;
     if (isSolanaToken && (token.symbol || '').toUpperCase() === 'SOL') return '/token_ico/sol.png';
-    return tokenInfo?.logoUrl;
+    return tokenInfo?.logoUrl ?? undefined;
   })();
   
   // Debug logging for Solana tokens
@@ -197,7 +208,11 @@ export function TokenItem({ token, stakingAprs = {}, disableDrag = false, rightB
                 {rightBadge}
               </Badge>
             )}
-            {stakingAprPct > 0.01 && (
+            {tokenYield && tokenYield.value > 0.01 ? (
+              <Badge variant="secondary" className="text-xs px-1 py-0 h-4 text-green-600 bg-green-100 border-green-200">
+                {formatNumber(tokenYield.value, 2)}% {tokenYield.type}
+              </Badge>
+            ) : stakingAprPct > 0.01 && (
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -223,4 +238,4 @@ export function TokenItem({ token, stakingAprs = {}, disableDrag = false, rightB
       </div>
     </div>
   );
-} 
+}

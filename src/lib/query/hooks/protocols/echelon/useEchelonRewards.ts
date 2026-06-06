@@ -36,6 +36,8 @@ async function fetchEchelonRewards(address: string): Promise<EchelonReward[]> {
 interface UseEchelonRewardsOptions {
   enabled?: boolean;
   refetchOnMount?: boolean | 'always';
+  staleTime?: number;
+  gcTime?: number;
 }
 
 export function useEchelonRewards(
@@ -48,7 +50,8 @@ export function useEchelonRewards(
   return useQuery({
     queryKey: queryKeys.protocols.echelon.rewards(address ?? ''),
     queryFn: () => fetchEchelonRewards(address!),
-    staleTime: STALE_TIME.POSITIONS,
+    staleTime: options?.staleTime ?? STALE_TIME.POSITIONS,
+    gcTime: options?.gcTime,
     enabled,
     refetchOnMount: options?.refetchOnMount,
   });

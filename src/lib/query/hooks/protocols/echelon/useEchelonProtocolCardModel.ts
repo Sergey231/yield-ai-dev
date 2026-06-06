@@ -135,7 +135,19 @@ export function useEchelonProtocolCardModel(
         cleanAddress = `0x${cleanAddress}`;
       }
       const normalizedAddress = normalizeAddr(cleanAddress);
-      return tokenPrices[cleanAddress] || tokenPrices[normalizedAddress] || '0';
+      const fromPanora = tokenPrices[cleanAddress] || tokenPrices[normalizedAddress];
+      if (fromPanora && fromPanora !== '0') return fromPanora;
+      // Fallback to the bundled token list so Echelon positions render
+      // immediately on first paint instead of disappearing until Panora's
+      // async price fetch resolves. Without this, USD1/USDC supplies were
+      // visible only after the user clicked Refresh in the sidebar.
+      const listed = tokenList.data.data.find((t) => {
+        const fa = normalizeAddr(t.faAddress || '');
+        const ta = normalizeAddr(t.tokenAddress || '');
+        return fa === normalizedAddress || ta === normalizedAddress;
+      });
+      if (listed?.usdPrice) return String(listed.usdPrice);
+      return '0';
     },
     [tokenPrices]
   );
@@ -253,58 +265,58 @@ export function useEchelonProtocolCardModel(
   }, [positions, rewardsData, getRewardTokenInfoHelper]);
 
   useEffect(() => {
+    let cancelled = false;
     const timeoutId = setTimeout(async () => {
       const addresses = getAllTokenAddresses();
       if (addresses.length === 0 || !walletAddress || walletAddress.length < 10) return;
 
       try {
         const response = await pricesService.getPrices(1, addresses);
-        let prices: Record<string, string> = {};
-        if (response.data) {
-          prices = createDualAddressPriceMap(response.data);
-          setTokenPrices(prices);
-        }
+        if (cancelled) return;
 
-        const missingPrices: string[] = [];
-        addresses.forEach((addr) => {
-          const normalizedAddr = addr.replace(/^0+/, '0x') || '0x0';
-          if (!prices[addr] && !prices[normalizedAddr]) {
-            missingPrices.push(addr);
-          }
+        const prices: Record<string, string> = response.data
+          ? createDualAddressPriceMap(response.data)
+          : {};
+
+        // Tokens absent from Panora (e.g. Echelon's DLP) — also treat a '0'
+        // price as missing so the Echelon API fallback still kicks in.
+        const missingPrices = addresses.filter((addr) => {
+          const normalizedAddr = normalizeAddr(addr);
+          const p = prices[addr] || prices[normalizedAddr];
+          return !p || p === '0';
         });
 
         if (missingPrices.length > 0) {
           const service = TokenInfoService.getInstance();
-          const fallbackPrices: Record<string, string> = {};
-
           await Promise.all(
             missingPrices.map(async (addr) => {
               try {
                 const info = await service.getTokenInfo(addr);
                 if (info && info.price) {
-                  fallbackPrices[addr] = info.price.toString();
-                  const normalizedAddr = addr.replace(/^0+/, '0x') || '0x0';
-                  fallbackPrices[normalizedAddr] = info.price.toString();
+                  prices[addr] = info.price.toString();
+                  prices[normalizeAddr(addr)] = info.price.toString();
                 }
               } catch {
                 // ignore
               }
             })
           );
-
-          if (Object.keys(fallbackPrices).length > 0) {
-            setTokenPrices((prev) => ({
-              ...prev,
-              ...fallbackPrices,
-            }));
-          }
         }
+
+        if (cancelled) return;
+        // Merge into existing state in a single update so an in-flight
+        // Panora response from an earlier effect run cannot wipe a price
+        // that was already resolved via the fallback.
+        setTokenPrices((prev) => ({ ...prev, ...prices }));
       } catch {
         // ignore
       }
-    }, 1000);
+    }, 300);
 
-    return () => clearTimeout(timeoutId);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
   }, [getAllTokenAddresses, pricesService, walletAddress]);
 
   useEffect(() => {

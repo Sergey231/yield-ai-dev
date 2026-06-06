@@ -12,8 +12,10 @@ export interface ProtocolCardPositionProps {
   position: ProtocolPosition;
 }
 
-function getBadgeVariant(badge: PositionBadge): "success" | "danger" {
-  return badge === PositionBadge.Active || badge === PositionBadge.Supply ? "success" : "danger";
+function getBadgeVariant(badge: PositionBadge): "success" | "danger" | "info" {
+  if (badge === PositionBadge.Active || badge === PositionBadge.Supply) return "success";
+  if (badge === PositionBadge.DeltaNeutral) return "info";
+  return "danger";
 }
 
 function getAprBadgeText(apr?: string): string | null {

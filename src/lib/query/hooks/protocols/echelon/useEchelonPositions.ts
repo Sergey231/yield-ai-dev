@@ -35,6 +35,8 @@ async function fetchEchelonPositions(address: string): Promise<EchelonPosition[]
 interface UseEchelonPositionsOptions {
   enabled?: boolean;
   refetchOnMount?: boolean | 'always';
+  staleTime?: number;
+  gcTime?: number;
 }
 
 export function useEchelonPositions(
@@ -47,7 +49,8 @@ export function useEchelonPositions(
   return useQuery({
     queryKey: queryKeys.protocols.echelon.userPositions(address ?? ''),
     queryFn: () => fetchEchelonPositions(address!),
-    staleTime: STALE_TIME.POSITIONS,
+    staleTime: options?.staleTime ?? STALE_TIME.POSITIONS,
+    gcTime: options?.gcTime,
     enabled,
     refetchOnMount: options?.refetchOnMount,
   });

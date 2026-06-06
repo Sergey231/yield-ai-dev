@@ -38,6 +38,8 @@ const APTOS_PROTOCOLS: ProtocolConfig[] = [
 const SOLANA_PROTOCOLS: ProtocolConfig[] = [
   { key: 'jupiter', endpoint: '/api/protocols/jupiter/userPositions' },
   { key: 'kamino', endpoint: '/api/protocols/kamino/userPositions' },
+  { key: 'raydium', endpoint: '/api/protocols/raydium/userPositions' },
+  { key: 'orca', endpoint: '/api/protocols/orca/userPositions' },
 ];
 
 function isRequireKey(): boolean {

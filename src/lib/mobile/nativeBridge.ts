@@ -5,12 +5,33 @@ type NativeBridgeCommand = {
   payload?: Record<string, unknown>;
 };
 
+type SubmittedTransactionResult = {
+  txId: string;
+};
+
 type PendingBridgeRequest = {
   requestId: string;
-  resolve: (value: { signature: string }) => void;
+  resolve: (value: SubmittedTransactionResult) => void;
   reject: (error: Error) => void;
   timeoutId: ReturnType<typeof setTimeout>;
   cleanup: () => void;
+};
+
+export type AptosTransactionInput = {
+  data: {
+    function: `${string}::${string}::${string}`;
+    typeArguments?: string[];
+    functionArguments: unknown[];
+  };
+  options?: Record<string, unknown>;
+};
+
+/** Petra mobile deeplink expects entry_function_payload with snake_case fields. */
+export type PetraEntryFunctionPayload = {
+  type: "entry_function_payload";
+  function: string;
+  type_arguments: string[];
+  arguments: unknown[];
 };
 
 const BRIDGE_REQUEST_TIMEOUT_MS = 60_000;
@@ -58,16 +79,27 @@ function errorFromPayload(payload: Record<string, unknown>) {
   return new Error(code ? `${code}: ${message}` : message);
 }
 
+function submittedTransactionIdFromPayload(payload: Record<string, unknown>) {
+  const signature = typeof payload.signature === "string" ? payload.signature.trim() : "";
+  if (signature) return signature;
+
+  const hash = typeof payload.hash === "string" ? payload.hash.trim() : "";
+  if (hash) return hash;
+
+  const txid = typeof payload.txid === "string" ? payload.txid.trim() : "";
+  return txid;
+}
+
 function waitForSignAndSubmitResponse(requestId: string) {
   if (typeof window === "undefined") {
     throw new Error("Native bridge is not available");
   }
 
   if (pendingSignAndSubmitRequest) {
-    throw new Error("A Solana transaction request is already pending");
+    throw new Error("A native transaction request is already pending");
   }
 
-  return new Promise<{ signature: string }>((resolve, reject) => {
+  return new Promise<SubmittedTransactionResult>((resolve, reject) => {
     const onNativeCommand = (event: Event) => {
       const customEvent = event as CustomEvent<NativeBridgeCommand>;
       const type = customEvent.detail?.type;
@@ -77,15 +109,15 @@ function waitForSignAndSubmitResponse(requestId: string) {
       if (responseRequestId !== requestId) return;
 
       if (type === "transaction_submitted") {
-        const signature = typeof payload.signature === "string" ? payload.signature : "";
+        const txId = submittedTransactionIdFromPayload(payload);
         clearPendingRequest();
 
-        if (!signature) {
-          reject(new Error("Missing transaction signature from native"));
+        if (!txId) {
+          reject(new Error("Missing transaction id from native"));
           return;
         }
 
-        resolve({ signature });
+        resolve({ txId });
         return;
       }
 
@@ -127,7 +159,43 @@ export async function signAndSubmitSolanaTransaction(transactionBase64: string) 
   }
 
   const result = await resultPromise;
-  return result.signature;
+  return result.txId;
+}
+
+export function aptosTransactionInputToPetraPayload(
+  transactionInput: AptosTransactionInput,
+): PetraEntryFunctionPayload {
+  return {
+    type: "entry_function_payload",
+    function: transactionInput.data.function,
+    type_arguments: transactionInput.data.typeArguments ?? [],
+    arguments: transactionInput.data.functionArguments,
+  };
+}
+
+export function encodeUtf8JsonToBase64(value: unknown): string {
+  return bytesToBase64(new TextEncoder().encode(JSON.stringify(value)));
+}
+
+export async function signAndSubmitAptosTransaction(transactionInput: AptosTransactionInput) {
+  const requestId = makeRequestId();
+  const resultPromise = waitForSignAndSubmitResponse(requestId);
+  const petraPayload = aptosTransactionInputToPetraPayload(transactionInput);
+  const transactionBase64 = encodeUtf8JsonToBase64(petraPayload);
+
+  const ok = postToNative("sign_and_submit_transaction", {
+    chain: "aptos",
+    transaction: transactionBase64,
+    requestId,
+  });
+
+  if (!ok) {
+    clearPendingRequest();
+    throw new Error("Native bridge is not available");
+  }
+
+  const result = await resultPromise;
+  return result.txId;
 }
 
 /**

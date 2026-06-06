@@ -4,6 +4,44 @@ import { deriveVaultApr } from '@/lib/protocols/decibel/vaultApr';
 
 type AccountVaultPerfItem = { vault?: unknown } & Record<string, unknown>;
 
+/** Group rows that refer to the same vault (Decibel uses `vault.address`; `id` is rare). */
+function vaultPerformanceGroupKey(item: AccountVaultPerfItem, fallbackIndex: number): string {
+  const vault = item.vault as { id?: string; address?: string } | undefined;
+  if (vault?.id) return `id:${String(vault.id)}`;
+  if (vault?.address) return `addr:${toCanonicalAddress(String(vault.address))}`;
+  return `noid:${fallbackIndex}`;
+}
+
+/**
+ * Decibel returns one row per (account_address, vault). The same owner may have deposits on
+ * subaccounts; we can also get stale owner rows with zero `current_value_of_shares` while
+ * the subaccount still holds shares. Merge rows that share the same vault and sum share value.
+ */
+function mergeAccountVaultPerformanceByVault(rows: AccountVaultPerfItem[]): AccountVaultPerfItem[] {
+  const groups = new Map<string, AccountVaultPerfItem[]>();
+  rows.forEach((row, idx) => {
+    const key = vaultPerformanceGroupKey(row, idx);
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(row);
+    else groups.set(key, [row]);
+  });
+  const out: AccountVaultPerfItem[] = [];
+  for (const items of groups.values()) {
+    if (items.length === 1) {
+      out.push(items[0]);
+      continue;
+    }
+    const sumShares = items.reduce((s, r) => s + (Number(r.current_value_of_shares) || 0), 0);
+    const base = items.reduce((best, r) =>
+      (Number(r.current_value_of_shares) || 0) > (Number(best.current_value_of_shares) || 0)
+        ? r
+        : best
+    );
+    out.push({ ...base, current_value_of_shares: sumShares });
+  }
+  return out;
+}
+
 const DECIBEL_API_KEY = process.env.DECIBEL_API_KEY;
 const DECIBEL_API_BASE_URL =
   process.env.DECIBEL_API_BASE_URL || 'https://api.testnet.aptoslabs.com/decibel';
@@ -42,27 +80,32 @@ export async function GET(request: NextRequest) {
       'Content-Type': 'application/json',
     };
 
-    const fetchVaultPerf = async (account: string): Promise<AccountVaultPerfItem[]> => {
-      const params = new URLSearchParams({ account });
-      if (offset !== null && offset !== undefined) params.set('offset', offset);
-      if (limit !== null && limit !== undefined) params.set('limit', limit);
-      const url = `${baseUrl}/api/v1/account_vault_performance?${params.toString()}`;
-      const res = await fetch(url, { method: 'GET', headers });
-      const text = await res.text();
-      if (!res.ok) return [];
-      try {
-        const parsed = text ? JSON.parse(text) : [];
-        return Array.isArray(parsed) ? (parsed as AccountVaultPerfItem[]) : [];
-      } catch {
-        return [];
-      }
-    };
+    const makeFetchVaultPerf =
+      (apiRoot: string) =>
+      async (account: string): Promise<AccountVaultPerfItem[]> => {
+        const root = apiRoot.replace(/\/$/, '');
+        const params = new URLSearchParams({ account });
+        if (offset !== null && offset !== undefined) params.set('offset', offset);
+        if (limit !== null && limit !== undefined) params.set('limit', limit);
+        const url = `${root}/api/v1/account_vault_performance?${params.toString()}`;
+        const res = await fetch(url, { method: 'GET', headers });
+        const text = await res.text();
+        if (!res.ok) return [];
+        try {
+          const parsed = text ? JSON.parse(text) : [];
+          return Array.isArray(parsed) ? (parsed as AccountVaultPerfItem[]) : [];
+        } catch {
+          return [];
+        }
+      };
 
-    let list: AccountVaultPerfItem[] = await fetchVaultPerf(decibelAddr);
+    const collectMergedVaultPerformance = async (apiRoot: string): Promise<AccountVaultPerfItem[]> => {
+      const fetchVaultPerf = makeFetchVaultPerf(apiRoot);
+      const root = apiRoot.replace(/\/$/, '');
+      let rows: AccountVaultPerfItem[] = await fetchVaultPerf(decibelAddr);
 
-    if (list.length === 0) {
       const subRes = await fetch(
-        `${baseUrl}/api/v1/subaccounts?owner=${encodeURIComponent(decibelAddr)}`,
+        `${root}/api/v1/subaccounts?owner=${encodeURIComponent(decibelAddr)}`,
         { method: 'GET', headers }
       );
       if (subRes.ok) {
@@ -77,36 +120,19 @@ export async function GET(request: NextRequest) {
         for (const sub of subaccounts) {
           const subAddr = sub.subaccount_address;
           if (!subAddr) continue;
-          const subList = await fetchVaultPerf(subAddr);
-          const seen = new Set(list.map((v) => ((v.vault as { id?: string } | undefined)?.id ?? '')));
-          for (const v of subList) {
-            const id = (v.vault as { id?: string } | undefined)?.id ?? '';
-            if (id && !seen.has(id)) {
-              seen.add(id);
-              list.push(v);
-            } else if (!id) list.push(v);
-          }
+          const subList = await fetchVaultPerf(toCanonicalAddress(subAddr));
+          rows.push(...subList);
         }
       }
-    }
+
+      return mergeAccountVaultPerformanceByVault(rows);
+    };
+
+    let list: AccountVaultPerfItem[] = await collectMergedVaultPerformance(baseUrl);
 
     const usedTestnet = baseUrl.includes('testnet');
     if (list.length === 0 && usedTestnet && !process.env.DECIBEL_API_BASE_URL) {
-      const mainnetBase = DECIBEL_MAINNET_URL.replace(/\/$/, '');
-      const paramsM = new URLSearchParams({ account: decibelAddr });
-      if (offset != null) paramsM.set('offset', offset);
-      if (limit != null) paramsM.set('limit', limit);
-      const urlM = `${mainnetBase}/api/v1/account_vault_performance?${paramsM.toString()}`;
-      const resM = await fetch(urlM, { method: 'GET', headers });
-      if (resM.ok) {
-        const textM = await resM.text();
-        try {
-          const parsed = textM ? JSON.parse(textM) : [];
-          list = Array.isArray(parsed) ? (parsed as AccountVaultPerfItem[]) : [];
-        } catch {
-          // keep list
-        }
-      }
+      list = await collectMergedVaultPerformance(DECIBEL_MAINNET_URL);
     }
 
     // Enrich each item with derived APR when vault has return metrics but no apr field

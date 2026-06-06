@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createErrorResponse, createSuccessResponse } from "@/lib/utils/http";
 import { runYieldAiVaultCronPass } from "@/lib/protocols/yield-ai/yieldAiVaultWorker";
+import {
+  HYPERION_LP_CRON_LOCK_KEY,
+  runHyperionLpCronPass,
+  type HyperionLpCronRunResult,
+} from "@/lib/protocols/yield-ai/hyperionLpCron";
 
 type CronRunBody = {
   /** Some clients send `"true"` / `"false"` instead of JSON booleans. */
@@ -11,10 +16,29 @@ type CronRunBody = {
   maxSafesProcessedPerRun?: number;
   maxTxPerRun?: number;
   concurrencyReads?: number;
+  /**
+   * Default true: the primary cron also runs Hyperion LP auto-claim so the
+   * external scheduler has a single entrypoint. Set false for stablecoin-only
+   * manual runs.
+   */
+  includeHyperionLp?: boolean | string;
+  hyperionMinClaimUsd?: number | string;
+  hyperionMinRewardClaimUsd?: number | string;
+  hyperionMinRewardSwapUsd?: number | string;
+  hyperionSwapRewardsToUsdc?: boolean | string;
 };
 
 function getGlobalLockKey() {
   return "__yieldAiVaultCronRunning";
+}
+
+function parseOptionalBool(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return undefined;
+  const s = value.trim().toLowerCase();
+  if (s === "true" || s === "1") return true;
+  if (s === "false" || s === "0") return false;
+  return undefined;
 }
 
 export async function POST(request: NextRequest) {
@@ -76,6 +100,15 @@ export async function POST(request: NextRequest) {
       body.dryRun === true ||
       (typeof body.dryRun === "string" &&
         body.dryRun.toLowerCase() === "true");
+    const safeAddresses = Array.isArray(body.safeAddresses)
+      ? body.safeAddresses.filter((x) => typeof x === "string" && x.trim().length > 0)
+      : undefined;
+    const includeHyperionLp = parseOptionalBool(body.includeHyperionLp) ?? true;
+    const hyperionSwapRewardsToUsdc =
+      parseOptionalBool(body.hyperionSwapRewardsToUsdc) ?? true;
+    const hyperionMinClaimUsd = Number(body.hyperionMinClaimUsd);
+    const hyperionMinRewardClaimUsd = Number(body.hyperionMinRewardClaimUsd);
+    const hyperionMinRewardSwapUsd = Number(body.hyperionMinRewardSwapUsd);
 
     console.log("[Yield AI] cron: parsed request", {
       contentLength,
@@ -92,13 +125,20 @@ export async function POST(request: NextRequest) {
       maxSafesProcessedPerRun: body.maxSafesProcessedPerRun,
       maxTxPerRun: body.maxTxPerRun,
       concurrencyReads: body.concurrencyReads,
+      includeHyperionLp,
+      hyperionMinClaimUsd: Number.isFinite(hyperionMinClaimUsd) ? hyperionMinClaimUsd : undefined,
+      hyperionMinRewardClaimUsd: Number.isFinite(hyperionMinRewardClaimUsd)
+        ? hyperionMinRewardClaimUsd
+        : undefined,
+      hyperionMinRewardSwapUsd: Number.isFinite(hyperionMinRewardSwapUsd)
+        ? hyperionMinRewardSwapUsd
+        : undefined,
+      hyperionSwapRewardsToUsdc,
     });
 
     const result = await runYieldAiVaultCronPass({
       dryRun,
-      safeAddresses: Array.isArray(body.safeAddresses)
-        ? body.safeAddresses.filter((x) => typeof x === "string" && x.trim().length > 0)
-        : undefined,
+      safeAddresses,
       pageSize:
         typeof body.pageSize === "number" && body.pageSize > 0 ? body.pageSize : undefined,
       maxSafesProcessedPerRun:
@@ -114,7 +154,44 @@ export async function POST(request: NextRequest) {
           : undefined,
     });
 
-    return NextResponse.json(createSuccessResponse(result));
+    let hyperionLp: HyperionLpCronRunResult | null = null;
+    if (includeHyperionLp) {
+      if (g[HYPERION_LP_CRON_LOCK_KEY]) {
+        hyperionLp = {
+          action: "claim",
+          dryRun,
+          safesProcessed: 0,
+          actedPositions: 0,
+          results: [
+            {
+              safeAddress: "(cron-lock)",
+              error: "Skipped: Hyperion LP cron is already running.",
+            },
+          ],
+        };
+      } else {
+        g[HYPERION_LP_CRON_LOCK_KEY] = true;
+        try {
+          hyperionLp = await runHyperionLpCronPass({
+            action: "claim",
+            dryRun,
+            safeAddresses,
+            minClaimUsd: Number.isFinite(hyperionMinClaimUsd) ? hyperionMinClaimUsd : undefined,
+            minRewardClaimUsd: Number.isFinite(hyperionMinRewardClaimUsd)
+              ? hyperionMinRewardClaimUsd
+              : undefined,
+            minRewardSwapUsd: Number.isFinite(hyperionMinRewardSwapUsd)
+              ? hyperionMinRewardSwapUsd
+              : undefined,
+            swapRewardsToUsdc: hyperionSwapRewardsToUsdc,
+          });
+        } finally {
+          g[HYPERION_LP_CRON_LOCK_KEY] = false;
+        }
+      }
+    }
+
+    return NextResponse.json(createSuccessResponse({ ...result, hyperionLp }));
   } catch (error) {
     console.error("[Yield AI] cron run endpoint error:", error);
     return NextResponse.json(

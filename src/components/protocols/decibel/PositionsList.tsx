@@ -25,6 +25,16 @@ interface PositionsListProps {
   showManageButton?: boolean;
 }
 
+type DecibelAmpsData = {
+  rank?: number | null;
+  total_amps: number;
+  trading_amps?: number;
+  referral_amps?: number;
+  vault_amps?: number;
+  streak_amps?: number;
+  bonus_amps?: number;
+};
+
 export function PositionsList({
   address,
   onPositionsValueChange,
@@ -35,13 +45,13 @@ export function PositionsList({
 }: PositionsListProps) {
   const { formatUsd } = usePortfolioAmountsPrivacy();
   const [equity, setEquity] = useState<number | null>(null);
-  const [positions, setPositions] = useState<{ market: string; marginUsd: number; pnl: number }[]>([]);
+  const [positions, setPositions] = useState<{ market: string; marginUsd: number; pnl: number; user: string }[]>([]);
   const [marketNames, setMarketNames] = useState<Record<string, string>>({});
   const [availableToTrade, setAvailableToTrade] = useState<number | null>(null);
   const [vaults, setVaults] = useState<{ name: string; current_value_of_shares?: number }[]>([]);
   const [preDepositSumUsdc, setPreDepositSumUsdc] = useState<number | null>(null);
   const [totalAmps, setTotalAmps] = useState<number | null>(null);
-  const [predepositPoints, setPredepositPoints] = useState<number | null>(null);
+  const [ampsData, setAmpsData] = useState<DecibelAmpsData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const { isExpanded, toggleSection } = useCollapsible();
   const protocol = getProtocolByName("Decibel");
@@ -78,6 +88,18 @@ export function PositionsList({
     };
   }, [address, refreshKey]);
 
+  // Split the original Promise.all into two groups so the sidebar Decibel
+  // section renders without waiting on the slowest upstream calls:
+  //
+  //   Critical (~7s on this wallet):
+  //     accountOverview, userPositions, markets, predepositorBalance, prices
+  //   Background (load and patch in as they arrive):
+  //     accountVaultPerformance (~21s, vault rows)
+  //     amps (~1.7s, AMPs badge)
+  //
+  // isLoading flips false after the critical batch — the user sees equity,
+  // open positions and pre-deposit immediately. Vault rows and AMPs slot
+  // in when their fetches resolve.
   useEffect(() => {
     if (!address) {
       onCompleteRef.current?.();
@@ -85,6 +107,8 @@ export function PositionsList({
     }
     let cancelled = false;
     setIsLoading(true);
+
+    // ---- Critical group ----
     Promise.all([
       fetch(`/api/protocols/decibel/accountOverview?address=${encodeURIComponent(address)}`).then((r) =>
         r.json()
@@ -92,18 +116,13 @@ export function PositionsList({
       fetch(`/api/protocols/decibel/userPositions?address=${encodeURIComponent(address)}`).then((r) =>
         r.json()
       ),
-      fetch(`/api/protocols/decibel/accountVaultPerformance?address=${encodeURIComponent(address)}`).then((r) =>
-        r.json()
-      ),
       fetch("/api/protocols/decibel/markets").then((r) => r.json()),
       fetch(`/api/protocols/decibel/predepositorBalance?address=${encodeURIComponent(address)}`).then((r) =>
         r.json()
       ),
       fetch("/api/protocols/decibel/prices").then((r) => r.json()),
-      fetch(`/api/protocols/decibel/amps?owner=${encodeURIComponent(address)}`).then((r) => r.json()),
-      fetch(`/api/protocols/decibel/predepositPoints?address=${encodeURIComponent(address)}`).then((r) => r.json()),
     ])
-      .then(([overviewRes, positionsRes, vaultsRes, marketsRes, predepositRes, pricesRes, ampsRes, predepositPointsRes]) => {
+      .then(([overviewRes, positionsRes, marketsRes, predepositRes, pricesRes]) => {
         if (cancelled) return;
         const eq =
           overviewRes?.success && overviewRes?.data?.perp_equity_balance != null
@@ -143,15 +162,10 @@ export function PositionsList({
                 const markPx = pricesMap[normalizeAddress(String(p.market))] ?? entry;
                 const pricePnl = size * (markPx - entry);
                 const pnl = pricePnl + fundingDisplay;
-                return { market: p.market, marginUsd, pnl };
+                return { market: p.market, marginUsd, pnl, user: String((p as { user?: string }).user ?? '') };
               })
           : [];
-        const vaultList = vaultsRes?.success && Array.isArray(vaultsRes?.data)
-          ? vaultsRes.data.map((v: { vault?: { name?: string }; current_value_of_shares?: number }) => ({
-              name: v.vault?.name ?? "Vault",
-              current_value_of_shares: v.current_value_of_shares,
-            }))
-          : [];
+
         const map: Record<string, string> = {};
         if (marketsRes?.success && Array.isArray(marketsRes?.data)) {
           for (const m of marketsRes.data as { market_addr?: string; market_name?: string }[]) {
@@ -160,30 +174,19 @@ export function PositionsList({
             }
           }
         }
-        const vaultsTotal = vaultList.reduce(
-          (sum: number, v: { current_value_of_shares?: number }) => sum + (v.current_value_of_shares ?? 0),
-          0
-        );
         const preDeposit = predepositRes?.success && typeof predepositRes?.data?.sumUsdc === 'number'
           ? predepositRes.data.sumUsdc
           : 0;
-        const totalValue = eq + vaultsTotal + preDeposit;
         setEquity(eq);
         setPositions(posList);
         setMarketNames(map);
         setAvailableToTrade(avail);
-        setVaults(vaultList);
         setPreDepositSumUsdc(preDeposit);
-        const amps = ampsRes?.success && typeof ampsRes?.data?.total_amps === "number"
-          ? ampsRes.data.total_amps
-          : null;
-        setTotalAmps(amps);
-        const points = predepositPointsRes?.success && typeof predepositPointsRes?.data?.points === "number"
-          ? predepositPointsRes.data.points
-          : null;
-        setPredepositPoints(points);
-        onValueRef.current?.(totalValue);
         onMainnetRef.current?.(preDeposit);
+        // Note: do not call onValueRef here. A dedicated effect below
+        // bubbles up totalValue whenever equity / vaults / preDeposit
+        // change, so the parent sidebar receives the freshest figure
+        // including the (still-loading) vault rows.
       })
       .catch(() => {
         if (!cancelled) {
@@ -191,10 +194,6 @@ export function PositionsList({
           setPositions([]);
           setMarketNames({});
           setAvailableToTrade(null);
-          setVaults([]);
-          setTotalAmps(null);
-          setPredepositPoints(null);
-          onValueRef.current?.(0);
         }
       })
       .finally(() => {
@@ -203,10 +202,62 @@ export function PositionsList({
           onCompleteRef.current?.();
         }
       });
+
+    // ---- Background: vault performance (slowest endpoint, ~21s) ----
+    fetch(`/api/protocols/decibel/accountVaultPerformance?address=${encodeURIComponent(address)}`)
+      .then((r) => r.json())
+      .then((vaultsRes) => {
+        if (cancelled) return;
+        const vaultList = vaultsRes?.success && Array.isArray(vaultsRes?.data)
+          ? (vaultsRes.data as { vault?: { name?: string }; current_value_of_shares?: number }[])
+              .map((v) => ({
+                name: v.vault?.name ?? "Vault",
+                current_value_of_shares: v.current_value_of_shares,
+              }))
+              .filter((v) => (v.current_value_of_shares ?? 0) > 0)
+          : [];
+        setVaults(vaultList);
+      })
+      .catch(() => {
+        if (!cancelled) setVaults([]);
+      });
+
+    // ---- Background: AMPs (reward score badge) ----
+    fetch(`/api/protocols/decibel/amps?owner=${encodeURIComponent(address)}`)
+      .then((r) => r.json())
+      .then((ampsRes) => {
+        if (cancelled) return;
+        const amps = ampsRes?.success && typeof ampsRes?.data?.total_amps === "number"
+          ? ampsRes.data.total_amps
+          : null;
+        setTotalAmps(amps);
+        setAmpsData(amps != null ? (ampsRes.data as DecibelAmpsData) : null);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setTotalAmps(null);
+          setAmpsData(null);
+        }
+      });
+
     return () => {
       cancelled = true;
     };
   }, [address, refreshKey]);
+
+  // Bubble the latest aggregate total up to the parent whenever any of its
+  // components change. Without this, splitting the fetches into critical +
+  // background batches would leave the sidebar total stuck at "without
+  // vaults" forever (or update twice with a flicker if we wrote into
+  // onValueRef from each .then individually).
+  useEffect(() => {
+    const vaultsSum = vaults.reduce(
+      (sum, v) => sum + (v.current_value_of_shares ?? 0),
+      0
+    );
+    const total = (equity ?? 0) + vaultsSum + (preDepositSumUsdc ?? 0);
+    onValueRef.current?.(total);
+  }, [equity, vaults, preDepositSumUsdc]);
 
   const vaultsTotal = vaults.reduce(
     (sum: number, v: { current_value_of_shares?: number }) => sum + (v.current_value_of_shares ?? 0),
@@ -234,8 +285,6 @@ export function PositionsList({
     return null;
   }
 
-  const hasTestnetData = availableToTrade != null || positions.length > 0 || vaults.length > 0;
-
   return (
     <Card className="w-full">
       <CardHeader
@@ -256,20 +305,6 @@ export function PositionsList({
               </div>
             )}
             <CardTitle className="text-lg">Decibel</CardTitle>
-            {hasTestnetData && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="inline-flex text-muted-foreground cursor-help" onClick={(e) => e.stopPropagation()}>
-                      <Info className="h-3.5 w-3.5" />
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-[220px]">
-                    <p>Decibel assets (positions, available to trade, vaults) are included in Total Assets.</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
           </div>
           <div className="flex items-center gap-2">
             <div className="text-lg whitespace-nowrap">
@@ -294,9 +329,6 @@ export function PositionsList({
                 <div className="flex items-center justify-between py-1">
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-muted-foreground">Pre-deposit</span>
-                    <Badge variant="secondary" className="text-xs font-normal">
-                      mainnet
-                    </Badge>
                   </div>
                   <span className="text-sm font-medium shrink-0 ml-2">
                     {formatUsd(preDepositSumUsdc ?? 0, 2)}
@@ -307,16 +339,13 @@ export function PositionsList({
                 <div className="flex items-center justify-between py-1">
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-muted-foreground">Available to trade</span>
-                    <Badge variant="secondary" className="text-xs font-normal">
-                      mainnet
-                    </Badge>
                   </div>
                   <span className="text-sm font-medium shrink-0 ml-2">
                     {formatUsd(availableToTrade, 2)}
                   </span>
                 </div>
               )}
-              {/* AMPs: trading + predeposit points, breakdown in tooltip */}
+              {/* AMPs from Decibel points leaderboard */}
               <div className="flex items-center justify-between py-1">
                 <div className="flex items-center gap-1.5">
                   <span className="text-sm text-muted-foreground">AMPs</span>
@@ -330,25 +359,29 @@ export function PositionsList({
                       <TooltipContent side="bottom" className="max-w-[260px]">
                         <p className="font-medium mb-1.5">Points breakdown</p>
                         <ul className="text-sm text-muted-foreground space-y-0.5">
-                          <li>• Trading (AMPs): {formatNumber(totalAmps ?? 0, 2)}</li>
-                          <li>• Predeposit points: {formatNumber(predepositPoints ?? 0, 2)}</li>
+                          <li>- Trading: {formatNumber(ampsData?.trading_amps ?? 0, 2)} AMP</li>
+                          <li>- Referrals: {formatNumber(ampsData?.referral_amps ?? 0, 2)} AMP</li>
+                          <li>- Vaults: {formatNumber(ampsData?.vault_amps ?? 0, 2)} AMP</li>
+                          <li>- Streak: {formatNumber(ampsData?.streak_amps ?? 0, 2)} AMP</li>
+                          {(ampsData?.bonus_amps ?? 0) > 0 && (
+                            <li>- Bonus: {formatNumber(ampsData?.bonus_amps ?? 0, 2)} AMP</li>
+                          )}
                         </ul>
-                        <p className="text-xs text-muted-foreground mt-1.5">Trading data is updated once per day.</p>
+                        {ampsData?.rank != null && (
+                          <p className="text-xs text-muted-foreground mt-1.5">Rank #{formatNumber(ampsData.rank, 0)}</p>
+                        )}
                       </TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
                 </div>
-                <span className={cn("text-sm font-medium shrink-0 ml-2", totalAmps == null && predepositPoints == null && "text-muted-foreground")}>
-                  {totalAmps != null || predepositPoints != null ? formatNumber((totalAmps ?? 0) + (predepositPoints ?? 0), 2) : "—"}
+                <span className={cn("text-sm font-medium shrink-0 ml-2", totalAmps == null && "text-muted-foreground")}>
+                  {totalAmps != null ? formatNumber(totalAmps, 2) : "—"}
                 </span>
               </div>
               {positions.length > 0 && (
                 <div className="space-y-2 mt-1">
                   <div className="flex items-center gap-2 py-0.5">
                     <span className="text-sm font-medium text-muted-foreground">Positions</span>
-                    <Badge variant="secondary" className="text-xs font-normal">
-                      mainnet
-                    </Badge>
                   </div>
                   {positions.map((p, i) => (
                     <div
@@ -376,17 +409,12 @@ export function PositionsList({
             <div className="mt-4 pt-4 space-y-2">
               <h4 className="text-sm font-medium mb-2 text-muted-foreground flex items-center gap-2">
                 Vaults
-                <Badge variant="secondary" className="text-xs font-normal">
-                  mainnet
-                </Badge>
               </h4>
               {vaults.map((v, i) => (
                 <div key={i} className="flex items-center justify-between py-1">
                   <div className="text-sm font-medium truncate min-w-0">{v.name}</div>
                   <div className="text-sm font-medium shrink-0 ml-2">
-                    {v.current_value_of_shares != null && v.current_value_of_shares > 0
-                      ? formatUsd(v.current_value_of_shares, 2)
-                      : null}
+                    {formatUsd(v.current_value_of_shares ?? 0, 2)}
                   </div>
                 </div>
               ))}

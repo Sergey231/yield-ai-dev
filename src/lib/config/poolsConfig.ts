@@ -224,7 +224,7 @@ export const poolSources: PoolSource[] = [
   {
     name: 'KoFi Finance Staking API',
     url: '/api/protocols/kofi/pools',
-    enabled: true,
+    enabled: false,
     transform: (data: any) => {
       // Transform KoFi pools data to InvestmentData format
       const pools = data.data || [];
@@ -340,4 +340,4 @@ export const setSourceEnabled = (sourceName: string, enabled: boolean) => {
   if (source) {
     source.enabled = enabled;
   }
-}; 
+};

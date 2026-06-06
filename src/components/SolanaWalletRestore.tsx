@@ -20,7 +20,7 @@ const LOG = "[solana-restore]";
  * - When the user selects a wallet (Connect → choose Trust), select() → setWalletName('Trust') is called,
  *   and the useLocalStorage useEffect writes localStorage.setItem('walletName', JSON.stringify('Trust')).
  * So on a full page load, restoration on the main page is that single read in the initializer.
- * On /bridge or /privacy-bridge we run in an effect (after mount); we read the same key and call select()
+ * On /bridge we run in an effect (after mount); we read the same key and call select()
  * so the same WalletProvider state is updated. If 'walletName' is missing in localStorage (e.g. bridge
  * opened in a new tab before connecting elsewhere), no restore is possible until the user connects again.
  */

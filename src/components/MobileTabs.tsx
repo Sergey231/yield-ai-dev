@@ -13,6 +13,7 @@ import { PositionsList as JoulePositionsList } from "./protocols/joule/Positions
 import { PositionsList as TappPositionsList } from "./protocols/tapp/PositionsList";
 import { PositionsList as MesoPositionsList } from "./protocols/meso/PositionsList";
 import { PositionsList as AuroPositionsList } from "./protocols/auro/PositionsList";
+import { PositionsList as AmnisPositionsList } from "./protocols/amnis/PositionsList";
 import { PositionsList as EarniumPositionsList } from "./protocols/earnium/PositionsList";
 import { PositionsList as AavePositionsList } from "./protocols/aave/PositionsList";
 import { PositionsList as MoarPositionsList } from "./protocols/moar/PositionsList";
@@ -22,6 +23,10 @@ import { PositionsList as DecibelPositionsList } from "./protocols/decibel/Posit
 import { PositionsList as AptreePositionsList } from "./protocols/aptree/PositionsList";
 import { PositionsList as JupiterPositionsList } from "./protocols/jupiter/PositionsList";
 import { PositionsList as KaminoPositionsList } from "./protocols/kamino/PositionsList";
+import { PositionsList as MeteoraPositionsList } from "./protocols/meteora/PositionsList";
+import { PositionsList as RaydiumPositionsList } from "./protocols/raydium/PositionsList";
+import { PositionsList as OrcaPositionsList } from "./protocols/orca/PositionsList";
+import { PositionsList as TramplinPositionsList } from "./protocols/tramplin/PositionsList";
 import { PositionsList as YieldAIPositionsList } from "./protocols/yield-ai/PositionsList";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { useAptosNativeRestore } from "@/hooks/useAptosNativeRestore";
@@ -35,6 +40,7 @@ import { useSolanaPortfolio } from "@/hooks/useSolanaPortfolio";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { ProtocolIcon } from "@/shared/ProtocolIcon/ProtocolIcon";
 import { useEffectiveWalletAddresses } from "@/lib/hooks/useEffectiveWalletAddresses";
+import { formatCurrency } from "@/lib/utils/numberFormat";
 import { useAptosHasTransactions } from "@/lib/query/hooks/aptos/useAptosHasTransactions";
 import { isDerivedAptosWalletReliable } from "@/lib/aptosWalletUtils";
 
@@ -68,6 +74,7 @@ function MobileTabsContent() {
   const [tappValue, setTappValue] = useState<number>(0);
   const [mesoValue, setMesoValue] = useState<number>(0);
   const [auroValue, setAuroValue] = useState<number>(0);
+  const [amnisValue, setAmnisValue] = useState<number>(0);
   const [earniumValue, setEarniumValue] = useState<number>(0);
   const [aaveValue, setAaveValue] = useState<number>(0);
   const [moarValue, setMoarValue] = useState<number>(0);
@@ -76,6 +83,12 @@ function MobileTabsContent() {
   const [decibelValue, setDecibelValue] = useState<number>(0);
   const [aptreeValue, setAptreeValue] = useState<number>(0);
   const [yieldAIValue, setYieldAIValue] = useState<number>(0);
+  const [jupiterValue, setJupiterValue] = useState<number>(0);
+  const [kaminoValue, setKaminoValue] = useState<number>(0);
+  const [meteoraValue, setMeteoraValue] = useState<number>(0);
+  const [raydiumValue, setRaydiumValue] = useState<number>(0);
+  const [orcaValue, setOrcaValue] = useState<number>(0);
+  const [tramplinValue, setTramplinValue] = useState<number>(0);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [refreshKey, setRefreshKey] = useState<number>(0);
   const [checkingAptosProtocols, setCheckingAptosProtocols] = useState<string[]>([]);
@@ -101,7 +114,7 @@ function MobileTabsContent() {
     "APTree",
     "AI agent",
   ];
-  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino"];
+  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino", "Meteora", "Raydium", "Orca", "Tramplin"];
 
   const resetAptosChecking = useCallback(() => {
     setAptosCheckRunId((x) => x + 1);
@@ -161,7 +174,7 @@ function MobileTabsContent() {
 
         setTokens(portfolio.tokens);
         setTotalValue((total + hyperionValue + echelonValue + ariesValue + jouleValue + tappValue + mesoValue + auroValue + earniumValue + aaveValue + moarValue + thalaValue + echoValue + decibelValue + aptreeValue + yieldAIValue).toFixed(2));
-      } catch (error) {
+      } catch {
       }
     }
 
@@ -223,6 +236,10 @@ function MobileTabsContent() {
 
   const handleAuroValueChange = (value: number) => {
     setAuroValue(value);
+  };
+
+  const handleAmnisValueChange = (value: number) => {
+    setAmnisValue(value);
   };
 
   const handleEarniumValueChange = (value: number) => {
@@ -330,8 +347,17 @@ function MobileTabsContent() {
                 {/* Aptos wallet card and protocols - only when Aptos is connected */}
                 {effectiveAptosAddress && (
                   <>
-                    <PortfolioCard 
-                      totalValue={totalValue} 
+                    <PortfolioCard
+                      totalValue={(
+                        parseFloat(totalValue || "0") +
+                        (Number.isFinite(solanaTotalValue) ? (solanaTotalValue ?? 0) : 0) +
+                        (Number.isFinite(jupiterValue) ? jupiterValue : 0) +
+                        (Number.isFinite(kaminoValue) ? kaminoValue : 0) +
+                        (Number.isFinite(meteoraValue) ? meteoraValue : 0) +
+                        (Number.isFinite(raydiumValue) ? raydiumValue : 0) +
+                        (Number.isFinite(orcaValue) ? orcaValue : 0) +
+                        (Number.isFinite(tramplinValue) ? tramplinValue : 0)
+                      ).toFixed(2)}
                       tokens={tokens} 
                       onRefresh={handleRefresh}
                       isRefreshing={isRefreshing}
@@ -367,6 +393,7 @@ function MobileTabsContent() {
                         { component: TappPositionsList, value: tappValue, name: 'Tapp Exchange', handler: handleTappValueChange },
                         { component: MesoPositionsList, value: mesoValue, name: 'Meso Finance', handler: handleMesoValueChange },
                         { component: AuroPositionsList, value: auroValue, name: 'Auro Finance', handler: handleAuroValueChange },
+                        { component: AmnisPositionsList, value: amnisValue, name: 'Amnis Finance', handler: handleAmnisValueChange },
                         { component: EarniumPositionsList, value: earniumValue, name: 'Earnium', handler: handleEarniumValueChange },
                         { component: AavePositionsList, value: aaveValue, name: 'Aave', handler: handleAaveValueChange },
                         { component: MoarPositionsList, value: moarValue, name: 'Moar Market', handler: handleMoarValueChange },
@@ -394,7 +421,11 @@ function MobileTabsContent() {
                             refreshKey={refreshKey}
                             onPositionsCheckComplete={() => {
                               const runId = aptosCheckRunId;
-                              setCheckingAptosProtocols((prev) => (aptosCheckRunId === runId ? prev.filter((p) => p !== name) : prev));
+                              setCheckingAptosProtocols((prev) => {
+                                if (aptosCheckRunId !== runId) return prev;
+                                if (!prev.includes(name)) return prev;
+                                return prev.filter((p) => p !== name);
+                              });
                             }}
                           />
                         ));
@@ -405,6 +436,24 @@ function MobileTabsContent() {
                 {/* Solana wallet card - INDEPENDENT of Aptos */}
                 {solanaAddress && (
                   <div className="space-y-2">
+                    {/* Show Solana-only Assets total header when Aptos is not connected */}
+                    {!effectiveAptosAddress && (
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-lg font-medium">Assets</span>
+                        <span className="text-lg font-medium">
+                          {formatCurrency(
+                            (Number.isFinite(solanaTotalValue) ? (solanaTotalValue ?? 0) : 0) +
+                              (Number.isFinite(jupiterValue) ? jupiterValue : 0) +
+                              (Number.isFinite(kaminoValue) ? kaminoValue : 0) +
+                              (Number.isFinite(meteoraValue) ? meteoraValue : 0) +
+                              (Number.isFinite(raydiumValue) ? raydiumValue : 0) +
+                              (Number.isFinite(orcaValue) ? orcaValue : 0) +
+                              (Number.isFinite(tramplinValue) ? tramplinValue : 0),
+                            2,
+                          )}
+                        </span>
+                      </div>
+                    )}
                     <SolanaWalletCard
                       tokens={solanaTokens}
                       totalValueUsd={solanaTotalValue}
@@ -432,20 +481,103 @@ function MobileTabsContent() {
                         </div>
                       </div>
                     )}
-                    <JupiterPositionsList
-                      address={solanaProtocolsAddress ?? undefined}
-                      onPositionsCheckComplete={() => {
-                        const runId = solanaCheckRunId;
-                        setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Jupiter") : prev));
-                      }}
-                    />
-                    <KaminoPositionsList
-                      address={solanaProtocolsAddress ?? undefined}
-                      onPositionsCheckComplete={() => {
-                        const runId = solanaCheckRunId;
-                        setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Kamino") : prev));
-                      }}
-                    />
+                    {(
+                      [
+                        {
+                          name: "Jupiter" as const,
+                          value: jupiterValue,
+                          component: (
+                            <JupiterPositionsList
+                              key="Jupiter"
+                              address={solanaProtocolsAddress ?? undefined}
+                              onPositionsValueChange={(v) => setJupiterValue(Number.isFinite(v) ? v : 0)}
+                              onPositionsCheckComplete={() => {
+                                const runId = solanaCheckRunId;
+                                setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Jupiter") : prev));
+                              }}
+                            />
+                          ),
+                        },
+                        {
+                          name: "Kamino" as const,
+                          value: kaminoValue,
+                          component: (
+                            <KaminoPositionsList
+                              key="Kamino"
+                              address={solanaProtocolsAddress ?? undefined}
+                              onPositionsValueChange={(v) => setKaminoValue(Number.isFinite(v) ? v : 0)}
+                              onPositionsCheckComplete={() => {
+                                const runId = solanaCheckRunId;
+                                setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Kamino") : prev));
+                              }}
+                            />
+                          ),
+                        },
+                        {
+                          name: "Meteora" as const,
+                          value: meteoraValue,
+                          component: (
+                            <MeteoraPositionsList
+                              key="Meteora"
+                              address={solanaProtocolsAddress ?? undefined}
+                              onPositionsValueChange={(v) => setMeteoraValue(Number.isFinite(v) ? v : 0)}
+                              onPositionsCheckComplete={() => {
+                                const runId = solanaCheckRunId;
+                                setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Meteora") : prev));
+                              }}
+                            />
+                          ),
+                        },
+                        {
+                          name: "Raydium" as const,
+                          value: raydiumValue,
+                          component: (
+                            <RaydiumPositionsList
+                              key="Raydium"
+                              address={solanaProtocolsAddress ?? undefined}
+                              onPositionsValueChange={(v) => setRaydiumValue(Number.isFinite(v) ? v : 0)}
+                              onPositionsCheckComplete={() => {
+                                const runId = solanaCheckRunId;
+                                setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Raydium") : prev));
+                              }}
+                            />
+                          ),
+                        },
+                        {
+                          name: "Orca" as const,
+                          value: orcaValue,
+                          component: (
+                            <OrcaPositionsList
+                              key="Orca"
+                              address={solanaProtocolsAddress ?? undefined}
+                              onPositionsValueChange={(v) => setOrcaValue(Number.isFinite(v) ? v : 0)}
+                              onPositionsCheckComplete={() => {
+                                const runId = solanaCheckRunId;
+                                setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Orca") : prev));
+                              }}
+                            />
+                          ),
+                        },
+                        {
+                          name: "Tramplin" as const,
+                          value: tramplinValue,
+                          component: (
+                            <TramplinPositionsList
+                              key="Tramplin"
+                              address={solanaProtocolsAddress ?? undefined}
+                              onPositionsValueChange={(v) => setTramplinValue(Number.isFinite(v) ? v : 0)}
+                              onPositionsCheckComplete={() => {
+                                const runId = solanaCheckRunId;
+                                setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Tramplin") : prev));
+                              }}
+                            />
+                          ),
+                        },
+                      ] as const
+                    )
+                      .slice()
+                      .sort((a, b) => b.value - a.value)
+                      .map((x) => x.component)}
                     <SolanaSignMessageButton />
                   </div>
                 )}

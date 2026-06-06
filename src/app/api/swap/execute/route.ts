@@ -108,9 +108,9 @@ export async function POST(request: NextRequest) {
     });
 
     const payload = {
-      ...hyperionPayload,
-      // Keep explicit type_arguments to match current client expectations
-      type_arguments: ['0x1::aptos_coin::AptosCoin'],
+      function: hyperionPayload.function,
+      type_arguments: hyperionPayload.typeArguments,
+      arguments: hyperionPayload.functionArguments,
     };
 
     if (!payload || !payload.function || !Array.isArray(payload.type_arguments) || !Array.isArray(payload.arguments)) {

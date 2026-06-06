@@ -1,5 +1,10 @@
 # Handoff: Swap Modal — Yield AI
 
+Other docs in this folder:
+
+- [Kamino integration](./kamino-integration.md) — Solana Kamino (API routes, positions, unsigned tx flow).
+- [Jupiter Lend and Swap (Solana)](./jupiter-lend-and-swap.md) — Earn positions, borrow reads, Lite/API deposit-withdraw, Jupiter Swap (gasless vs user gas).
+
 ## Overview
 This is a high-fidelity interactive prototype of the **Swap Tokens modal** for the Yield AI app on Aptos. It covers the full swap flow: token selection, amount input, quote fetching, swap execution, and success/error states.
 

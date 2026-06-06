@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { sdk } from "@/lib/hyperion";
+import { sdk, unwrapHyperionPoolByTokenPair } from "@/lib/hyperion";
 
 /**
  * @swagger
@@ -62,11 +62,12 @@ export async function GET(request: Request) {
 
     // Используем SDK метод для получения пула по паре токенов и fee tier
     // Согласно документации: sdk.Pool.getPoolByTokenPairAndFeeTier({ token1, token2, feeTier })
-    const pool = await sdk.Pool.getPoolByTokenPairAndFeeTier({
+    const result = await sdk.Pool.getPoolByTokenPairAndFeeTier({
       token1: token1,
       token2: token2,
       feeTier: parseInt(feeTier)
     });
+    const pool = unwrapHyperionPoolByTokenPair(result);
 
     if (!pool) {
       return NextResponse.json(
@@ -84,7 +85,7 @@ export async function GET(request: Request) {
     console.error("Error fetching Hyperion pool by tokens:", error);
     return NextResponse.json(
       { error: "Failed to fetch pool" },
-      { status: 500 }
+      { status: 502 }
     );
   }
-} 
+}

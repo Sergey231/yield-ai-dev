@@ -10,11 +10,6 @@
         "decimals": 6,
         "coinType": null
       },
-      "MOAR_USDC": {
-        "metadata": "0x22dbe22abf689d8a0f751cab7a32fe5570c49b53fcccd4e5d709b269efda554a",
-        "decimals": 6,
-        "coinType": null
-      },
       "USD1": {
         "metadata": "0x05fabd1b12e39967a3c24e91b7b8f67719a6dacee74f3c8b9fb7d93e855437d2",
         "decimals": 6,
@@ -40,11 +35,6 @@
       "echelon": {
         "packageAddress": "0xc6bc659f1649553c1a3fa05d9727433dc03843baac29473c817d06d39e7621ba",
         "adapterAddressView": "adapter_echelon::get_echelon_adapter_address"
-      },
-      "moar": {
-        "packageAddress": "0xa3afc59243afb6deeac965d40b25d509bb3aebc12f502b8592c283070abc2e07",
-        "adapterAddressView": "adapter_moar::get_moar_adapter_address",
-        "poolId": 1
       }
     },
     "dexDefaults": {
@@ -60,21 +50,16 @@
   "strategies": {
     "usd1_echelon_compound": {
       "strategyVersion": 1,
-      "description": "Claim rewards (Moar + Echelon APT/ThalaAPT/ELON) → swap to USDC → swap to USD1 → deposit to Echelon",
+      "description": "Claim rewards (Echelon APT/ThalaAPT/ELON) → swap to USDC → swap to USD1 → deposit to Echelon",
       "context": {
         "echelon": {
           "marketObj": "0xbb8f38636896c629ff9ef0bf916791a992e12ab4f1c6e26279ee9c6979646963",
           "farmingId": "@0xbb8f38636896c629ff9ef0bf916791a992e12ab4f1c6e26279ee9c6979646963200"
-        },
-        "moar": {
-          "rewardId": "APT",
-          "farmingIdentifier": "auto"
         }
       },
       "defaults": {
         "minClaimBaseUnits": 10000000,
         "minSwapRewardBaseUnits": 10000000,
-        "minMoarUsdcWithdrawBaseUnits": 1,
         "minUsdcSwapToUsd1": 1000000,
         "minUsd1DepositToEchelon": 100000,
         "usd1ReserveInSafe": 0
@@ -85,26 +70,10 @@
       },
       "riskLimits": {
         "maxSingleActionUsd": 5000,
-        "allowedAssets": ["USDC", "MOAR_USDC", "USD1", "APT_FA", "ThalaAPT", "ELON"],
+        "allowedAssets": ["USDC", "USD1", "APT_FA", "ThalaAPT", "ELON"],
         "maxSlippageBps": 100
       },
       "actions": [
-        {
-          "id": "claimMoarApt",
-          "type": "claimMoarReward",
-          "description": "Claim APT reward from Moar farming into safe",
-          "enabled": true,
-          "params": {
-            "entryFunction": "vault::execute_claim_apt",
-            "rewardAsset": "APT_FA"
-          },
-          "condition": {
-            "leftRef": "state.moarClaimableApt",
-            "op": ">=",
-            "rightRef": "defaults.minClaimBaseUnits"
-          },
-          "onError": "continue"
-        },
         {
           "id": "claimEchelonApt",
           "type": "claimEchelonReward",
@@ -206,7 +175,7 @@
           "type": "swapFaToFa",
           "description": "Swap APT (FA) → USDC via Hyperion (USDC-hub allowlist)",
           "enabled": false,
-          "dependsOn": ["claimMoarApt", "claimEchelonApt"],
+          "dependsOn": ["claimEchelonApt"],
           "params": {
             "entryFunction": "vault::execute_swap_fa_to_fa",
             "fromAsset": "APT_FA",
@@ -224,7 +193,6 @@
           "type": "swapFaToFa",
           "description": "Swap USDC → USD1 via Hyperion",
           "enabled": true,
-          "dependsOn": ["withdrawMoar"],
           "params": {
             "entryFunction": "vault::execute_swap_fa_to_fa",
             "fromAsset": "USDC",
@@ -263,38 +231,6 @@
             ]
           },
           "onError": "halt"
-        },
-        {
-          "id": "withdrawMoar",
-          "type": "withdrawMoarFull",
-          "description": "Full withdraw Moar USDC receipt token back to underlying USDC on safe",
-          "enabled": true,
-          "params": {
-            "entryFunction": "vault::execute_withdraw_full",
-            "asset": "USDC"
-          },
-          "condition": {
-            "leftRef": "state.safeBalance.MOAR_USDC",
-            "op": ">=",
-            "rightRef": "defaults.minMoarUsdcWithdrawBaseUnits"
-          },
-          "onError": "halt"
-        },
-        {
-          "id": "depositMoar",
-          "type": "depositMoar",
-          "description": "Deposit to Moar pool from safe (opt-in, disabled by default)",
-          "enabled": false,
-          "params": {
-            "entryFunction": "vault::execute_deposit",
-            "asset": "USDC"
-          },
-          "condition": {
-            "leftRef": "state.safeBalance.USDC",
-            "op": ">=",
-            "rightRef": "defaults.minUsdcSwapToUsd1"
-          },
-          "onError": "halt"
         }
       ]
     }
@@ -310,16 +246,13 @@
     },
     {
       "address": "0xfcd901cdf77f6cb0608ca353baa6debd027eae110347270940cf12a0dd477c86",
-      "label": "Safe #2 (example — higher thresholds, no Moar claim)",
+      "label": "Safe #2 (example — higher thresholds)",
       "enabled": true,
       "priority": 2,
       "strategyId": "usd1_echelon_compound",
       "overrides": {
         "defaults": {
           "minClaimBaseUnits": 50000000
-        },
-        "actions": {
-          "claimMoarApt": { "enabled": false }
         },
         "riskLimits": {
           "maxSingleActionUsd": 2000

@@ -28,10 +28,13 @@ import { formatCurrency } from '@/lib/utils/numberFormat';
 import { cn } from '@/lib/utils';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { executeSolanaToAptosBridge } from '@/components/bridge/SolanaToAptosBridge';
+import { recordPendingReclaim } from '@/lib/bridgeReclaimQueue';
 import { executeAptosToSolanaBridge } from '@/components/bridge/AptosToSolanaBridge';
 import { executeAptosNativeToSolanaBridge } from '@/components/bridge/AptosNativeToSolanaBridge';
 import { isDerivedAptosWallet, isDerivedAptosWalletReliable, getAptosWalletNameFromStorage } from '@/lib/aptosWalletUtils';
-import { ActionLog, type ActionLogItem } from '@/components/bridge/ActionLog';
+import type { ActionLogItem } from '@/components/bridge/ActionLog';
+import { BridgeProgressView, type BridgeDirection, type BridgePhase } from '@/components/bridge/BridgeProgressView';
+import { ReclaimBanner } from '@/components/bridge/ReclaimBanner';
 import { useAptosClient } from '@/contexts/AptosClientContext';
 import { GasStationService } from '@/lib/services/gasStation';
 import { performMintOnSolana } from '@/lib/cctp-mint-core';
@@ -910,6 +913,18 @@ function BridgePageContent() {
     return false;
   }, [bothWalletsConnected, sourceChain, destChain, sourceToken, destToken, transferAmount]);
 
+  // Per-chain USDC balances (human-readable). Shown inline next to each wallet.
+  const solanaUsdcBalance = useMemo(() => {
+    const t = solanaTokens.find(t => t.address === USDC_SOLANA);
+    if (!t) return 0;
+    return parseFloat(t.amount) / Math.pow(10, t.decimals);
+  }, [solanaTokens]);
+  const aptosUsdcBalance = useMemo(() => {
+    const t = aptosTokens.find(t => t.address === USDC_APTOS);
+    if (!t) return 0;
+    return parseFloat(t.amount) / Math.pow(10, t.decimals);
+  }, [aptosTokens]);
+
   // Source chain USDC balance for percentage buttons (human-readable, divided by decimals)
   const sourceUsdcBalance = useMemo(() => {
     if (!sourceChain) return 0;
@@ -935,6 +950,15 @@ function BridgePageContent() {
     const raw = parseFloat(sol.amount);
     if (!Number.isFinite(raw) || raw <= 0) return 0;
     return raw / Math.pow(10, sol.decimals ?? 9);
+  }, [solanaTokens]);
+
+  // SOL price in USD — for approximate fiat values in the bridge fee summary.
+  const solPriceUsd = useMemo(() => {
+    const sol = solanaTokens.find((t) => t.address === WRAPPED_SOL_MINT || t.symbol === 'SOL') as
+      | { price?: number | string | null }
+      | undefined;
+    const p = sol?.price != null ? Number(sol.price) : NaN;
+    return Number.isFinite(p) && p > 0 ? p : undefined;
   }, [solanaTokens]);
 
   // Whether the source chain balance is currently loading
@@ -1451,6 +1475,9 @@ function BridgePageContent() {
         updateLastAction('Starting Solana -> Aptos bridge...', 'pending');
         console.log('[Bridge] Solana -> Aptos transfer initiated');
 
+        const solanaWalletAddr = resolvedPublicKey.toBase58();
+        const capturedEventAccount = { value: null as string | null };
+
         // Execute burn on Solana
         const burnTxSignature = await executeSolanaToAptosBridge(
           transferAmount,
@@ -1458,11 +1485,24 @@ function BridgePageContent() {
           resolvedSignTx,
           solanaConnection,
           aptosAccount.address.toString(),
-          (status) => {
-            setTransferStatus(status);
-            updateLastAction(status, 'pending');
+          {
+            onStatusUpdate: (status) => {
+              setTransferStatus(status);
+              updateLastAction(status, 'pending');
+            },
+            onEventAccount: (ea) => { capturedEventAccount.value = ea; },
           }
         );
+
+        // Queue this burn's MessageSent event account so its rent can be
+        // reclaimed later via the manual "Reclaim SOL" button.
+        if (capturedEventAccount.value) {
+          recordPendingReclaim(solanaWalletAddr, {
+            eventAccount: capturedEventAccount.value,
+            burnTxSig: burnTxSignature,
+            sourceDomain: 5,
+          });
+        }
 
         console.log('[Bridge] Burn transaction completed:', burnTxSignature);
         // Last action is "Burn completed! Transaction: ..." (pending) from callback — mark it success
@@ -1727,12 +1767,12 @@ function BridgePageContent() {
           })
           .catch((error) => {
             console.error('[Bridge] Error in confirmation or attestation polling:', error);
-            const mintingAptosUrl = `/minting-aptos?signature=${encodeURIComponent(burnTxSignature)}`;
+            const mintingAptosUrl = `/minting?dest=aptos&signature=${encodeURIComponent(burnTxSignature)}`;
             updateLastAction(
               `Error: ${error.message || 'Failed to complete minting'}`,
               'error',
               mintingAptosUrl,
-              'Mint manually on /minting-aptos'
+              'Mint manually'
             );
             
             addAction(
@@ -1746,7 +1786,7 @@ function BridgePageContent() {
               `Minting failed: ${error.message || 'Unknown error'}`,
               'error',
               mintingAptosUrl,
-              'Mint manually on /minting-aptos'
+              'Mint manually'
             );
             toast({
               title: "Minting Failed",
@@ -1947,7 +1987,7 @@ function BridgePageContent() {
           console.error('[Bridge] Mint error:', mintErr);
           const msg = mintErr?.message || 'Unknown error';
           const isNotConnected = typeof msg === 'string' && msg.toLowerCase().includes('not connected');
-          const mintingSolanaUrl = `/minting-solana?signature=${encodeURIComponent(burnTxHash)}`;
+          const mintingSolanaUrl = `/minting?dest=solana&signature=${encodeURIComponent(burnTxHash)}`;
 
           // On "not connected", try once: reconnect and retry mint (adapter state can be stale after long wait)
           if (isNotConnected && (solanaWalletRef.current || mintAdapter)) {
@@ -1987,7 +2027,7 @@ function BridgePageContent() {
           }
 
           updateLastAction(`Minting on Solana failed: ${msg}`, 'error', mintingSolanaUrl, 'Mint manually on Solana');
-          addAction('Mint manually on Solana', 'error', mintingSolanaUrl, 'Open /minting-solana');
+          addAction('Mint manually on Solana', 'error', mintingSolanaUrl, 'Open recovery page');
           setTransferStatus(`Minting failed: ${msg}`);
           toast({
             variant: 'destructive',
@@ -2031,10 +2071,42 @@ function BridgePageContent() {
     }
   };
 
+  // ── Phase machine: derive idle / progress / success / error from log + flag ─
+  const bridgeDirection: BridgeDirection = (sourceChain?.id === 'Aptos' && destChain?.id === 'Solana')
+    ? 'aptos-to-solana'
+    : 'solana-to-aptos';
+
+  const hasErrorAction = actionLog.some(a => a.status === 'error');
+  const hasCompleteAction = actionLog.some(
+    a => a.status === 'success' && (/^bridge complete!?$/i.test(a.message) || /usdc minted successfully/i.test(a.message)),
+  );
+  const phase: 'idle' | BridgePhase =
+    actionLog.length === 0 ? 'idle'
+      : hasCompleteAction ? 'success'
+      : (!isTransferring && hasErrorAction) ? 'error'
+      : isTransferring ? 'progress'
+      : 'idle';
+
+  const aptosAddressForView: string | null =
+    aptosAccount?.address?.toString() ?? aptosNativeFallback?.address ?? null;
+
+  const resetBridge = () => {
+    setActionLog([]);
+    setTransferStatus('');
+    setLastSolanaToAptosParams(null);
+    setLastAptosToSolanaParams(null);
+    setIsTransferring(false);
+  };
+
+  const handleDeployToYield = () => {
+    resetBridge();
+    router.push('/');
+  };
+
   return (
     <div className="w-full h-screen overflow-y-auto bg-gradient-to-br from-gray-50 via-white to-gray-100">
       <div className="w-full min-h-full flex items-start justify-center p-4 md:items-center">
-        <div className="w-full max-w-2xl space-y-4 py-4">
+        <div className="w-full max-w-xl space-y-4 py-4">
           <div className="flex items-center justify-between mb-4">
             <button
               onClick={() => router.push("/")}
@@ -2043,13 +2115,23 @@ function BridgePageContent() {
               <ArrowLeft className="h-4 w-4" />
               Back to Dashboard
             </button>
-            <Link href="/privacy-bridge">
-              <Button variant="outline" size="sm" className="bg-black text-white border-black hover:bg-gray-800 hover:text-white hover:border-gray-800">
-                Privacy Bridge
-              </Button>
-            </Link>
           </div>
 
+          {phase !== 'idle' ? (
+            <BridgeProgressView
+              phase={phase as BridgePhase}
+              direction={bridgeDirection}
+              amount={transferAmount}
+              sourceAddress={bridgeDirection === 'solana-to-aptos' ? solanaAddressFinal : aptosAddressForView}
+              destAddress={bridgeDirection === 'solana-to-aptos' ? aptosAddressForView : solanaAddressFinal}
+              actionLog={actionLog}
+              onDeployToYield={handleDeployToYield}
+              onBridgeMore={resetBridge}
+              onRetry={() => { resetBridge(); }}
+            />
+          ) : (
+          <div className="space-y-4">
+          <ReclaimBanner />
           <BridgeView
             sourceChain={sourceChain}
             sourceToken={sourceToken}
@@ -2065,6 +2147,9 @@ function BridgePageContent() {
             sourceBalance={sourceUsdcBalance}
             isBalanceLoading={isSourceBalanceLoading}
             solanaSolBalance={solanaSolBalance}
+            solPriceUsd={solPriceUsd}
+            aptosAddress={aptosAddressForView}
+            solanaAddress={solanaAddressFinal}
             onDestinationAddressChange={setDestinationAddress}
             onTransfer={handleTransfer}
             isTransferring={isTransferring}
@@ -2097,47 +2182,28 @@ function BridgePageContent() {
                 </div>
                 {/* Solana Wallet: Connected or Connect Button */}
                 {effectiveSolanaConnectedFinal && solanaAddressFinal ? (
-                  <div>
-                    <div className="flex items-center justify-between cursor-pointer hover:bg-accent/50 rounded p-1 -m-1 transition-colors" onClick={() => setIsSolanaBalanceExpanded(!isSolanaBalanceExpanded)}>
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="text-sm font-medium text-muted-foreground shrink-0">Solana</span>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
-                            <Button variant="ghost" className="h-auto p-0 font-mono text-sm truncate">
-                              {truncateAddress(solanaAddressFinal || "")}
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem onSelect={copySolanaAddress} className="gap-2">
-                              <Copy className="h-4 w-4" /> Copy address
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onSelect={handleDisconnectSolana} className="gap-2">
-                              <LogOut className="h-4 w-4" /> Disconnect
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </div>
-                      <ChevronDown
-                        className={cn(
-                          "h-4 w-4 shrink-0 transition-transform text-muted-foreground",
-                          isSolanaBalanceExpanded ? "transform rotate-0" : "transform -rotate-90"
-                        )}
-                      />
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-sm font-medium text-muted-foreground shrink-0">Solana</span>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" className="h-auto p-0 font-mono text-sm truncate">
+                            {truncateAddress(solanaAddressFinal || "")}
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onSelect={copySolanaAddress} className="gap-2">
+                            <Copy className="h-4 w-4" /> Copy address
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={handleDisconnectSolana} className="gap-2">
+                            <LogOut className="h-4 w-4" /> Disconnect
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </div>
-                    {isSolanaBalanceExpanded && (
-                      <div className="mt-2 pt-2 border-t">
-                        <div className="text-sm font-medium pb-2">
-                          {isSolanaLoading ? '...' : solanaTotalValue !== null ? formatCurrency(solanaTotalValue, 2) : 'N/A'}
-                        </div>
-                        <ScrollArea className="max-h-48">
-                          {solanaTokens.length > 0 ? (
-                            <TokenList tokens={solanaTokens} disableDrag={true} />
-                          ) : (
-                            <div className="text-sm text-muted-foreground p-2">No tokens found</div>
-                          )}
-                        </ScrollArea>
-                      </div>
-                    )}
+                    <span className="text-xs font-mono text-muted-foreground shrink-0">
+                      {isSolanaLoading ? '…' : `${solanaUsdcBalance.toFixed(2)} USDC`}
+                    </span>
                   </div>
                 ) : (
                   <Button
@@ -2162,49 +2228,30 @@ function BridgePageContent() {
 
                 {/* Aptos Wallet: Connected or Connect Button (INDEPENDENT of Solana) */}
                 {showAptosAsConnected ? (
-                  <div>
-                    <div className="flex items-center justify-between cursor-pointer hover:bg-accent/50 rounded p-1 -m-1 transition-colors" onClick={() => !aptosConnecting && setIsAptosBalanceExpanded(!isAptosBalanceExpanded)}>
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="text-sm font-medium text-muted-foreground shrink-0">
-                          Aptos {aptosNativeSelected && !aptosConnected ? "(Native)" : isDerivedWallet ? "(Derived)" : "(Native)"}
-                        </span>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
-                            <Button variant="ghost" className="h-auto p-0 font-mono text-sm truncate" disabled={aptosConnecting}>
-                              {aptosConnecting ? "Connecting…" : (aptosAccount ? truncateAddress(aptosAccount.address.toString()) : (aptosNativeFallback ? truncateAddress(aptosNativeFallback.address) : "…"))}
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem onSelect={copyAptosAddress} className="gap-2" disabled={!aptosAccount && !aptosNativeFallback}>
-                              <Copy className="h-4 w-4" /> Copy address
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onSelect={handleDisconnectAptos} className="gap-2" disabled={aptosConnecting}>
-                              <LogOut className="h-4 w-4" /> Disconnect
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </div>
-                      <ChevronDown
-                        className={cn(
-                          "h-4 w-4 shrink-0 transition-transform text-muted-foreground",
-                          isAptosBalanceExpanded ? "transform rotate-0" : "transform -rotate-90"
-                        )}
-                      />
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-sm font-medium text-muted-foreground shrink-0">
+                        Aptos {aptosNativeSelected && !aptosConnected ? "(Native)" : isDerivedWallet ? "(Derived)" : "(Native)"}
+                      </span>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" className="h-auto p-0 font-mono text-sm truncate" disabled={aptosConnecting}>
+                            {aptosConnecting ? "Connecting…" : (aptosAccount ? truncateAddress(aptosAccount.address.toString()) : (aptosNativeFallback ? truncateAddress(aptosNativeFallback.address) : "…"))}
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onSelect={copyAptosAddress} className="gap-2" disabled={!aptosAccount && !aptosNativeFallback}>
+                            <Copy className="h-4 w-4" /> Copy address
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={handleDisconnectAptos} className="gap-2" disabled={aptosConnecting}>
+                            <LogOut className="h-4 w-4" /> Disconnect
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </div>
-                    {isAptosBalanceExpanded && !aptosConnecting && (
-                      <div className="mt-2 pt-2 border-t">
-                        <div className="text-sm font-medium pb-2">
-                          {isAptosLoading ? '...' : formatCurrency(aptosTotalValue, 2)}
-                        </div>
-                        <ScrollArea className="max-h-48">
-                          {aptosTokens.length > 0 ? (
-                            <TokenList tokens={aptosTokens} disableDrag={true} />
-                          ) : (
-                            <div className="text-sm text-muted-foreground p-2">No tokens found</div>
-                          )}
-                        </ScrollArea>
-                      </div>
-                    )}
+                    <span className="text-xs font-mono text-muted-foreground shrink-0">
+                      {isAptosLoading ? '…' : `${aptosUsdcBalance.toFixed(2)} USDC`}
+                    </span>
                   </div>
                 ) : (
                   <Button
@@ -2229,22 +2276,24 @@ function BridgePageContent() {
                 </div>
             }
           />
+          </div>
+          )}
 
-          <ActionLog items={actionLog} />
-          {(lastSolanaToAptosParams || lastAptosToSolanaParams) && (
-            <div className="mt-2 flex flex-wrap gap-2 text-xs">
+          {(phase === 'error' || phase === 'progress') && (lastSolanaToAptosParams || lastAptosToSolanaParams) && (
+            <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs">
+              <span className="font-semibold">Stuck?</span> Recover manually:{' '}
               {lastSolanaToAptosParams && (
                 <Link
-                  href={`/minting-aptos?signature=${encodeURIComponent(lastSolanaToAptosParams.signature)}&sourceDomain=5&finalRecipient=${encodeURIComponent(lastSolanaToAptosParams.finalRecipient)}`}
-                  className="text-blue-600 hover:underline"
+                  href={`/minting?dest=aptos&signature=${encodeURIComponent(lastSolanaToAptosParams.signature)}&sourceDomain=5&finalRecipient=${encodeURIComponent(lastSolanaToAptosParams.finalRecipient)}`}
+                  className="text-primary hover:underline"
                 >
                   Mint on Aptos →
                 </Link>
               )}
               {lastAptosToSolanaParams && (
                 <Link
-                  href={`/minting-solana?signature=${encodeURIComponent(lastAptosToSolanaParams.signature)}&sourceDomain=9&finalRecipient=${encodeURIComponent(lastAptosToSolanaParams.finalRecipient)}`}
-                  className="text-blue-600 hover:underline"
+                  href={`/minting?dest=solana&signature=${encodeURIComponent(lastAptosToSolanaParams.signature)}&sourceDomain=9&finalRecipient=${encodeURIComponent(lastAptosToSolanaParams.finalRecipient)}`}
+                  className="text-primary hover:underline"
                 >
                   Mint on Solana →
                 </Link>

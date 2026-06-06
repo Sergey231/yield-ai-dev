@@ -291,7 +291,7 @@ export function DepositButton({
     return rawAmount / Math.pow(10, decimals);
   })();
 
-  // Fetch real APR data for Amnis Finance, Echelon, and Kofi Finance
+  // Fetch real APR data for native deposit flows.
   useEffect(() => {
     if (protocol.name === 'Amnis Finance') {
       const fetchAmnisAPR = async () => {
@@ -341,29 +341,6 @@ export function DepositButton({
       };
 
       fetchEchelonAPY();
-    } else if (protocol.name === 'Kofi Finance') {
-      const fetchKofiAPY = async () => {
-        try {
-          const response = await fetch('/api/protocols/kofi/pools');
-          if (response.ok) {
-            const data = await response.json();
-            if (data.success && data.data && data.data.length > 0) {
-              // Find stkAPT staking pool
-              const stkAPTPool = data.data.find((pool: any) =>
-                pool.stakingToken === 'stkAPT' || pool.asset?.includes('stkAPT')
-              );
-              if (stkAPTPool && stkAPTPool.stakingApr) {
-                setProtocolAPY(stkAPTPool.stakingApr);
-              } else {
-              }
-            }
-          }
-        } catch (error) {
-          console.error('Error fetching Kofi Finance APR:', error);
-        }
-      };
-
-      fetchKofiAPY();
     } else if (protocol.name === 'Moar Market') {
       const fetchMoarAPY = async () => {
         try {

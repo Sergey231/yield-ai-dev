@@ -16,11 +16,19 @@ async function fetchDeltaNeutralState(safeAddress: string): Promise<DeltaNeutral
   return json.data;
 }
 
-export function useDeltaNeutralState(safeAddress: string | undefined) {
+interface UseDeltaNeutralStateOptions {
+  refetchOnMount?: boolean | "always";
+}
+
+export function useDeltaNeutralState(
+  safeAddress: string | undefined,
+  options?: UseDeltaNeutralStateOptions
+) {
   return useQuery<DeltaNeutralStateResponse>({
     queryKey: queryKeys.protocols.yieldAi.deltaNeutralState(safeAddress ?? ""),
     queryFn: () => fetchDeltaNeutralState(safeAddress!),
     enabled: Boolean(safeAddress),
     staleTime: STALE_TIME.POSITIONS,
+    refetchOnMount: options?.refetchOnMount,
   });
 }

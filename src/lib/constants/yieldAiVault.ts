@@ -37,6 +37,42 @@ export const YIELD_AI_VAULT_ENTRYPOINTS = {
   executeWithdrawFull: `${YIELD_AI_VAULT_MODULE}::execute_withdraw_full`,
   executeDepositEchelonFa: `${YIELD_AI_VAULT_MODULE}::execute_deposit_echelon_fa`,
   executeClaimEchelon: `${YIELD_AI_VAULT_MODULE}::execute_claim_echelon`,
+  // Hyperion CLMM LP
+  executeHyperionOpenZapUsdc: `${YIELD_AI_VAULT_MODULE}::execute_hyperion_open_zap_usdc`,
+  executeHyperionAddZapUsdc: `${YIELD_AI_VAULT_MODULE}::execute_hyperion_add_zap_usdc`,
+  // Dual (two-sided) entries: both legs supplied directly from the safe, no swap.
+  executeHyperionOpenDual: `${YIELD_AI_VAULT_MODULE}::execute_hyperion_open_dual`,
+  executeHyperionAddDual: `${YIELD_AI_VAULT_MODULE}::execute_hyperion_add_dual`,
+  executeHyperionRemoveLiquidity: `${YIELD_AI_VAULT_MODULE}::execute_hyperion_remove_liquidity`,
+  executeHyperionRemoveAll: `${YIELD_AI_VAULT_MODULE}::execute_hyperion_remove_all`,
+  executeHyperionClaimFees: `${YIELD_AI_VAULT_MODULE}::execute_hyperion_claim_fees`,
+  executeHyperionClaimRewards: `${YIELD_AI_VAULT_MODULE}::execute_hyperion_claim_rewards`,
+} as const;
+
+/** Hyperion LP per-safe views on the vault. */
+export const YIELD_AI_HYPERION_VIEWS = {
+  getPositions: `${YIELD_AI_VAULT_MODULE}::get_hyperion_positions`,
+  getPosition: `${YIELD_AI_VAULT_MODULE}::get_hyperion_position`,
+  getOpenCount: `${YIELD_AI_VAULT_MODULE}::get_hyperion_open_count`,
+  configExists: `${YIELD_AI_VAULT_MODULE}::hyperion_lp_config_exists`,
+} as const;
+
+/** Hyperion LP adapter object address (mainnet) — whitelisted in protocol. */
+export const YIELD_AI_HYPERION_ADAPTER_ADDRESS =
+  "0xe962ebafd209b0106ba9a1c23cde4cd79ef34158ce9a600f120eff9369aac3f5";
+
+/** Hyperion DEX (dex_contract) package address on mainnet — for pool views. */
+export const HYPERION_DEX_ADDRESS =
+  "0x8b4a2c4bb53857c718a04c020b98f8c2e1f99a68b0f57389a8bf5434cd22e05c";
+
+export const HYPERION_POOL_VIEWS = {
+  currentTickAndPrice: `${HYPERION_DEX_ADDRESS}::pool_v3::current_tick_and_price`,
+  liquidityPoolAddressSafe: `${HYPERION_DEX_ADDRESS}::pool_v3::liquidity_pool_address_safe`,
+  // Pending (uncollected) amounts for an open position object.
+  // get_pending_fees → vector<u64> = [feeTokenA, feeTokenB]
+  // get_pending_rewards → vector<{ amount_owed: u64, reward_fa: { inner: address } }>
+  getPendingFees: `${HYPERION_DEX_ADDRESS}::pool_v3::get_pending_fees`,
+  getPendingRewards: `${HYPERION_DEX_ADDRESS}::pool_v3::get_pending_rewards`,
 } as const;
 
 // Thresholds:
@@ -74,6 +110,37 @@ export const USD1_FA_METADATA_MAINNET =
 export const XBTC_FA_METADATA_MAINNET =
   "0x81214a80d82035a190fcb76b6ff3c0145161c3a9f33d137f2bbaee4cfec8a387";
 
-/** Moar adapter address (mainnet). Used in vault::execute_deposit. */
-export const MOAR_ADAPTER_ADDRESS_MAINNET =
-  "0x1212d77e4a5f0b527037ed373e393e649645c7c76cc462e1d63c2d85688839d8";
+/** Native WBTC FA metadata object address (mainnet). */
+export const WBTC_FA_METADATA_MAINNET =
+  "0x68844a0d7f2587e726ad0579f3d640865bb4162c08a4589eeda3f9689ec52a3d";
+
+/** ELON (Echelon) FA metadata object address (mainnet). Display + withdraw only. */
+export const ELON_FA_METADATA_MAINNET =
+  "0xfc087a394c203d62c43eecfeba79db01441d39dd9d234131b78415626a26750e";
+
+/** thAPT (Thala APT) FA metadata object address (mainnet). Display + withdraw only. */
+export const THAPT_FA_METADATA_MAINNET =
+  "0xa0d9d647c5737a5aed08d2cfeb39c31cf901d44bc4aa024eaa7e5e68b804e011";
+
+/**
+ * Whitelisted Hyperion LP pools for the AI agent. MVP: USDC-leg pools only.
+ * `tokenA`/`tokenB` must match the pool's canonical Hyperion order.
+ */
+export const YIELD_AI_HYPERION_POOLS = {
+  wbtc_usdc: {
+    key: "wbtc_usdc" as const,
+    label: "WBTC / USDC",
+    poolAddress: "0xa7bb8c9b3215e29a3e2c2370dcbad9c71816d385e7863170b147243724b2da58",
+    tokenA: WBTC_FA_METADATA_MAINNET, // pool token_a
+    tokenB: USDC_FA_METADATA_MAINNET, // pool token_b (USDC leg)
+    feeTier: 1, // 0.05%
+    tickSpacing: 10,
+    usdcIsTokenA: false,
+    decimalsA: 8, // WBTC
+    decimalsB: 6, // USDC
+    symbolA: "WBTC",
+    symbolB: "USDC",
+  },
+} as const;
+
+export type HyperionPoolKey = keyof typeof YIELD_AI_HYPERION_POOLS;

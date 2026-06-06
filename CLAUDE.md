@@ -70,10 +70,6 @@ interface BaseProtocol {
 
 `PanoraSwapService` (`src/lib/services/panora/swap.ts`) fetches a quote from the Panora aggregator. The quote includes a ready-to-sign `transactionPayload` (BCS-encoded entry function). `SwapAndDepositModal` chains: swap tx → deposit tx.
 
-### Solana Privacy Bridge
-
-Route: `/privacy-bridge`. Layers: Privacy Cache pool (Solana) → temp browser-only keypair → Circle CCTP burn on Solana → CCTP mint on Aptos → X-Chain Derived Account. No on-chain link between source and destination wallets.
-
 ### Address normalization
 
 Aptos addresses are inconsistent (0x-prefix, leading zeros). Always use utilities in `src/lib/utils/addressNormalization.ts` — required for protocol market lookups and token matching.

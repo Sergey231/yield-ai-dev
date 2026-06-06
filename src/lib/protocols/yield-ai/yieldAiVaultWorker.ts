@@ -276,12 +276,30 @@ export async function runYieldAiVaultCronPass(options: {
           });
           continue;
         }
+        if (decoded.includes("hyperion_lp")) {
+          // Hyperion LP safes are managed by the dedicated re-center cron
+          // (/api/protocols/yield-ai/hyperion-lp/cron), not the stablecoin worker.
+          skippedSafes.push({
+            safeAddress: discovered.safeAddress,
+            reason: "Skipped: hyperion_lp strategy tag is ACTIVE (managed by the Hyperion LP cron).",
+          });
+          continue;
+        }
       } catch (err) {
-        // If tag read fails, do not block compounding (best-effort gating only).
-        console.warn("[Yield AI] cron: get_safe_active_strategies failed; continuing", {
+        // Fail-safe: if we cannot read the strategy tag, we do NOT know whether
+        // this safe is hyperion_lp / DN / stablecoin. Compounding a safe whose
+        // strategy is unknown risks moving funds that belong to another strategy
+        // (e.g. a Hyperion safe's USDC into Echelon). Skip this run; the next
+        // pass (when the view succeeds) will compound a genuine stablecoin safe.
+        console.warn("[Yield AI] cron: get_safe_active_strategies failed; skipping safe this run", {
           safeAddress: discovered.safeAddress,
           err,
         });
+        skippedSafes.push({
+          safeAddress: discovered.safeAddress,
+          reason: "Skipped: strategy tag read failed (fail-safe — not compounding unknown-strategy safe).",
+        });
+        continue;
       }
     }
 
@@ -308,12 +326,11 @@ export async function runYieldAiVaultCronPass(options: {
     });
 
     try {
-      const { state, adapters, moarAptClaimLines } = await computeStateForSafe(ctx);
+      const { state, adapters } = await computeStateForSafe(ctx);
       const { results, totalTxCount, txHashes: hashes } = await executeActionDag({
         ctx,
         state,
         adapters,
-        moarAptClaimLines,
       });
       // Capture suppressed action errors for API response/logging.
       for (const r of results) {

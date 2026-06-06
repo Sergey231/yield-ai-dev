@@ -30,12 +30,25 @@ export type DeltaNeutralSpotHedgeInference =
   | "closed_no_spot_for_metadata"
   | "closed_spot_metadata_empty";
 
+/** Status of post-close USDC-out resolution via indexer scan. */
+export type DeltaNeutralCloseSwapStatus = "resolved" | "not_found" | "skipped";
+
 export type DeltaNeutralStateResponse = DeltaNeutralPositionViewParsed & {
   spotBalanceBaseUnits: string;
   /** Rough human amount (8 decimals) for display; indexer raw is authoritative. */
   spotBalanceHumanApprox: string | null;
   spotHedgeInference: DeltaNeutralSpotHedgeInference;
   spotHedgeInferenceNote: string;
+  /** sz_decimals of the Decibel perp market for the recorded position; null when unavailable. */
+  szDecimals: number | null;
+  /** Status of best-effort post-close USDC-received-on-close resolution. */
+  closeSwapStatus: DeltaNeutralCloseSwapStatus;
+  /** Base units (USDC = 6 decimals) when status === "resolved", else null. */
+  closeSwapUsdcOutBaseUnits: string | null;
+  /** Aptos tx version of the matched vault swap when resolved, else null. */
+  closeSwapTxVersion: string | null;
+  /** Human-readable note explaining the resolution outcome. */
+  closeSwapNote: string;
 };
 
 function addrToString(v: unknown): string {

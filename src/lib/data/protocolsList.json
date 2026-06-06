@@ -205,7 +205,7 @@
     "logoUrl": "/protocol_ico/kofi.png",
     "description": "Kofi introduces MEV boosted liquid staking on Aptos, delivering enhanced yields while maintaining complete liquidity. Stake your APT and receive kAPT & stkAPT - your key to maximized returns.",
     "depositType": "native",
-    "isDepositEnabled": true,
+    "isDepositEnabled": false,
     "managedType": "native",
     "socialMedia": {
       "twitter": "https://x.com/kofi_finance"
@@ -420,6 +420,76 @@
     "managedType": "native",
     "socialMedia": {
       "twitter": "https://x.com/KaminoFinance"
+    },
+    "airdrop": "",
+    "contractAddresses": []
+  },
+  {
+    "name": "Meteora",
+    "key": "meteora",
+    "category": "DEX",
+    "url": "https://app.meteora.ag",
+    "logoUrl": "/protocol_ico/meteora.svg",
+    "description": "Meteora DLMM concentrated liquidity pools on Solana.",
+    "depositType": "external",
+    "depositUrl": "https://app.meteora.ag/dlmm",
+    "isDepositEnabled": true,
+    "managedType": "native",
+    "socialMedia": {
+      "twitter": "https://x.com/MeteoraAG"
+    },
+    "airdrop": "",
+    "contractAddresses": []
+  },
+  {
+    "name": "Raydium",
+    "key": "raydium",
+    "category": "DEX",
+    "url": "https://raydium.io",
+    "logoUrl": "/protocol_ico/raydium-official.png",
+    "description": "Raydium liquidity pools and farm stakes on Solana.",
+    "depositType": "external",
+    "depositUrl": "https://raydium.io/liquidity-pools",
+    "isDepositEnabled": true,
+    "managedType": "native",
+    "socialMedia": {
+      "twitter": "https://x.com/RaydiumProtocol"
+    },
+    "airdrop": "",
+    "contractAddresses": []
+  },
+  {
+    "name": "Orca",
+    "key": "orca",
+    "category": "DEX",
+    "url": "https://www.orca.so",
+    "logoUrl": "/protocol_ico/orca.ico",
+    "description": "Orca Whirlpools concentrated liquidity positions on Solana.",
+    "depositType": "external",
+    "depositUrl": "https://www.orca.so/pools",
+    "isDepositEnabled": true,
+    "managedType": "native",
+    "socialMedia": {
+      "twitter": "https://x.com/orca_so"
+    },
+    "airdrop": "",
+    "contractAddresses": [
+      "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
+    ]
+  },
+  {
+    "name": "Tramplin",
+    "key": "tramplin",
+    "category": "Staking",
+    "url": "https://tramplin.io",
+    "logoUrl": "/protocol_ico/tramplin.png",
+    "description": "Tramplin no-loss staking lottery on Solana. Stake SOL with the Tramplin validator and win prize draws.",
+    "depositType": "external",
+    "depositUrl": "https://tramplin.io",
+    "isDepositEnabled": true,
+    "managedType": "native",
+    "socialMedia": {
+      "twitter": "https://x.com/tramplin_io"
     },
     "airdrop": "",
     "contractAddresses": []

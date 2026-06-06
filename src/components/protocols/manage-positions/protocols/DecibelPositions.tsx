@@ -49,6 +49,23 @@ import {
 } from '@/components/ui/alert-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { useProtocol } from '@/lib/contexts/ProtocolContext';
+import { useMobileManagement } from '@/contexts/MobileManagementContext';
+import { getProtocolByName } from '@/lib/protocols/getProtocolsList';
+import { dispatchSelectYieldAiSafe } from '@/lib/query/hooks/protocols/yield-ai/useSelectedYieldAiSafe';
+import {
+  useDecibelReferralDashboard,
+  type DecibelReferralCode,
+} from '@/lib/query/hooks/protocols/decibel/useDecibelReferralDashboard';
+import { useDecibelSubaccounts } from '@/lib/query/hooks/protocols/decibel/useDecibelSubaccounts';
+import { DecibelWithdrawModal } from '@/components/ui/decibel-withdraw-modal';
 
 /** Decibel API position shape (snake_case from API) */
 export interface DecibelPosition {
@@ -71,18 +88,55 @@ export interface DecibelPosition {
 export interface DecibelVaultItem {
   vault?: { name?: string };
   current_value_of_shares?: number;
-  /** Total amount deposited (gross). */
-  total_deposited?: number;
-  /** Total amount withdrawn. Used for PnL when all_time_earned is not present. */
-  total_withdrawn?: number;
-  /** All-time PnL in USDC (realized + unrealized). Prefer for "Your PnL" when API provides it. */
-  all_time_earned?: number;
+  /** Current unrealized vault PnL from Decibel account_vault_performance. */
+  unrealized_pnl?: number;
   /** APR in % (e.g. 2.98 = 2.98%), from API; display as-is, do not multiply by 100 */
   apr?: number;
 }
 
+type DecibelAmpsData = {
+  rank?: number | null;
+  total_amps: number;
+  trading_amps?: number;
+  referral_amps?: number;
+  vault_amps?: number;
+  streak_amps?: number;
+  bonus_amps?: number;
+};
+
+type DecibelSubaccount = {
+  subaccount_address?: string;
+  custom_label?: string | null;
+};
+
+type YieldAiSafesResponse = {
+  data?: {
+    safeAddresses?: string[];
+  };
+};
+
+type DeltaNeutralStateResponse = {
+  success?: boolean;
+  data?: {
+    recordExists?: boolean;
+    isOpen?: boolean;
+    decibelSubaccount?: string;
+    perpMarket?: string;
+  };
+  recordExists?: boolean;
+  isOpen?: boolean;
+  decibelSubaccount?: string;
+  perpMarket?: string;
+};
+
 /** Open order from Decibel open_orders API (supports snake_case and common variants) */
 export interface DecibelOpenOrder {
+  /** Added client-side when aggregating open orders across subaccounts. */
+  source_subaccount?: string;
+  account?: string;
+  user?: string;
+  subaccount?: string;
+  subaccount_address?: string;
   market?: string;
   market_address?: string;
   price: number;
@@ -111,14 +165,22 @@ function getOrderForPosition(
   position: DecibelPosition
 ): DecibelOpenOrder | undefined {
   const posMarket = normalizeAddress(position.market);
+  const posSubaccount = normalizeAddress(position.user);
   return orders.find((o) => {
     const orderMarket = normalizeAddress((o.market ?? o.market_address ?? ''));
+    const orderSubaccount = normalizeAddress(
+      o.source_subaccount ?? o.subaccount ?? o.subaccount_address ?? o.account ?? o.user ?? ''
+    );
     const reduceOnly = o.reduce_only ?? o.is_reduce_only === true;
-    return orderMarket === posMarket && reduceOnly;
+    return orderSubaccount === posSubaccount && orderMarket === posMarket && reduceOnly;
   });
 }
 
 const DECIBEL_APP_URL = 'https://app.decibel.trade/';
+
+function yieldAiManagedPositionKey(subaccount: string, market: string): string {
+  return `${normalizeAddress(subaccount)}:${normalizeAddress(market)}`;
+}
 
 /** Format position size with enough decimals for small amounts (e.g. 0.003706 BTC) */
 function formatSize(size: number): string {
@@ -166,6 +228,24 @@ function formatFundingRatePercent(fundingRateBps: number): string {
   return `${sign}${formatNumber(Math.abs(percent), 6)}%`;
 }
 
+function formatUsageLimit(value: number | string | undefined): string {
+  if (value == null) return 'n/a';
+  const raw = String(value);
+  const numeric = Number(value);
+  if (raw === '18446744073709551615' || numeric > 1_000_000_000_000) return 'unlimited';
+  return raw;
+}
+
+function pickPrimaryReferralCode(codes: DecibelReferralCode[]): DecibelReferralCode | null {
+  return (
+    codes.find((code) => code.is_active && code.is_affiliate) ??
+    codes.find((code) => code.is_active && formatUsageLimit(code.max_usage) === 'unlimited') ??
+    codes.find((code) => code.is_active) ??
+    codes[0] ??
+    null
+  );
+}
+
 /** Shorten hex address for display */
 function shortenHex(hex: string, head = 6, tail = 4): string {
   if (!hex || !hex.startsWith('0x') || hex.length <= head + tail + 2) return hex;
@@ -196,6 +276,8 @@ export function DecibelPositions() {
   const { account, signTransaction, signAndSubmitTransaction } = useWallet();
   const { tokens: walletTokens } = useWalletData();
   const { toast } = useToast();
+  const { setSelectedProtocol } = useProtocol();
+  const { setActiveTab, scrollToTop } = useMobileManagement();
   const [positions, setPositions] = useState<DecibelPosition[]>([]);
   const [vaults, setVaults] = useState<DecibelVaultItem[]>([]);
   const [marketNames, setMarketNames] = useState<Record<string, string>>({});
@@ -220,18 +302,26 @@ export function DecibelPositions() {
   const [error, setError] = useState<string | null>(null);
   const [builderConfig, setBuilderConfig] = useState<{ builderAddress: string; builderFeeBps: number } | null>(null);
   const [totalAmps, setTotalAmps] = useState<number | null>(null);
+  const [ampsData, setAmpsData] = useState<DecibelAmpsData | null>(null);
   const [ampsLoading, setAmpsLoading] = useState(false);
-  const [predepositPoints, setPredepositPoints] = useState<number | null>(null);
-  const [predepositPointsLoading, setPredepositPointsLoading] = useState(false);
+  const [referralDialogOpen, setReferralDialogOpen] = useState(false);
   const [openOrders, setOpenOrders] = useState<DecibelOpenOrder[]>([]);
-  const [openOrdersLoading, setOpenOrdersLoading] = useState(false);
+  const [, setOpenOrdersLoading] = useState(false);
   const [cancelingOrderId, setCancelingOrderId] = useState<string | null>(null);
+  const [yieldAiManagedPositionKeys, setYieldAiManagedPositionKeys] = useState<Set<string>>(new Set());
+  const [yieldAiSafeByPositionKey, setYieldAiSafeByPositionKey] = useState<Record<string, string>>({});
+  const [subaccountLabels, setSubaccountLabels] = useState<Record<string, string>>({});
+  const [selectedSubaccount, setSelectedSubaccount] = useState('');
   const [tradeModalOpen, setTradeModalOpen] = useState(false);
   const [tradeMarket, setTradeMarket] = useState<DecibelOpenPositionMarket | null>(null);
   const [hedgeSwapOpen, setHedgeSwapOpen] = useState(false);
   const [hedgeSwapPrefill, setHedgeSwapPrefill] = useState<SwapModalPrefill | null>(null);
   const [postCloseHedgePromptOpen, setPostCloseHedgePromptOpen] = useState(false);
   const [postCloseUnwindPrefill, setPostCloseUnwindPrefill] = useState<SwapModalPrefill | null>(null);
+  const [withdrawModalOpen, setWithdrawModalOpen] = useState(false);
+  const [withdrawSubaccountBalance, setWithdrawSubaccountBalance] = useState<number | null>(null);
+
+  const subaccountsQuery = useDecibelSubaccounts(account?.address?.toString());
 
   const closeShortHedgeHint = useMemo(() => {
     const pos = closeConfirmPosition;
@@ -252,6 +342,84 @@ export function DecibelPositions() {
       baseSym === 'BTC' || baseSym === 'WBTC' ? 'WBTC' : baseSym;
     return { base, baseFa, absSz, enoughBase };
   }, [closeConfirmPosition, marketNames, walletTokens]);
+
+  const positionSubaccounts = useMemo(() => {
+    const seen = new Set<string>();
+    const items: { address: string; normalized: string; label?: string }[] = [];
+    for (const pos of positions) {
+      const normalized = normalizeAddress(pos.user);
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      items.push({
+        address: pos.user,
+        normalized,
+        label: subaccountLabels[normalized],
+      });
+    }
+    return items;
+  }, [positions, subaccountLabels]);
+
+  const selectedSubaccountNormalized = useMemo(() => {
+    const normalizedSelected = normalizeAddress(selectedSubaccount);
+    const selectedExists = positionSubaccounts.some((item) => item.normalized === normalizedSelected);
+    return selectedExists ? normalizedSelected : positionSubaccounts[0]?.normalized ?? '';
+  }, [positionSubaccounts, selectedSubaccount]);
+
+  const hasMultiplePositionSubaccounts = positionSubaccounts.length > 1;
+  const referralDashboard = useDecibelReferralDashboard(account?.address?.toString(), {
+    enabled: referralDialogOpen && Boolean(account?.address),
+  });
+
+  const visiblePositions = useMemo(() => {
+    if (!hasMultiplePositionSubaccounts || !selectedSubaccountNormalized) return positions;
+    return positions.filter((pos) => normalizeAddress(pos.user) === selectedSubaccountNormalized);
+  }, [hasMultiplePositionSubaccounts, positions, selectedSubaccountNormalized]);
+
+  const primarySubaccountAddr = useMemo(() => {
+    const list = subaccountsQuery.data ?? [];
+    return (
+      list.find((sub) => sub.is_primary && sub.is_active)?.subaccount_address ??
+      list.find((sub) => sub.is_active)?.subaccount_address ??
+      list[0]?.subaccount_address ??
+      ''
+    );
+  }, [subaccountsQuery.data]);
+
+  const withdrawSubaccountAddr = useMemo(() => {
+    if (selectedSubaccountNormalized) return selectedSubaccountNormalized;
+    if (primarySubaccountAddr) return normalizeAddress(primarySubaccountAddr);
+    return positionSubaccounts[0]?.normalized ?? '';
+  }, [selectedSubaccountNormalized, primarySubaccountAddr, positionSubaccounts]);
+
+  const withdrawableBalanceUsd = withdrawSubaccountBalance ?? availableToTrade ?? 0;
+
+  useEffect(() => {
+    if (!withdrawModalOpen || !withdrawSubaccountAddr) {
+      setWithdrawSubaccountBalance(null);
+      return;
+    }
+    let cancelled = false;
+    setWithdrawSubaccountBalance(availableToTrade);
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/protocols/decibel/accountOverview?address=${encodeURIComponent(withdrawSubaccountAddr)}`
+        );
+        const data = await res.json();
+        if (cancelled) return;
+        const balance =
+          data?.success && data?.data?.usdc_cross_withdrawable_balance != null
+            ? Number(data.data.usdc_cross_withdrawable_balance)
+            : availableToTrade ?? 0;
+        setWithdrawSubaccountBalance(balance);
+      } catch {
+        if (!cancelled) setWithdrawSubaccountBalance(availableToTrade);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [withdrawModalOpen, withdrawSubaccountAddr, availableToTrade]);
 
   useEffect(() => {
     if (!account?.address) {
@@ -490,6 +658,7 @@ export function DecibelPositions() {
   const fetchAmps = useCallback(async () => {
     if (!account?.address) {
       setTotalAmps(null);
+      setAmpsData(null);
       return;
     }
     setAmpsLoading(true);
@@ -500,36 +669,16 @@ export function DecibelPositions() {
       const data = await res.json();
       if (data.success && typeof data.data?.total_amps === 'number') {
         setTotalAmps(data.data.total_amps);
+        setAmpsData(data.data as DecibelAmpsData);
       } else {
         setTotalAmps(null);
+        setAmpsData(null);
       }
     } catch {
       setTotalAmps(null);
+      setAmpsData(null);
     } finally {
       setAmpsLoading(false);
-    }
-  }, [account?.address]);
-
-  const fetchPredepositPoints = useCallback(async () => {
-    if (!account?.address) {
-      setPredepositPoints(null);
-      return;
-    }
-    setPredepositPointsLoading(true);
-    try {
-      const res = await fetch(
-        `/api/protocols/decibel/predepositPoints?address=${encodeURIComponent(account.address.toString())}`
-      );
-      const data = await res.json();
-      if (data.success && typeof data.data?.points === 'number') {
-        setPredepositPoints(data.data.points);
-      } else {
-        setPredepositPoints(null);
-      }
-    } catch {
-      setPredepositPoints(null);
-    } finally {
-      setPredepositPointsLoading(false);
     }
   }, [account?.address]);
 
@@ -551,7 +700,12 @@ export function DecibelPositions() {
         );
         const data = await res.json();
         if (data.success && data.data != null) {
-          allOrders.push(...normalizeOpenOrdersResponse(data.data));
+          allOrders.push(
+            ...normalizeOpenOrdersResponse(data.data).map((order) => ({
+              ...order,
+              source_subaccount: addr,
+            }))
+          );
         }
       }
       setOpenOrders(allOrders);
@@ -565,10 +719,6 @@ export function DecibelPositions() {
   useEffect(() => {
     fetchAmps();
   }, [fetchAmps]);
-
-  useEffect(() => {
-    fetchPredepositPoints();
-  }, [fetchPredepositPoints]);
 
   useEffect(() => {
     fetchOpenOrders();
@@ -586,16 +736,104 @@ export function DecibelPositions() {
         fetchPreDeposit();
         fetchPrices();
         fetchAmps();
-        fetchPredepositPoints();
         fetchOpenOrders();
       }
     };
     window.addEventListener('refreshPositions', handler as EventListener);
     return () => window.removeEventListener('refreshPositions', handler as EventListener);
-  }, [fetchVaults, fetchOverview, fetchPreDeposit, fetchPrices, fetchAmps, fetchPredepositPoints, fetchOpenOrders]);
+  }, [fetchVaults, fetchOverview, fetchPreDeposit, fetchPrices, fetchAmps, fetchOpenOrders]);
 
   const positionKey = (pos: DecibelPosition) => `${pos.market}-${pos.user}-${pos.size}-${pos.entry_price}`;
 
+
+
+  useEffect(() => {
+    if (!account?.address) {
+      setSubaccountLabels({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/protocols/decibel/subaccounts?address=${encodeURIComponent(account.address.toString())}`
+        );
+        if (!res.ok) throw new Error(`Subaccounts request failed: ${res.status}`);
+        const data = await res.json();
+        const labels: Record<string, string> = {};
+        if (data?.success && Array.isArray(data.data)) {
+          for (const sub of data.data as DecibelSubaccount[]) {
+            const address = typeof sub.subaccount_address === 'string' ? sub.subaccount_address : '';
+            const label = typeof sub.custom_label === 'string' ? sub.custom_label.trim() : '';
+            if (address && label) {
+              labels[normalizeAddress(address)] = label;
+            }
+          }
+        }
+        if (!cancelled) setSubaccountLabels(labels);
+      } catch {
+        if (!cancelled) setSubaccountLabels({});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [account?.address]);
+
+  useEffect(() => {
+    if (!account?.address || positions.length === 0) {
+      setYieldAiManagedPositionKeys(new Set());
+      setYieldAiSafeByPositionKey({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const safesRes = await fetch(
+          `/api/protocols/yield-ai/safes?owner=${encodeURIComponent(account.address.toString())}`
+        );
+        if (!safesRes.ok) throw new Error(`Yield AI safes request failed: ${safesRes.status}`);
+        const safesData = (await safesRes.json()) as YieldAiSafesResponse;
+        const safeAddresses = Array.isArray(safesData?.data?.safeAddresses)
+          ? safesData.data.safeAddresses
+          : [];
+        const checks = await Promise.all(safeAddresses.map(async (safeAddress) => {
+          try {
+            const res = await fetch(
+              `/api/protocols/yield-ai/delta-neutral-state?safeAddress=${encodeURIComponent(safeAddress)}`
+            );
+            if (!res.ok) return null;
+            const json = (await res.json()) as DeltaNeutralStateResponse;
+            const data = json.data ?? json;
+            if (!data.recordExists || !data.isOpen || !data.decibelSubaccount || !data.perpMarket) {
+              return null;
+            }
+            return {
+              key: yieldAiManagedPositionKey(data.decibelSubaccount, data.perpMarket),
+              safeAddress,
+            };
+          } catch {
+            return null;
+          }
+        }));
+        if (!cancelled) {
+          const matches = checks.filter((v): v is { key: string; safeAddress: string } => !!v);
+          setYieldAiManagedPositionKeys(new Set(matches.map((m) => m.key)));
+          setYieldAiSafeByPositionKey(
+            Object.fromEntries(matches.map((m) => [m.key, m.safeAddress]))
+          );
+        }
+      } catch {
+        if (!cancelled) {
+          setYieldAiManagedPositionKeys(new Set());
+          setYieldAiSafeByPositionKey({});
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [account?.address, positions.length]);
   const handleCloseClick = (pos: DecibelPosition) => {
     setCloseConfirmPosition(pos);
     setCloseMode('market');
@@ -610,6 +848,24 @@ export function DecibelPositions() {
       marketName,
     });
     setTradeModalOpen(true);
+  };
+
+  const handleManageYieldAiPosition = (safeAddress: string) => {
+    if (!account?.address) return;
+    dispatchSelectYieldAiSafe(account.address.toString(), safeAddress);
+    const aiAgentProtocol = getProtocolByName('AI agent');
+    if (aiAgentProtocol) {
+      setSelectedProtocol(aiAgentProtocol);
+    }
+    if (setActiveTab) {
+      setActiveTab('ideas');
+      setTimeout(() => {
+        scrollToTop?.();
+      }, 300);
+    }
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
   };
 
   // Fetch mark price when close dialog opens (for limit price hint)
@@ -1001,8 +1257,13 @@ export function DecibelPositions() {
     (sum, v) => sum + (v.current_value_of_shares ?? 0),
     0
   );
+  const visibleVaults = vaults.filter((v) => (v.current_value_of_shares ?? 0) > 0);
   const totalAssets = (totalEquity ?? 0) + vaultsTotal + (preDepositSumUsdc ?? 0);
-  const hasTestnetData = availableToTrade != null || positions.length > 0 || vaults.length > 0;
+  const hasTestnetData =
+    availableToTrade != null || positions.length > 0 || visibleVaults.length > 0;
+  const primaryReferralCode = referralDashboard.data
+    ? pickPrimaryReferralCode(referralDashboard.data.codes)
+    : null;
 
   return (
     <div className="space-y-6 text-base">
@@ -1010,9 +1271,6 @@ export function DecibelPositions() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground">Pre-deposit</span>
-            <Badge variant="secondary" className="text-xs font-normal">
-              mainnet
-            </Badge>
           </div>
           <span className="font-medium">
             {preDepositLoading ? '…' : formatCurrency(preDepositSumUsdc ?? 0, 2)}
@@ -1020,12 +1278,9 @@ export function DecibelPositions() {
         </div>
       )}
       {(availableToTrade != null || overviewLoading) && (
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground">Available to trade</span>
-            <Badge variant="secondary" className="text-xs font-normal">
-              mainnet
-            </Badge>
             {hasTestnetData && (
               <TooltipProvider>
                 <Tooltip>
@@ -1041,12 +1296,29 @@ export function DecibelPositions() {
               </TooltipProvider>
             )}
           </div>
-          <span className="font-medium">
-            {overviewLoading ? '…' : formatCurrency(availableToTrade ?? 0, 2)}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="font-medium">
+              {overviewLoading ? '…' : formatCurrency(availableToTrade ?? 0, 2)}
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              disabled={
+                overviewLoading ||
+                !withdrawSubaccountAddr ||
+                (availableToTrade ?? 0) <= 0 ||
+                !signAndSubmitTransaction
+              }
+              onClick={() => setWithdrawModalOpen(true)}
+            >
+              Withdraw
+            </Button>
+          </div>
         </div>
       )}
-      {/* AMPs: trading + predeposit points, breakdown in tooltip */}
+      {/* AMPs from Decibel points leaderboard */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-muted-foreground">AMPs</span>
@@ -1060,19 +1332,37 @@ export function DecibelPositions() {
               <TooltipContent side="bottom" className="max-w-[260px]">
                 <p className="font-medium mb-1.5">Points breakdown</p>
                 <ul className="text-sm text-muted-foreground space-y-0.5">
-                  <li>• Trading (AMPs): {ampsLoading ? '…' : formatNumber(totalAmps ?? 0, 2)}</li>
-                  <li>• Predeposit points: {predepositPointsLoading ? '…' : formatNumber(predepositPoints ?? 0, 2)}</li>
+                  <li>- Trading: {ampsLoading ? '…' : formatNumber(ampsData?.trading_amps ?? 0, 2)} AMP</li>
+                  <li>- Referrals: {ampsLoading ? '…' : formatNumber(ampsData?.referral_amps ?? 0, 2)} AMP</li>
+                  <li>- Vaults: {ampsLoading ? '…' : formatNumber(ampsData?.vault_amps ?? 0, 2)} AMP</li>
+                  <li>- Streak: {ampsLoading ? '…' : formatNumber(ampsData?.streak_amps ?? 0, 2)} AMP</li>
+                  {(ampsData?.bonus_amps ?? 0) > 0 && (
+                    <li>- Bonus: {ampsLoading ? '…' : formatNumber(ampsData?.bonus_amps ?? 0, 2)} AMP</li>
+                  )}
                 </ul>
-                <p className="text-xs text-muted-foreground mt-1.5">Trading data is updated once per day.</p>
+                {ampsData?.rank != null && (
+                  <p className="text-xs text-muted-foreground mt-1.5">Rank #{formatNumber(ampsData.rank, 0)}</p>
+                )}
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
         </div>
-        <span className={cn("font-medium", totalAmps == null && predepositPoints == null && !ampsLoading && !predepositPointsLoading && "text-muted-foreground")}>
-          {ampsLoading || predepositPointsLoading ? '…' : formatNumber((totalAmps ?? 0) + (predepositPoints ?? 0), 2)}
-        </span>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs text-muted-foreground"
+            onClick={() => setReferralDialogOpen(true)}
+          >
+            Referral details
+          </Button>
+          <span className={cn("font-medium", totalAmps == null && !ampsLoading && "text-muted-foreground")}>
+          {ampsLoading ? '…' : formatNumber(totalAmps ?? 0, 2)}
+          </span>
+        </div>
       </div>
-      {positions.length === 0 && !vaultsLoading && vaults.length === 0 && (
+      {positions.length === 0 && !vaultsLoading && visibleVaults.length === 0 && (
         <p className="text-base text-muted-foreground py-2">
           No open positions on Decibel. Open positions at{' '}
           <a
@@ -1087,28 +1377,55 @@ export function DecibelPositions() {
       )}
       {positions.length > 0 && (
         <>
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-muted-foreground">Positions</span>
-            <Badge variant="secondary" className="text-xs font-normal">
-              mainnet
-            </Badge>
-            {hasTestnetData && (availableToTrade == null && !overviewLoading) && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="inline-flex text-muted-foreground cursor-help">
-                      <Info className="h-4 w-4" />
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-[220px]">
-                    <p>Decibel assets (positions, available to trade, vaults) are included in Total Assets.</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+          <div className="flex flex-wrap items-center justify-between gap-3 gap-y-2">
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-muted-foreground">Positions</span>
+              {hasTestnetData && (availableToTrade == null && !overviewLoading) && (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="inline-flex text-muted-foreground cursor-help">
+                        <Info className="h-4 w-4" />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom" className="max-w-[220px]">
+                      <p>Decibel assets (positions, available to trade, vaults) are included in Total Assets.</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
+            </div>
+            {hasMultiplePositionSubaccounts && (
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="text-sm font-medium text-muted-foreground">
+                  Subaccount
+                </span>
+                <Select value={selectedSubaccountNormalized} onValueChange={setSelectedSubaccount}>
+                  <SelectTrigger className="h-8 w-[260px] max-w-[62vw]">
+                    <SelectValue placeholder="Select subaccount" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {positionSubaccounts.map((subaccount) => (
+                      <SelectItem key={subaccount.normalized} value={subaccount.normalized}>
+                        <div className="flex items-center gap-2">
+                          {subaccount.label && (
+                            <span className="font-medium">
+                              {subaccount.label}
+                            </span>
+                          )}
+                          <span className={cn('text-xs', subaccount.label ? 'text-muted-foreground' : 'font-medium')}>
+                            {shortenHex(subaccount.address)}
+                          </span>
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             )}
           </div>
           <ul className="space-y-3">
-            {positions.map((pos, i) => {
+            {visiblePositions.map((pos, i) => {
               const marketKey = normalizeAddress(pos.market);
               const marketName = marketNames[marketKey] ?? pos.market;
               const { base, quote, displayPair } = formatDecibelMarket(marketName);
@@ -1123,6 +1440,13 @@ export function DecibelPositions() {
               const totalPnl = pricePnl + fundingDisplay;
               const pnlPercent = marginUsd > 0 ? (totalPnl / marginUsd) * 100 : 0;
               const isLong = pos.size > 0;
+              const subaccountLabel = subaccountLabels[normalizeAddress(pos.user)];
+              const subaccountDisplay = subaccountLabel
+                ? `${subaccountLabel} (${shortenHex(pos.user)})`
+                : shortenHex(pos.user);
+              const managedPositionKey = yieldAiManagedPositionKey(pos.user, pos.market);
+              const isYieldAiDeltaNeutralPosition = yieldAiManagedPositionKeys.has(managedPositionKey);
+              const yieldAiSafeAddress = yieldAiSafeByPositionKey[managedPositionKey];
               const fundingRateInfo = fundingRatesMap[marketKey];
               const pnlColor = totalPnl > 0 ? 'text-green-600 dark:text-green-400' : totalPnl < 0 ? 'text-destructive' : 'text-muted-foreground';
               const pricePnlColor = pricePnl > 0 ? 'text-green-600 dark:text-green-400' : pricePnl < 0 ? 'text-destructive' : 'text-muted-foreground';
@@ -1147,6 +1471,19 @@ export function DecibelPositions() {
                           {isLong ? 'Long' : 'Short'}
                         </Badge>
                         <span className="text-sm text-muted-foreground shrink-0">{pos.user_leverage}x</span>
+                        {isYieldAiDeltaNeutralPosition && (
+                          <span className="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary shrink-0">
+                            AI agent
+                          </span>
+                        )}
+                        {hasMultiplePositionSubaccounts && (
+                          <span
+                            className="text-xs px-2 py-0.5 rounded bg-muted text-muted-foreground shrink-0 max-w-[280px] truncate"
+                            title={`Subaccount: ${subaccountLabel ? `${subaccountLabel} ` : ''}${pos.user}`}
+                          >
+                            Subaccount: {subaccountDisplay}
+                          </span>
+                        )}
                         {pos.is_isolated && (
                           <span className="text-xs px-2 py-0.5 rounded bg-muted text-muted-foreground shrink-0">
                             Isolated
@@ -1227,22 +1564,35 @@ export function DecibelPositions() {
                         </Tooltip>
                       </TooltipProvider>
                       <div className="mt-2 flex items-center gap-2 self-end">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleViewChartClick(pos)}
-                          disabled={!!closingPositionKey}
-                        >
-                          View chart
-                        </Button>
-                        <Button
-                          variant="destructive"
-                          size="sm"
-                          onClick={() => handleCloseClick(pos)}
-                          disabled={!!closingPositionKey}
-                        >
-                          {closingPositionKey === positionKey(pos) ? 'Closing…' : 'Close'}
-                        </Button>
+                        {isYieldAiDeltaNeutralPosition ? (
+                          <Button
+                            variant="default"
+                            size="sm"
+                            onClick={() => yieldAiSafeAddress && handleManageYieldAiPosition(yieldAiSafeAddress)}
+                            disabled={!yieldAiSafeAddress}
+                          >
+                            Manage in Yield AI agent
+                          </Button>
+                        ) : (
+                          <>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleViewChartClick(pos)}
+                              disabled={!!closingPositionKey}
+                            >
+                              View chart
+                            </Button>
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              onClick={() => handleCloseClick(pos)}
+                              disabled={!!closingPositionKey}
+                            >
+                              {closingPositionKey === positionKey(pos) ? 'Closing…' : 'Close'}
+                            </Button>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1510,13 +1860,10 @@ export function DecibelPositions() {
       )}
 
       {/* Vaults: show when we have vault deposits */}
-      {(vaultsLoading || vaults.length > 0) && (
+      {(vaultsLoading || visibleVaults.length > 0) && (
         <div className="space-y-2">
           <h4 className="text-base font-medium mb-2 text-muted-foreground flex items-center gap-2">
             Vaults
-            <Badge variant="secondary" className="text-xs font-normal">
-              mainnet
-            </Badge>
             {hasTestnetData && (availableToTrade == null && !overviewLoading) && positions.length === 0 && (
               <TooltipProvider>
                 <Tooltip>
@@ -1534,11 +1881,11 @@ export function DecibelPositions() {
           </h4>
           {vaultsLoading ? (
             <p className="text-base text-muted-foreground">Loading vaults...</p>
-          ) : vaults.length === 0 ? (
+          ) : visibleVaults.length === 0 ? (
             <p className="text-base text-muted-foreground">No vault deposits.</p>
           ) : (
             <ul className="space-y-2">
-              {vaults.map((v, i) => (
+              {visibleVaults.map((v, i) => (
                 <li
                   key={i}
                   className="rounded-lg border bg-card p-3 text-card-foreground shadow-sm"
@@ -1560,18 +1907,10 @@ export function DecibelPositions() {
                             ? formatCurrency(v.current_value_of_shares, 2)
                             : '—'}
                         </div>
-                        {(typeof v.all_time_earned === 'number' && Number.isFinite(v.all_time_earned)) ||
-                        (v.current_value_of_shares != null && v.total_deposited != null && Number.isFinite(v.current_value_of_shares) && Number.isFinite(v.total_deposited)) ? (
-                          (() => {
-                            const userPnl = typeof v.all_time_earned === 'number' && Number.isFinite(v.all_time_earned)
-                              ? v.all_time_earned
-                              : v.current_value_of_shares! - (v.total_deposited! - (v.total_withdrawn ?? 0));
-                            return (
-                              <div className={cn('text-sm', userPnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400')}>
-                                PnL: {userPnl >= 0 ? '+' : ''}{formatCurrency(userPnl, 2)}
-                              </div>
-                            );
-                          })()
+                        {typeof v.unrealized_pnl === 'number' && Number.isFinite(v.unrealized_pnl) ? (
+                          <div className={cn('text-sm', v.unrealized_pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400')}>
+                            PnL: {v.unrealized_pnl >= 0 ? '+' : ''}{formatCurrency(v.unrealized_pnl, 2)}
+                          </div>
                         ) : null}
                       </div>
                     </div>
@@ -1595,6 +1934,214 @@ export function DecibelPositions() {
         }}
         market={tradeMarket}
       />
+      <Dialog open={referralDialogOpen} onOpenChange={setReferralDialogOpen}>
+        <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Decibel referral activity</DialogTitle>
+            <DialogDescription>
+              Referral metrics are loaded only when this dialog opens. Volumes are lifetime values from Decibel.
+            </DialogDescription>
+          </DialogHeader>
+
+          {referralDashboard.isLoading ? (
+            <div className="py-6 text-sm text-muted-foreground">Loading referral activity...</div>
+          ) : referralDashboard.isError ? (
+            <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
+              {referralDashboard.error instanceof Error
+                ? referralDashboard.error.message
+                : 'Failed to load Decibel referral activity'}
+            </div>
+          ) : referralDashboard.data ? (
+            <div className="space-y-5">
+              {primaryReferralCode && (
+                <div className="rounded-lg border bg-primary/5 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs text-muted-foreground">Your referral code</div>
+                      <div className="mt-1 font-mono text-2xl font-semibold tracking-wide">
+                        {primaryReferralCode.referral_code}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {primaryReferralCode.is_affiliate && (
+                        <Badge variant="outline">Affiliate</Badge>
+                      )}
+                      <Badge variant={primaryReferralCode.is_active ? 'outline' : 'secondary'}>
+                        {primaryReferralCode.is_active ? 'Active' : 'Inactive'}
+                      </Badge>
+                    </div>
+                  </div>
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    Used {formatNumber(primaryReferralCode.usage_count ?? 0, 0)} /{' '}
+                    {formatUsageLimit(primaryReferralCode.max_usage)}
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="rounded-lg border bg-muted/30 p-3">
+                  <div className="text-xs text-muted-foreground">Referrals</div>
+                  <div className="mt-1 text-2xl font-semibold">
+                    {formatNumber(referralDashboard.data.summary.total_referrals, 0)}
+                  </div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    L1 {formatNumber(referralDashboard.data.summary.l1.count, 0)} / L2{' '}
+                    {formatNumber(referralDashboard.data.summary.l2.count, 0)}
+                  </div>
+                </div>
+                <div className="rounded-lg border bg-muted/30 p-3">
+                  <div className="text-xs text-muted-foreground">Active users</div>
+                  <div className="mt-1 text-2xl font-semibold">
+                    {formatNumber(
+                      referralDashboard.data.summary.l1.active_count +
+                        referralDashboard.data.summary.l2.active_count,
+                      0
+                    )}
+                  </div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    L1 {formatNumber(referralDashboard.data.summary.l1.active_count, 0)} / L2{' '}
+                    {formatNumber(referralDashboard.data.summary.l2.active_count, 0)}
+                  </div>
+                </div>
+                <div className="rounded-lg border bg-muted/30 p-3">
+                  <div className="text-xs text-muted-foreground">Referral volume</div>
+                  <div className="mt-1 text-2xl font-semibold">
+                    {formatCurrency(referralDashboard.data.summary.total_volume, 2)}
+                  </div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Referral AMPs {formatNumber(referralDashboard.data.summary.leaderboard.referral_amps, 2)}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="rounded-lg border p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium">L1 direct referrals</span>
+                    <Badge variant="outline">
+                      {formatNumber(referralDashboard.data.summary.l1.count, 0)}
+                    </Badge>
+                  </div>
+                  <div className="mt-2 text-sm text-muted-foreground">
+                    Active {formatNumber(referralDashboard.data.summary.l1.active_count, 0)}
+                  </div>
+                  <div className="mt-1 text-sm">
+                    Volume {formatCurrency(referralDashboard.data.summary.l1.total_volume, 2)}
+                  </div>
+                </div>
+                <div className="rounded-lg border p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium">L2 network referrals</span>
+                    <Badge variant="outline">
+                      {formatNumber(referralDashboard.data.summary.l2.count, 0)}
+                    </Badge>
+                  </div>
+                  <div className="mt-2 text-sm text-muted-foreground">
+                    Active {formatNumber(referralDashboard.data.summary.l2.active_count, 0)}
+                  </div>
+                  <div className="mt-1 text-sm">
+                    Volume {formatCurrency(referralDashboard.data.summary.l2.total_volume, 2)}
+                  </div>
+                </div>
+              </div>
+
+              {referralDashboard.data.codes.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-sm font-medium">Referral codes</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {referralDashboard.data.codes.map((code) => (
+                      <div
+                        key={code.referral_code}
+                        className="rounded-lg border bg-muted/20 p-3 text-sm"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium">{code.referral_code}</span>
+                          <Badge variant={code.is_active ? 'outline' : 'secondary'}>
+                            {code.is_active ? 'Active' : 'Inactive'}
+                          </Badge>
+                        </div>
+                        <div className="mt-1 text-muted-foreground">
+                          Used {formatNumber(code.usage_count ?? 0, 0)} / {formatUsageLimit(code.max_usage)}
+                        </div>
+                        {code.is_affiliate && (
+                          <div className="mt-1 text-xs text-primary">Affiliate code</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {referralDashboard.data.top_users.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-sm font-medium">Top referred users</div>
+                  <div className="rounded-lg border divide-y">
+                    {referralDashboard.data.top_users.slice(0, 8).map((user) => (
+                      <div
+                        key={`${user.level}-${user.account}-${user.total_volume}`}
+                        className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Badge variant="outline">{user.level}</Badge>
+                          <span className="font-mono text-xs text-muted-foreground">{user.account}</span>
+                          {user.active && (
+                            <span className="text-xs text-green-600 dark:text-green-400">active</span>
+                          )}
+                        </div>
+                        <div className="text-right">
+                          <div className="font-medium">{formatCurrency(user.total_volume, 2)}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {formatNumber(user.affiliate_amps_earned, 2)} AMP
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {referralDashboard.data.l2_by_referrer.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-sm font-medium">L2 by referrer</div>
+                  <div className="rounded-lg border divide-y">
+                    {referralDashboard.data.l2_by_referrer.slice(0, 5).map((row) => (
+                      <div
+                        key={row.referrer}
+                        className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm"
+                      >
+                        <div>
+                          <div className="font-mono text-xs text-muted-foreground">{row.referrer}</div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            {formatNumber(row.count, 0)} users, {formatNumber(row.active_count, 0)} active
+                          </div>
+                        </div>
+                        <div className="font-medium">{formatCurrency(row.total_volume, 2)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {referralDashboard.data.users.truncated && (
+                <p className="text-xs text-muted-foreground">
+                  Showing a capped Decibel response. Add server-side pagination before exposing full admin drill-down.
+                </p>
+              )}
+              {referralDashboard.data.warnings.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Some Decibel sources returned partial data: {referralDashboard.data.warnings.join('; ')}
+                </p>
+              )}
+            </div>
+          ) : null}
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setReferralDialogOpen(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <AlertDialog
         open={postCloseHedgePromptOpen}
         onOpenChange={(open) => {
@@ -1647,6 +2194,15 @@ export function DecibelPositions() {
         variantTitle="Unwind spot hedge"
         variantDescription="Sell base asset for USDC to align with closing your short (Panora gasless swap)."
       />
+      {withdrawSubaccountAddr && (
+        <DecibelWithdrawModal
+          isOpen={withdrawModalOpen}
+          onClose={() => setWithdrawModalOpen(false)}
+          subaccountAddr={withdrawSubaccountAddr}
+          withdrawableBalanceUsd={withdrawableBalanceUsd}
+          isTestnet={decibelNetwork === 'testnet'}
+        />
+      )}
     </div>
   );
 }

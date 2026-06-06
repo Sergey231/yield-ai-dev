@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Connection, PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -24,12 +23,17 @@ import { queryKeys } from "@/lib/query/queryKeys";
 import { useKaminoPositions } from "@/lib/query/hooks/protocols/kamino/useKaminoPositions";
 import { useKaminoRewards } from "@/lib/query/hooks/protocols/kamino/useKaminoRewards";
 import { useSearchParams } from "next/navigation";
-import { AccountHealthSummary } from "@/components/protocols/manage-positions/AccountHealthSummary";
 import {
   isYieldAiNativeAppNow,
   signAndSubmitSolanaTransaction,
 } from "@/lib/mobile/nativeBridge";
 import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
+import {
+  LendingProtocolCard,
+  type LendingProtocolCardRow,
+  type LendingProtocolCardSection,
+  type LendingProtocolCardTile,
+} from "@/shared/ProtocolCard";
 
 const KAMINO_LEND_URL = "https://kamino.com/lend";
 const KAMINO_LOCAL_ICON = "/protocol_ico/kamino.png";
@@ -225,6 +229,9 @@ type NormalizedKaminoRow =
       fallbackLogoUrl: string;
       valueUsd: number;
       amount: number;
+      aprPct?: number;
+      /** Deposit used as collateral for an active borrow on the same obligation. */
+      isCollateral?: boolean;
       typeLabel: string;
       typeColor: string;
     }
@@ -235,6 +242,7 @@ type NormalizedKaminoRow =
       fallbackLogoUrl: string;
       valueUsd: number;
       amount: number;
+      aprPct?: number;
       typeLabel: string;
       typeColor: string;
     }
@@ -258,7 +266,7 @@ type NormalizedKaminoRow =
 
 function extractKaminoBorrowRows(
   obligation: unknown
-): Array<{ reserve: string; valueUsd: number; symbol?: string; logoUrl?: string }> {
+): Array<{ reserve: string; valueUsd: number; symbol?: string; logoUrl?: string; aprPct?: number }> {
   if (!obligation || typeof obligation !== "object") return [];
   const state = (obligation as { state?: unknown }).state as { borrows?: unknown } | undefined;
   const borrows = Array.isArray(state?.borrows) ? (state!.borrows as any[]) : [];
@@ -268,11 +276,13 @@ function extractKaminoBorrowRows(
       const v = typeof b?.marketValueUsd === "number" ? b.marketValueUsd : NaN;
       const symbol = typeof b?.tokenSymbol === "string" ? String(b.tokenSymbol).trim() : "";
       const logoUrl = typeof b?.tokenLogoUrl === "string" ? String(b.tokenLogoUrl).trim() : "";
+      const aprPct = pickFirstNumber(b, ["borrowApyPct", "borrowAprPct", "aprPct", "apyPct", "apy"], 0);
       return {
         reserve,
         valueUsd: Number.isFinite(v) ? v : 0,
         symbol: symbol || undefined,
         logoUrl: logoUrl || undefined,
+        aprPct: aprPct > 0 ? aprPct : undefined,
       };
     })
     .filter((x) => x.reserve && x.valueUsd > 0);
@@ -323,6 +333,8 @@ function normalizeKaminoPositionRows(row: KaminoPosition, idx: number): Normaliz
 
   if (row.source === "kamino-lend") {
     const out: NormalizedKaminoRow[] = [];
+    const borrowRowsForObligation = extractKaminoBorrowRows(row.obligation);
+    const hasActiveBorrow = borrowRowsForObligation.length > 0;
     const state = (row.obligation as { state?: unknown } | undefined)?.state as
       | { deposits?: unknown }
       | undefined;
@@ -333,11 +345,13 @@ function normalizeKaminoPositionRows(row: KaminoPosition, idx: number): Normaliz
         const sym = typeof d?.tokenSymbol === "string" ? String(d.tokenSymbol).trim() : "";
         const logo = typeof d?.tokenLogoUrl === "string" ? String(d.tokenLogoUrl).trim() : "";
         const reserve = String(d?.depositReserve ?? "").trim();
+        const aprPct = pickFirstNumber(d, ["supplyApyPct", "depositApyPct", "depositApy", "aprPct", "apyPct", "apy"], 0);
         return {
           reserve,
           valueUsd: Number.isFinite(v) ? v : 0,
           symbol: sym || undefined,
           logoUrl: logo || undefined,
+          aprPct: aprPct > 0 ? aprPct : undefined,
         };
       })
       .filter((x) => x.reserve && x.valueUsd > 0);
@@ -354,6 +368,8 @@ function normalizeKaminoPositionRows(row: KaminoPosition, idx: number): Normaliz
           fallbackLogoUrl: icon,
           valueUsd: d.valueUsd,
           amount: 0,
+          aprPct: typeof d.aprPct === "number" && Number.isFinite(d.aprPct) && d.aprPct > 0 ? d.aprPct : undefined,
+          isCollateral: hasActiveBorrow,
           typeLabel: "Supply",
           typeColor: "bg-green-500/10 text-green-600 border-green-500/20",
         });
@@ -373,12 +389,13 @@ function normalizeKaminoPositionRows(row: KaminoPosition, idx: number): Normaliz
         fallbackLogoUrl: "",
         valueUsd,
         amount: 0,
+        isCollateral: hasActiveBorrow,
         typeLabel: "Supply",
         typeColor: "bg-green-500/10 text-green-600 border-green-500/20",
       });
     }
 
-    for (const b of extractKaminoBorrowRows(row.obligation)) {
+    for (const b of borrowRowsForObligation) {
       const sym = (b.symbol || "").trim();
       const local = sym ? `/token_ico/${sym.toLowerCase()}.png` : "";
       const icon = local || b.logoUrl || "";
@@ -390,6 +407,7 @@ function normalizeKaminoPositionRows(row: KaminoPosition, idx: number): Normaliz
         // Negative so totals become (supply - borrow) without special casing.
         valueUsd: -Math.abs(b.valueUsd),
         amount: 0,
+        aprPct: typeof b.aprPct === "number" && Number.isFinite(b.aprPct) && b.aprPct > 0 ? b.aprPct : undefined,
         typeLabel: "Borrow",
         typeColor: "bg-pink-500/10 text-pink-600 border-pink-500/20",
       });
@@ -882,7 +900,112 @@ export function KaminoPositions() {
     ]
   );
 
+  type KaminoLendingRow = LendingProtocolCardRow & {
+    _kind: NormalizedKaminoRow["kind"];
+    _row: NormalizedKaminoRow;
+  };
+
+  const { tiles, sections } = useMemo(() => {
+    const supplyRows: KaminoLendingRow[] = [];
+    const borrowRows: KaminoLendingRow[] = [];
+
+    for (let i = 0; i < sorted.length; i++) {
+      const row = sorted[i]!;
+      const isBorrow = row.kind === "borrow";
+      const positionType: "supply" | "borrow" = isBorrow ? "borrow" : "supply";
+      const valueUsd = isBorrow ? Math.abs(row.valueUsd) : row.valueUsd;
+      const logoUrl =
+        row.kind === "earn"
+          ? (getPreferredJupiterTokenIcon(row.underlyingSymbol, row.fallbackLogoUrl || undefined) ??
+              row.fallbackLogoUrl ??
+              "") ||
+            undefined
+          : (row.fallbackLogoUrl || undefined);
+
+      const base: KaminoLendingRow = {
+        id: row.id || `kamino-${row.kind}-${i}`,
+        symbol: row.kind === "earn" ? (row.underlyingSymbol || row.label) : row.label,
+        tokenLogoUrl: logoUrl,
+        value: formatCurrency(valueUsd, 2),
+        amountLabel: row.amount > 0 ? formatNumber(row.amount, 6) : undefined,
+        priceLabel: "price" in row && typeof row.price === "number" && Number.isFinite(row.price) ? formatCurrency(row.price, 4) : undefined,
+        aprLabel:
+          "aprPct" in row && typeof row.aprPct === "number" && Number.isFinite(row.aprPct)
+            ? `${formatNumber(row.aprPct, 2)}%`
+            : undefined,
+        isCollateral: row.kind === "lend" && Boolean(row.isCollateral),
+        positionType,
+        _kind: row.kind,
+        _row: row,
+      };
+
+      if (positionType === "borrow") borrowRows.push(base);
+      else supplyRows.push(base);
+    }
+
+    const health = calculateHealthFactor();
+
+    const tilesLocal: LendingProtocolCardTile[] = [
+      {
+        id: "total-assets",
+        title: "Total Assets",
+        titleShort: "Assets",
+        icon: "wallet",
+        value: formatCurrency(totalValue, 2),
+        subRows: [
+          {
+            label: "Rewards:",
+            value: totalRewardsUsd > 0 ? formatCurrency(totalRewardsUsd, 2) : "$0.00",
+          },
+        ],
+      },
+      {
+        id: "health",
+        title: "Health Factor",
+        titleShort: "Health",
+        icon: "health",
+        tone:
+          health && Number.isFinite(health.healthFactor)
+            ? health.healthFactor >= 1.5
+              ? "success"
+              : health.healthFactor >= 1.2
+                ? "warning"
+                : "danger"
+            : "default",
+        value:
+          health && Number.isFinite(health.healthFactor) ? health.healthFactor.toFixed(2) : "—",
+        subRows:
+          health
+            ? [
+                { label: "Collateral:", labelShort: "Coll.", value: formatCurrency(health.accountMargin, 2) },
+                { label: "Liabilities:", labelShort: "Debt", value: formatCurrency(health.totalLiabilities, 2) },
+              ]
+            : undefined,
+      },
+    ];
+
+    const sectionsLocal: Array<LendingProtocolCardSection<KaminoLendingRow>> = [
+      {
+        id: "supply",
+        title: `Your Supplies (${supplyRows.length})`,
+        titleShort: `Supplies (${supplyRows.length})`,
+        rows: supplyRows,
+        defaultOpen: true,
+      },
+      {
+        id: "borrow",
+        title: `Your Borrows (${borrowRows.length})`,
+        titleShort: `Borrows (${borrowRows.length})`,
+        rows: borrowRows,
+        defaultOpen: true,
+      },
+    ];
+
+    return { tiles: tilesLocal, sections: sectionsLocal };
+  }, [sorted, totalValue, totalRewardsUsd, calculateHealthFactor]);
+
   // Don't block the page while refreshing; only show a full-page loader on the initial empty load.
+  // IMPORTANT: all hooks must be called before these early returns.
   if (sorted.length === 0 && loading) {
     return <div className="py-4 text-muted-foreground">Loading positions...</div>;
   }
@@ -923,446 +1046,34 @@ export function KaminoPositions() {
         />
       ) : null}
 
-      <ScrollArea className="w-full min-w-0 max-w-full">
-        {(() => {
-          type RenderBlock =
-            | {
-                kind: "pair";
-                sortKey: number;
-                id: string;
-                supply: { symbol: string; logoUrl?: string; usd: number; mint?: string; amount?: number; price?: number; aprPct?: number };
-                borrow: { symbol: string; logoUrl?: string; usd: number; mint?: string; amount?: number; price?: number; aprPct?: number };
-                health?: { hf: number; collateral: number; liabilities: number };
-              }
-            | { kind: "row"; sortKey: number; row: NormalizedKaminoRow };
-
-          const blocks: RenderBlock[] = [];
-
-          // Build Kamino Lend supply/borrow pairs from raw obligation data (so they stay adjacent like Jupiter).
-          for (const p of positions) {
-            if (p?.source !== "kamino-lend") continue;
-            const obligation = (p as any)?.obligation;
-            const deposit = Array.isArray(obligation?.state?.deposits) ? obligation.state.deposits[0] : null;
-            const borrow = Array.isArray(obligation?.state?.borrows) ? obligation.state.borrows[0] : null;
-            if (!deposit || !borrow) continue;
-
-            const supplyUsd = typeof deposit?.marketValueUsd === "number" ? deposit.marketValueUsd : 0;
-            const borrowUsd = typeof borrow?.marketValueUsd === "number" ? borrow.marketValueUsd : 0;
-            if (!(supplyUsd > 0) || !(borrowUsd > 0)) continue;
-
-            const supplySymbol = String(deposit?.tokenSymbol || "Supply").trim() || "Supply";
-            const borrowSymbol = String(borrow?.tokenSymbol || "Borrow").trim() || "Borrow";
-            const supplyLogoUrl = String(deposit?.tokenLogoUrl || "").trim() || undefined;
-            const borrowLogoUrl = String(borrow?.tokenLogoUrl || "").trim() || undefined;
-            const supplyMint = typeof deposit?.tokenMint === "string" ? deposit.tokenMint : undefined;
-            const borrowMint = typeof borrow?.tokenMint === "string" ? borrow.tokenMint : undefined;
-            const supplyRaw = typeof deposit?.depositedAmount === "string" ? Number(deposit.depositedAmount) : Number(deposit?.depositedAmount);
-            const borrowRaw = typeof borrow?.borrowedAmountOutsideElevationGroups === "string"
-              ? Number(borrow.borrowedAmountOutsideElevationGroups)
-              : Number(borrow?.borrowedAmountOutsideElevationGroups);
-            const supplyDecimals = Number.isFinite(Number(deposit?.tokenDecimals))
-              ? Number(deposit.tokenDecimals)
-              : supplyMint
-                ? Number(solanaTokens.find((t) => (t.address ?? "").trim() === supplyMint)?.decimals)
-                : NaN;
-            const borrowDecimals = Number.isFinite(Number(borrow?.tokenDecimals))
-              ? Number(borrow.tokenDecimals)
-              : borrowMint
-                ? Number(solanaTokens.find((t) => (t.address ?? "").trim() === borrowMint)?.decimals)
-                : NaN;
-            const supplyAmount =
-              Number.isFinite(supplyRaw) && supplyRaw > 0 && Number.isFinite(supplyDecimals) && supplyDecimals >= 0
-                ? supplyRaw / Math.pow(10, supplyDecimals)
-                : undefined;
-            const borrowAmount =
-              Number.isFinite(borrowRaw) && borrowRaw > 0 && Number.isFinite(borrowDecimals) && borrowDecimals >= 0
-                ? borrowRaw / Math.pow(10, borrowDecimals)
-                : undefined;
-            const supplyPrice =
-              typeof supplyAmount === "number" && Number.isFinite(supplyAmount) && supplyAmount > 0 ? supplyUsd / supplyAmount : undefined;
-            const borrowPrice =
-              typeof borrowAmount === "number" && Number.isFinite(borrowAmount) && borrowAmount > 0 ? borrowUsd / borrowAmount : undefined;
-            const supplyAprPct =
-              typeof (deposit as any)?.supplyApyPct === "number" && Number.isFinite((deposit as any).supplyApyPct)
-                ? Number((deposit as any).supplyApyPct)
-                : 0;
-            const borrowAprPct =
-              typeof (borrow as any)?.borrowApyPct === "number" && Number.isFinite((borrow as any).borrowApyPct)
-                ? Number((borrow as any).borrowApyPct)
-                : 0;
-
-            const liqLimit = Number(obligation?.refreshedStats?.borrowLiquidationLimit);
-            const totalBorrow = Number(obligation?.refreshedStats?.userTotalBorrow);
-            const totalDeposit = Number(obligation?.refreshedStats?.userTotalDeposit);
-            const hf =
-              Number.isFinite(liqLimit) && Number.isFinite(totalBorrow) && totalBorrow > 0 ? liqLimit / totalBorrow : null;
-
-            blocks.push({
-              kind: "pair",
-              sortKey: supplyUsd,
-              id: `kamino-lend-pair:${String(p.marketPubkey ?? "")}`,
-              supply: { symbol: supplySymbol, logoUrl: supplyLogoUrl, usd: supplyUsd, mint: supplyMint, amount: supplyAmount, price: supplyPrice, aprPct: supplyAprPct },
-              borrow: { symbol: borrowSymbol, logoUrl: borrowLogoUrl, usd: borrowUsd, mint: borrowMint, amount: borrowAmount, price: borrowPrice, aprPct: borrowAprPct },
-              ...(hf != null
-                ? {
-                    health: {
-                      hf,
-                      collateral: Number.isFinite(totalDeposit) ? totalDeposit : supplyUsd,
-                      liabilities: Number.isFinite(totalBorrow) ? totalBorrow : borrowUsd,
-                    },
-                  }
-                : {}),
-            });
+      <LendingProtocolCard<KaminoLendingRow>
+        headerVariant="minimal"
+        tiles={tiles}
+        sections={sections}
+        onDeposit={(row) => {
+          if (row.isCollateral) {
+            window.open(KAMINO_LEND_URL, "_blank");
+            return;
           }
-
-          // Add all non-lend/borrow rows (we render lend/borrow only via the paired block above).
-          for (const row of sorted) {
-            if (row.kind === "lend" || row.kind === "borrow") continue;
-            blocks.push({ kind: "row", sortKey: row.valueUsd, row });
+          if (row._kind === "earn" && row._row.kind === "earn" && row._row.vaultAddress) {
+            openEarnDeposit(row._row);
+            return;
           }
-
-          blocks.sort((a, b) => (b.sortKey ?? 0) - (a.sortKey ?? 0));
-
-          return blocks.map((block) => {
-            if (block.kind === "pair") {
-              const { supply, borrow, health } = block;
-              return (
-                <div
-                  key={block.id}
-                  className="box-border w-full min-w-0 max-w-full overflow-hidden p-3 sm:p-4 border-b last:border-b-0"
-                >
-                  {/* Supply row (hover like Jupiter) */}
-                  <div className="rounded-md transition-colors">
-                    <div className="hidden sm:flex justify-between items-center py-2">
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 relative">
-                          <KaminoLogo alt={supply.symbol} externalLogoUrl={supply.logoUrl} symbol={supply.symbol} />
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <div className="text-lg font-semibold">{supply.symbol}</div>
-                            <Badge
-                              variant="outline"
-                              className="bg-green-500/10 text-green-600 border-green-500/20 text-xs font-normal px-2 py-0.5 h-5"
-                            >
-                              Supply
-                            </Badge>
-                          </div>
-                          <div className="text-base text-muted-foreground mt-0.5">
-                            {formatCurrency(typeof supply.price === "number" && Number.isFinite(supply.price) ? supply.price : 0, 4)}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="flex items-center justify-end gap-2 mb-1">
-                          <Badge
-                            variant="outline"
-                            className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-xs font-normal px-2 py-0.5 h-5"
-                          >
-                            APR: {formatNumber(typeof supply.aprPct === "number" && Number.isFinite(supply.aprPct) ? supply.aprPct : 0, 2)}%
-                          </Badge>
-                          <div className="text-lg font-bold text-right w-24">{formatCurrency(supply.usd, 2)}</div>
-                        </div>
-                        {typeof supply.amount === "number" && Number.isFinite(supply.amount) && supply.amount > 0 ? (
-                          <div className="text-base text-muted-foreground font-semibold">{formatNumber(supply.amount, 6)}</div>
-                        ) : null}
-                      </div>
-                    </div>
-
-                    <div className="block sm:hidden w-full min-w-0 max-w-full space-y-2 py-2">
-                      <div className="flex w-full min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-2">
-                        <div className="relative h-8 w-8 shrink-0">
-                          <KaminoLogo alt={supply.symbol} externalLogoUrl={supply.logoUrl} symbol={supply.symbol} />
-                        </div>
-                        <div className="min-w-0 max-w-full break-words text-base font-semibold [overflow-wrap:anywhere]">
-                          {supply.symbol}
-                        </div>
-                        <Badge
-                          variant="outline"
-                          className="h-4 shrink-0 border-green-500/20 bg-green-500/10 px-1.5 py-0.5 text-xs font-normal text-green-600"
-                        >
-                          Supply
-                        </Badge>
-                        <span className="text-sm text-muted-foreground">
-                          {formatCurrency(typeof supply.price === "number" && Number.isFinite(supply.price) ? supply.price : 0, 4)}
-                        </span>
-                        <span className="text-base font-semibold">
-                          {formatCurrency(typeof supply.price === "number" && Number.isFinite(supply.price) ? supply.price : 0, 4)}
-                        </span>
-                        {typeof supply.amount === "number" && Number.isFinite(supply.amount) && supply.amount > 0 ? (
-                          <span className="min-w-0 max-w-full break-all text-sm text-muted-foreground">
-                            {formatNumber(supply.amount, 6)}
-                          </span>
-                        ) : null}
-                        <span className="text-xs text-blue-600 border border-blue-500/20 bg-blue-500/10 rounded px-1.5 py-0.5 h-4 inline-flex items-center">
-                          APR: {formatNumber(typeof supply.aprPct === "number" && Number.isFinite(supply.aprPct) ? supply.aprPct : 0, 2)}%
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Borrow row (minimal offset, NO divider between supply/borrow) */}
-                  <div className="mt-1">
-                    <div>
-                      <div className="hidden sm:flex justify-between items-center py-2">
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 relative">
-                            <KaminoLogo alt={borrow.symbol} externalLogoUrl={borrow.logoUrl} symbol={borrow.symbol} />
-                          </div>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <div className="text-lg font-semibold">{borrow.symbol}</div>
-                              <Badge
-                                variant="outline"
-                                className="bg-pink-500/10 text-pink-600 border-pink-500/20 text-xs font-normal px-2 py-0.5 h-5"
-                              >
-                                Borrow
-                              </Badge>
-                            </div>
-                            <div className="text-base text-muted-foreground mt-0.5">
-                              {formatCurrency(typeof borrow.price === "number" && Number.isFinite(borrow.price) ? borrow.price : 0, 4)}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <div className="flex items-center justify-end gap-2 mb-1">
-                            <Badge
-                              variant="outline"
-                              className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-xs font-normal px-2 py-0.5 h-5"
-                            >
-                              APR: {formatNumber(typeof borrow.aprPct === "number" && Number.isFinite(borrow.aprPct) ? borrow.aprPct : 0, 2)}%
-                            </Badge>
-                            <div className="text-lg font-bold text-right w-24">{formatCurrency(borrow.usd, 2)}</div>
-                          </div>
-                          {typeof borrow.amount === "number" && Number.isFinite(borrow.amount) && borrow.amount > 0 ? (
-                            <div className="text-base text-muted-foreground font-semibold">{formatNumber(borrow.amount, 6)}</div>
-                          ) : null}
-                        </div>
-                      </div>
-
-                      <div className="block sm:hidden w-full min-w-0 max-w-full space-y-2 py-2">
-                        <div className="flex w-full min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-2">
-                          <div className="relative h-8 w-8 shrink-0">
-                            <KaminoLogo alt={borrow.symbol} externalLogoUrl={borrow.logoUrl} symbol={borrow.symbol} />
-                          </div>
-                          <div className="min-w-0 max-w-full break-words text-base font-semibold [overflow-wrap:anywhere]">
-                            {borrow.symbol}
-                          </div>
-                          <Badge
-                            variant="outline"
-                            className="h-4 shrink-0 border-pink-500/20 bg-pink-500/10 px-1.5 py-0.5 text-xs font-normal text-pink-600"
-                          >
-                            Borrow
-                          </Badge>
-                          <span className="text-sm text-muted-foreground">
-                            {formatCurrency(typeof borrow.price === "number" && Number.isFinite(borrow.price) ? borrow.price : 0, 4)}
-                          </span>
-                          <span className="text-base font-semibold">
-                            {formatCurrency(typeof borrow.price === "number" && Number.isFinite(borrow.price) ? borrow.price : 0, 4)}
-                          </span>
-                          {typeof borrow.amount === "number" && Number.isFinite(borrow.amount) && borrow.amount > 0 ? (
-                            <span className="min-w-0 max-w-full break-all text-sm text-muted-foreground">
-                              {formatNumber(borrow.amount, 6)}
-                            </span>
-                          ) : null}
-                          <span className="text-xs text-blue-600 border border-blue-500/20 bg-blue-500/10 rounded px-1.5 py-0.5 h-4 inline-flex items-center">
-                            APR: {formatNumber(typeof borrow.aprPct === "number" && Number.isFinite(borrow.aprPct) ? borrow.aprPct : 0, 2)}%
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Account Health attached to this pair (like Jupiter). No extra divider lines. */}
-                    {health ? (
-                      <div>
-                        <AccountHealthSummary
-                          accountHealth={health.hf}
-                          collateral={health.collateral}
-                          liabilities={health.liabilities}
-                          border="none"
-                          compact
-                          showHelp
-                        />
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              );
-            }
-
-            const position = block.row;
-            return (
-              <div
-                key={position.id}
-                className="box-border w-full min-w-0 max-w-full overflow-hidden p-3 sm:p-4 border-b last:border-b-0"
-              >
-            <div className="hidden sm:flex justify-between items-center">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 relative">
-                  <KaminoLogo
-                    alt={position.label}
-                    externalLogoUrl={position.fallbackLogoUrl}
-                    fallbackLogoUrl={"underlyingLogoUrl" in position ? position.underlyingLogoUrl : undefined}
-                    symbol={"underlyingSymbol" in position ? position.underlyingSymbol : undefined}
-                  />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <div className="text-lg font-semibold">{position.label}</div>
-                    <Badge variant="outline" className={`${position.typeColor} text-xs font-normal px-2 py-0.5 h-5`}>
-                      {position.typeLabel}
-                    </Badge>
-                  </div>
-                  {"price" in position && position.price != null && (
-                    <div className="text-base text-muted-foreground mt-0.5">{formatCurrency(position.price, 4)}</div>
-                  )}
-                </div>
-              </div>
-              <div className="text-right">
-                  <div className="flex items-center justify-end gap-2 mb-1">
-                  {position.kind === "earn" && position.aprPct != null ? (
-                    <Badge
-                      variant="outline"
-                      className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-xs font-normal px-2 py-0.5 h-5"
-                    >
-                      APR: {formatNumber(position.aprPct, 2)}%
-                    </Badge>
-                  ) : null}
-                  <div className="text-lg font-bold text-right w-24">
-                    {formatCurrency(position.kind === "borrow" ? Math.abs(position.valueUsd) : position.valueUsd, 2)}
-                  </div>
-                </div>
-                {"amount" in position && position.amount > 0 && (
-                  <div className="text-base text-muted-foreground">{formatNumber(position.amount, 6)}</div>
-                )}
-                <div className="flex gap-2 mt-2 justify-end">
-                  {position.kind === "earn" && position.vaultAddress ? (
-                    <>
-                      <Button
-                        size="sm"
-                        variant="default"
-                        className="h-10"
-                        onClick={() => openEarnDeposit(position)}
-                        disabled={!effectiveSignerAddress || !canSubmitTx}
-                      >
-                        Deposit
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-10"
-                        onClick={() => openEarnWithdraw(position)}
-                        disabled={!effectiveSignerAddress || !canSubmitTx}
-                      >
-                        Withdraw
-                      </Button>
-                    </>
-                  ) : (
-                    <>
-                      <Button size="sm" variant="default" className="h-10" onClick={() => window.open(KAMINO_LEND_URL, "_blank")}>
-                        Deposit
-                        <ExternalLink className="h-3 w-3 ml-1" />
-                      </Button>
-                      <Button size="sm" variant="outline" className="h-10" onClick={() => window.open(KAMINO_LEND_URL, "_blank")}>
-                        Withdraw
-                        <ExternalLink className="h-3 w-3 ml-1" />
-                      </Button>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div className="block sm:hidden w-full min-w-0 max-w-full space-y-3">
-              <div className="flex w-full min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-2">
-                <div className="relative h-8 w-8 shrink-0">
-                  <KaminoLogo
-                    alt={position.label}
-                    externalLogoUrl={position.fallbackLogoUrl}
-                    fallbackLogoUrl={"underlyingLogoUrl" in position ? position.underlyingLogoUrl : undefined}
-                    symbol={"underlyingSymbol" in position ? position.underlyingSymbol : undefined}
-                  />
-                </div>
-                <div className="min-w-0 max-w-full break-words text-base font-semibold [overflow-wrap:anywhere]">
-                  {position.label}
-                </div>
-                <Badge
-                  variant="outline"
-                  className={`${position.typeColor} h-4 shrink-0 px-1.5 py-0.5 text-xs font-normal`}
-                >
-                  {position.typeLabel}
-                </Badge>
-                {position.kind === "earn" && position.aprPct != null ? (
-                  <Badge
-                    variant="outline"
-                    className="h-4 shrink-0 border-blue-500/20 bg-blue-500/10 px-1.5 py-0.5 text-xs font-normal text-blue-600"
-                  >
-                    APR: {formatNumber(position.aprPct, 2)}%
-                  </Badge>
-                ) : null}
-                {"price" in position && position.price != null ? (
-                  <span className="text-sm text-muted-foreground">{formatCurrency(position.price, 4)}</span>
-                ) : null}
-                <span className="text-base font-semibold">
-                  {formatCurrency(position.kind === "borrow" ? Math.abs(position.valueUsd) : position.valueUsd, 2)}
-                </span>
-                {"amount" in position && position.amount > 0 ? (
-                  <span className="min-w-0 max-w-full break-all text-sm text-muted-foreground">
-                    {formatNumber(position.amount, 6)}
-                  </span>
-                ) : null}
-              </div>
-              <div className="flex w-full min-w-0 max-w-full flex-col gap-2">
-                {position.kind === "earn" && position.vaultAddress ? (
-                  <>
-                    <Button
-                      size="sm"
-                      variant="default"
-                      className="box-border h-10 w-full min-w-0 max-w-full"
-                      onClick={() => openEarnDeposit(position)}
-                      disabled={!effectiveSignerAddress || !canSubmitTx}
-                    >
-                      Deposit
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="box-border h-10 w-full min-w-0 max-w-full"
-                      onClick={() => openEarnWithdraw(position)}
-                      disabled={!effectiveSignerAddress || !canSubmitTx}
-                    >
-                      Withdraw
-                    </Button>
-                  </>
-                ) : (
-                  <>
-                    <Button
-                      size="sm"
-                      variant="default"
-                      className="box-border h-10 w-full min-w-0 max-w-full"
-                      onClick={() => window.open(KAMINO_LEND_URL, "_blank")}
-                    >
-                      Deposit
-                      <ExternalLink className="ml-1 h-3 w-3" />
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="box-border h-10 w-full min-w-0 max-w-full"
-                      onClick={() => window.open(KAMINO_LEND_URL, "_blank")}
-                    >
-                      Withdraw
-                      <ExternalLink className="ml-1 h-3 w-3" />
-                    </Button>
-                  </>
-                )}
-              </div>
-            </div>
-          </div>
-            );
-          });
-        })()}
-      </ScrollArea>
+          window.open(KAMINO_LEND_URL, "_blank");
+        }}
+        onWithdraw={(row) => {
+          if (row.isCollateral) {
+            window.open(KAMINO_LEND_URL, "_blank");
+            return;
+          }
+          if (row._kind === "earn" && row._row.kind === "earn" && row._row.vaultAddress) {
+            openEarnWithdraw(row._row);
+            return;
+          }
+          window.open(KAMINO_LEND_URL, "_blank");
+        }}
+        withdrawDisabled={earnSubmitting}
+      />
 
       <div className="pt-4">
         {rewardsLoading && rewards.length === 0 ? (

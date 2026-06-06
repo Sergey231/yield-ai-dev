@@ -189,7 +189,7 @@ export function useDeposit() {
               showTransactionSuccessToast({
                 hash: response.hash,
                 ...(protocolKey === 'yield-ai'
-                  ? { title: 'Deposit to safe successful!' }
+                  ? { title: 'Deposit to AI agent successful!' }
                   : {}),
               });
               if (protocolKey === 'yield-ai') {

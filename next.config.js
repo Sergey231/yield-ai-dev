@@ -124,7 +124,8 @@ const nextConfig = {
       'app.meso.finance',
       'app.auro.finance',
       'app.kofi.finance',
-      'app.earnium.io'
+      'app.earnium.io',
+      'www.orca.so'
     ],
     // Add image optimization settings
     formats: ['image/webp', 'image/avif'],
@@ -147,4 +148,4 @@ const nextConfig = {
   poweredByHeader: false,
 }
 
-module.exports = nextConfig 
+module.exports = nextConfig

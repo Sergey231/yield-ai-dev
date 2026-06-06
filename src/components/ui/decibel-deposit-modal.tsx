@@ -1,7 +1,7 @@
 'use client';
 
 import Image from 'next/image';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useWallet } from '@aptos-labs/wallet-adapter-react';
 import { useWalletData } from '@/contexts/WalletContext';
@@ -10,17 +10,14 @@ import { buildDepositToSubaccountPayload, DECIBEL_MAINNET_USDC_METADATA } from '
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { useToast } from '@/components/ui/use-toast';
 import { ToastAction } from '@/components/ui/toast';
+import { TokenAmountInput } from '@/shared/DepositAmountInput';
 
 const DECIBEL_LOGO = '/protocol_ico/decibel.png';
 const USDC_LOGO = 'https://assets.panora.exchange/tokens/aptos/USDC.svg';
@@ -35,6 +32,12 @@ function normalizeAddress(addr?: string | null): string {
 function shortenHex(hex: string, head = 6, tail = 4): string {
   if (!hex || !hex.startsWith('0x') || hex.length <= head + tail + 2) return hex;
   return `${hex.slice(0, head + 2)}...${hex.slice(-tail)}`;
+}
+
+function formatTokenAmount(baseUnits: bigint, decimals: number): string {
+  const divisor = 10 ** decimals;
+  const value = Number(baseUnits) / divisor;
+  return value.toLocaleString('en-US', { maximumFractionDigits: 4 });
 }
 
 interface DecibelDepositModalProps {
@@ -52,6 +55,7 @@ export function DecibelDepositModal({
   const { tokens, refreshPortfolio } = useWalletData();
   const { toast } = useToast();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const amountInputRef = useRef<HTMLInputElement>(null);
 
   const usdcToken = useMemo(
     () =>
@@ -62,7 +66,7 @@ export function DecibelDepositModal({
   );
 
   const walletBalance = usdcToken ? BigInt(usdcToken.amount) : BigInt(0);
-  const balanceNumber = Number(walletBalance) / 10 ** USDC_DECIMALS;
+  const priceUSD = usdcToken?.price ? parseFloat(usdcToken.price) : 1;
 
   const { amount, amountString, setAmountFromString, setHalf, setMax, isValid } = useAmountInput({
     balance: walletBalance,
@@ -126,79 +130,63 @@ export function DecibelDepositModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-[460px] p-6 rounded-2xl">
-        <DialogHeader>
-          <div className="flex items-center gap-2">
-            <Image src={DECIBEL_LOGO} alt="Decibel" width={24} height={24} className="rounded-full" />
-            <DialogTitle>Deposit to Decibel</DialogTitle>
+      <DialogContent className="w-full min-w-0 max-w-[min(100vw-2rem,425px)] overflow-x-hidden rounded-2xl p-6 sm:max-w-[425px] [&>button:last-child]:right-3 [&>button:last-child]:top-3 [&>button:last-child]:size-7 [&>button:last-child>svg]:size-3.5 sm:[&>button:last-child]:right-5 sm:[&>button:last-child]:top-5 [&>button:last-child]:transition-colors [&>button:last-child]:hover:bg-muted/40">
+        <DialogHeader className="min-w-0 pr-11 sm:pr-12">
+          <div className="flex min-w-0 items-center gap-2">
+            <Image
+              src={DECIBEL_LOGO}
+              alt="Decibel"
+              width={24}
+              height={24}
+              className="rounded-full"
+              unoptimized
+            />
+            <DialogTitle className="min-w-0 truncate text-base sm:text-lg">
+              Deposit to USDC Decibel
+            </DialogTitle>
           </div>
-          <DialogDescription>Deposit USDC into your Decibel trading account.</DialogDescription>
         </DialogHeader>
 
-        <div className="flex items-center justify-center gap-2 py-4">
-          <div className="flex items-center gap-2">
-            <Image src={USDC_LOGO} alt="USDC" width={32} height={32} />
-            <span>USDC</span>
-          </div>
-          <span>-&gt;</span>
-          <div className="flex items-center gap-2">
-            <Image src={DECIBEL_LOGO} alt="Decibel" width={32} height={32} className="rounded-full" />
-            <span>Decibel</span>
-          </div>
-        </div>
-
-        <div className="grid gap-4 py-4">
-          <div className="grid gap-2">
-            <div className="flex items-center justify-between gap-3">
-              <Label htmlFor="decibel-deposit-amount">Amount</Label>
-              <span className="text-sm text-muted-foreground text-right">
-                Wallet balance: {balanceNumber.toFixed(2)} USDC
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Input
-                id="decibel-deposit-amount"
-                type="number"
-                min="0"
-                step="0.000001"
-                value={amountString}
-                onChange={(e) => setAmountFromString(e.target.value)}
-                placeholder="0.00"
-                className={amount > walletBalance ? 'text-red-500' : ''}
-              />
-              <div className="flex items-center gap-1 text-sm text-muted-foreground">
-                <Image src={USDC_LOGO} alt="USDC" width={16} height={16} />
-                <span>USDC</span>
-              </div>
-            </div>
-            {amount > walletBalance && (
-              <p className="text-sm text-red-500">Amount exceeds your USDC wallet balance.</p>
-            )}
+        <div className="grid min-w-0 gap-4 py-4">
+          <div>
+            <TokenAmountInput
+              tokenLogoUrl={USDC_LOGO}
+              tokenSymbol="USDC"
+              amountString={amountString}
+              onAmountChange={setAmountFromString}
+              priceUSD={priceUSD}
+              availableText={`${formatTokenAmount(walletBalance, USDC_DECIMALS)} USDC`}
+              inputRef={amountInputRef}
+              onHalf={setHalf}
+              onMax={setMax}
+              isOverBalance={amount > walletBalance}
+            />
           </div>
 
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={setHalf}>
-              Half
-            </Button>
-            <Button variant="outline" size="sm" onClick={setMax}>
-              Max
-            </Button>
-          </div>
+          {amount > walletBalance && (
+            <p className="text-sm text-red-500">Amount exceeds your USDC wallet balance.</p>
+          )}
 
-          <div className="rounded-lg border p-3 text-sm text-muted-foreground space-y-1">
-            <p title={subaccountAddr}>Subaccount: {shortenHex(subaccountAddr)}</p>
+          <div className="min-w-0 truncate font-mono text-xs text-muted-foreground" title={subaccountAddr}>
+            Subaccount: {shortenHex(subaccountAddr)}
           </div>
         </div>
 
         <Separator />
 
-        <DialogFooter className="mt-2">
-          <Button variant="outline" onClick={onClose} disabled={isSubmitting}>
+        <div className="mt-2 flex min-w-0 flex-col gap-2 sm:flex-row sm:justify-end">
+          <Button
+            variant="outline"
+            onClick={onClose}
+            disabled={isSubmitting}
+            className="h-10 w-full sm:w-auto"
+          >
             Cancel
           </Button>
           <Button
             onClick={handleDeposit}
             disabled={!isValid || isSubmitting || !signAndSubmitTransaction || amount === BigInt(0)}
+            className="h-10 w-full sm:w-auto"
           >
             {isSubmitting ? (
               <>
@@ -209,7 +197,7 @@ export function DecibelDepositModal({
               'Deposit'
             )}
           </Button>
-        </DialogFooter>
+        </div>
       </DialogContent>
     </Dialog>
   );

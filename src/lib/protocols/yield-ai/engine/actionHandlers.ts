@@ -3,12 +3,9 @@ import { evaluateCondition } from "./conditionEvaluator";
 import { getSwapPairParams } from "./swapPairTable";
 import { getHyperionAmountOut } from "./hyperionQuote";
 import {
-  executeClaimApt,
   executeClaimEchelonReward,
   executeDepositEchelonFa,
-  executeDepositToMoar,
   executeSwapFaToFa,
-  executeWithdrawMoarFull,
 } from "@/lib/protocols/yield-ai/vaultExecutor";
 import { toCanonicalAddress } from "@/lib/utils/addressNormalization";
 
@@ -27,10 +24,9 @@ export async function executeAction(options: {
   ctx: StrategyRunContext;
   action: StrategyRunContext["mergedActions"][number];
   state: ComputedState;
-  adapters: { echelonAdapterAddress: string; moarAdapterAddress: string };
-  moarAptClaimLines: Array<{ reward_id: string; farming_identifier: string; claimable_amount: string }>;
+  adapters: { echelonAdapterAddress: string };
 }): Promise<ActionExecutionResult> {
-  const { ctx, action, state, adapters, moarAptClaimLines } = options;
+  const { ctx, action, state, adapters } = options;
 
   if (!action.enabled) {
     return { actionId: action.id, executed: false, skippedReason: "disabled", txHashes: [], txCount: 0 };
@@ -48,21 +44,6 @@ export async function executeAction(options: {
 
   const txHashes: string[] = [];
   let txCount = 0;
-
-  if (action.type === "claimMoarReward") {
-    for (const line of moarAptClaimLines) {
-      const r = await executeClaimApt({
-        safeAddress: ctx.safeAddress,
-        adapterAddress: adapters.moarAdapterAddress,
-        rewardId: line.reward_id,
-        farmingIdentifier: line.farming_identifier,
-        dryRun: ctx.dryRun,
-      });
-      txCount += 1;
-      if (!ctx.dryRun && r.hash) txHashes.push(r.hash);
-    }
-    return { actionId: action.id, executed: true, txHashes, txCount };
-  }
 
   if (action.type === "claimEchelonReward") {
     const rewardCoinType = action.params?.rewardCoinType;
@@ -157,46 +138,6 @@ export async function executeAction(options: {
       safeAddress: ctx.safeAddress,
       adapterAddress: adapters.echelonAdapterAddress,
       marketObj,
-      amountBaseUnits: amount,
-      dryRun: ctx.dryRun,
-    });
-    txCount += 1;
-    if (!ctx.dryRun && r.hash) txHashes.push(r.hash);
-    return { actionId: action.id, executed: true, txHashes, txCount };
-  }
-
-  if (action.type === "withdrawMoarFull") {
-    const assetKey = action.params?.asset;
-    if (typeof assetKey !== "string") throw new Error("withdrawMoarFull missing params.asset");
-    const asset = ctx.config.global.assets[assetKey];
-    if (!asset) throw new Error(`withdrawMoarFull unknown asset ${assetKey}`);
-
-    const r = await executeWithdrawMoarFull({
-      safeAddress: ctx.safeAddress,
-      adapterAddress: adapters.moarAdapterAddress,
-      metadataAddress: asset.metadata,
-      dryRun: ctx.dryRun,
-    });
-    txCount += 1;
-    if (!ctx.dryRun && r.hash) txHashes.push(r.hash);
-    return { actionId: action.id, executed: true, txHashes, txCount };
-  }
-
-  if (action.type === "depositMoar") {
-    const assetKey = action.params?.asset;
-    if (typeof assetKey !== "string") throw new Error("depositMoar missing params.asset");
-    const asset = ctx.config.global.assets[assetKey];
-    if (!asset) throw new Error(`depositMoar unknown asset ${assetKey}`);
-
-    const amount = state.safeBalance[assetKey] ?? 0n;
-    if (amount <= 0n) {
-      return { actionId: action.id, executed: false, skippedReason: "amount<=0", txHashes: [], txCount: 0 };
-    }
-
-    const r = await executeDepositToMoar({
-      safeAddress: ctx.safeAddress,
-      adapterAddress: adapters.moarAdapterAddress,
-      metadataAddress: asset.metadata,
       amountBaseUnits: amount,
       dryRun: ctx.dryRun,
     });

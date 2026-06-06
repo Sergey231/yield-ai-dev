@@ -3,12 +3,13 @@
  */
 
 import tokenList from "@/lib/data/tokenList.json";
+import { WBTC_FA_METADATA_MAINNET } from "@/lib/constants/yieldAiVault";
 import type { Token } from "@/lib/types/panora";
 
 export const HEDGE_FA = {
   USDC: "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b",
   APT: "0xa",
-  WBTC: "0x81214a80d82035a190fcb76b6ff3c0145161c3a9f33d137f2bbaee4cfec8a387",
+  WBTC: WBTC_FA_METADATA_MAINNET,
 } as const;
 
 /** Extra slack for fees / rounding (0.5%) plus small fixed USDC. */

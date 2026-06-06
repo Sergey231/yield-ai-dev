@@ -1,8 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import Image from "next/image";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useSolanaPortfolio } from "@/hooks/useSolanaPortfolio";
 import { formatCurrency, formatNumber } from "@/lib/utils/numberFormat";
@@ -16,7 +14,6 @@ import {
   NATIVE_MINT,
 } from "@solana/spl-token";
 import { useToast } from "@/components/ui/use-toast";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { ToastAction } from "@/components/ui/toast";
 import { JupiterDepositModal } from "@/components/ui/jupiter-deposit-modal";
 import { JupiterWithdrawModal } from "@/components/ui/jupiter-withdraw-modal";
@@ -37,6 +34,7 @@ import {
   signAndSubmitSolanaTransaction,
 } from "@/lib/mobile/nativeBridge";
 import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
+import { LendingProtocolCard, type LendingProtocolCardSection, type LendingProtocolCardTile, type LendingProtocolCardRow } from "@/shared/ProtocolCard";
 
 type JupiterPosition = {
   token?: {
@@ -341,6 +339,189 @@ export function JupiterPositions() {
     // Total assets should include net value of borrow positions (collateral - debt).
     return totalValue + (borrowSummary.collateral - borrowSummary.liabilities);
   }, [borrowSummary.collateral, borrowSummary.liabilities, totalValue]);
+
+  type JupiterLendingRow = LendingProtocolCardRow & {
+    _kind: "supply" | "borrowCollateral" | "borrowDebt";
+    _position?: JupiterPosition;
+  };
+
+  const { tiles, sections } = useMemo(() => {
+    const supplyRows: JupiterLendingRow[] = positions.map((position, index) => {
+      const symbol = position?.token?.asset?.uiSymbol || position?.token?.asset?.symbol || "Unknown";
+      const decimals = toNumber(position?.token?.asset?.decimals, 0);
+      const amount = toNumber(position?.underlyingAssets, 0) / Math.pow(10, decimals || 0);
+      const price = toNumber(position?.token?.asset?.price, 0);
+      const valueUsd = amount * price;
+      const logoUrl = getPreferredJupiterTokenIcon(symbol, position?.token?.asset?.logoUrl);
+      const aprPct = toNumber(position?.token?.totalRate, 0) / 100;
+      return {
+        id: `jupiter-supply-${position?.token?.asset?.address || symbol}-${index}`,
+        symbol,
+        tokenLogoUrl: logoUrl || undefined,
+        value: formatCurrency(valueUsd, 2),
+        amountLabel: formatNumber(amount, 6),
+        priceLabel: formatCurrency(price, 4),
+        aprLabel: Number.isFinite(aprPct) ? `${formatNumber(aprPct, 2)}%` : undefined,
+        positionType: "supply",
+        _kind: "supply",
+        _position: position,
+      };
+    });
+
+    // Borrow positions: render both the collateral (Supply leg) and the debt (Borrow leg),
+    // like the previous custom UI did.
+    const borrowSupplyRows: JupiterLendingRow[] = [];
+    const borrowDebtRows: JupiterLendingRow[] = [];
+    borrowPositions.forEach((p, index) => {
+      const supplyUsd = typeof p.supplyUsd === "number" && Number.isFinite(p.supplyUsd) ? p.supplyUsd : 0;
+      const borrowUsd = typeof p.borrowUsd === "number" && Number.isFinite(p.borrowUsd) ? p.borrowUsd : 0;
+      if (!(borrowUsd > 0)) return;
+
+      const supplySym = p.supplyToken?.symbol || "Supply";
+      const borrowSym = p.borrowToken?.symbol || "Borrow";
+      const supplyLogo = p.supplyToken?.logoUrl;
+      const borrowLogo = p.borrowToken?.logoUrl;
+
+      const supplyAmount = Number(p.supplyAmount);
+      const borrowAmount = Number(p.borrowAmount);
+
+      const supplyPrice =
+        typeof p.supplyToken?.priceUsd === "number" && Number.isFinite(p.supplyToken.priceUsd)
+          ? p.supplyToken.priceUsd
+          : Number.isFinite(supplyAmount) && supplyAmount > 0
+            ? supplyUsd / supplyAmount
+            : 0;
+      const borrowPrice =
+        typeof p.borrowToken?.priceUsd === "number" && Number.isFinite(p.borrowToken.priceUsd)
+          ? p.borrowToken.priceUsd
+          : Number.isFinite(borrowAmount) && borrowAmount > 0
+            ? borrowUsd / borrowAmount
+            : 0;
+
+      const supplyAprPct = typeof p.supplyAprPct === "number" && Number.isFinite(p.supplyAprPct) ? p.supplyAprPct : 0;
+      const borrowAprPct = typeof p.borrowAprPct === "number" && Number.isFinite(p.borrowAprPct) ? p.borrowAprPct : 0;
+
+      const idBase = `jupiter-borrow-${p.vaultId ?? "v"}-${p.nftId ?? "n"}-${index}`;
+      borrowSupplyRows.push({
+        id: `${idBase}-supply`,
+        symbol: supplySym,
+        tokenLogoUrl: supplyLogo || undefined,
+        value: formatCurrency(supplyUsd, 2),
+        amountLabel: Number.isFinite(supplyAmount) ? formatNumber(supplyAmount, 6) : String(p.supplyAmount ?? ""),
+        priceLabel: formatCurrency(supplyPrice, 4),
+        aprLabel: Number.isFinite(supplyAprPct) ? `${formatNumber(supplyAprPct, 2)}%` : undefined,
+        isCollateral: true,
+        positionType: "supply",
+        _kind: "borrowCollateral",
+      });
+      borrowDebtRows.push({
+        id: `${idBase}-debt`,
+        symbol: borrowSym,
+        tokenLogoUrl: borrowLogo || undefined,
+        value: formatCurrency(borrowUsd, 2),
+        amountLabel: Number.isFinite(borrowAmount) ? formatNumber(borrowAmount, 6) : String(p.borrowAmount ?? ""),
+        priceLabel: formatCurrency(borrowPrice, 4),
+        aprLabel: Number.isFinite(borrowAprPct) ? `${formatNumber(borrowAprPct, 2)}%` : undefined,
+        positionType: "borrow",
+        _kind: "borrowDebt",
+      });
+    });
+
+    // Supply section should include both standalone supplies and collateral legs.
+    const supplyRowsAll = [...supplyRows, ...borrowSupplyRows];
+    const borrowRows = borrowDebtRows;
+
+    // Weighted APR for supply positions (USD-weighted).
+    const supplyWeightedAprPct = (() => {
+      let wsum = 0;
+      let vsum = 0;
+      for (const row of supplyRowsAll) {
+        const valueUsd = toNumber(String(row.value).replace(/[^0-9.\-]/g, ""), 0);
+        const aprStr = (row.aprLabel ?? "").replace("%", "").trim();
+        const apr = toNumber(aprStr, 0);
+        if (!(valueUsd > 0) || !Number.isFinite(apr)) continue;
+        wsum += valueUsd * apr;
+        vsum += valueUsd;
+      }
+      return vsum > 0 ? wsum / vsum : null;
+    })();
+
+    const borrowWeightedAprPct = (() => {
+      let wsum = 0;
+      let vsum = 0;
+      for (const row of borrowRows) {
+        const valueUsd = toNumber(String(row.value).replace(/[^0-9.\-]/g, ""), 0);
+        const aprStr = (row.aprLabel ?? "").replace("%", "").trim();
+        const apr = toNumber(aprStr, 0);
+        if (!(valueUsd > 0) || !Number.isFinite(apr)) continue;
+        wsum += valueUsd * apr;
+        vsum += valueUsd;
+      }
+      return vsum > 0 ? wsum / vsum : null;
+    })();
+
+    const sectionsLocal: Array<LendingProtocolCardSection<JupiterLendingRow>> = [
+      {
+        id: "supply",
+        title: `Your Supplies (${supplyRowsAll.length})`,
+        titleShort: `Supplies (${supplyRowsAll.length})`,
+        meta: [
+          {
+            label: "Balance",
+            labelShort: "Bal.",
+            value: formatCurrency(totalValue + borrowSummary.collateral, 2),
+          },
+          {
+            label: "APR",
+            value: supplyWeightedAprPct != null ? `${supplyWeightedAprPct.toFixed(2)}%` : "—",
+          },
+        ],
+        rows: supplyRowsAll,
+        defaultOpen: true,
+      },
+      {
+        id: "borrow",
+        title: `Your Borrows (${borrowRows.length})`,
+        titleShort: `Borrows (${borrowRows.length})`,
+        meta: [
+          { label: "Liability", labelShort: "Debt", value: formatCurrency(borrowSummary.liabilities, 2) },
+          {
+            label: "APR",
+            value: borrowWeightedAprPct != null ? `${borrowWeightedAprPct.toFixed(2)}%` : "—",
+          },
+        ],
+        rows: borrowRows,
+        defaultOpen: true,
+      },
+    ];
+
+    const tilesLocal: LendingProtocolCardTile[] = [
+      {
+        id: "total-assets",
+        title: "Total Assets",
+        titleShort: "Assets",
+        icon: "wallet",
+        value: formatCurrency(totalAssetsValue, 2),
+        subRows: [
+          { label: "Supply:", labelShort: "Sup.", value: formatCurrency(totalValue + borrowSummary.collateral, 2) },
+          { label: "Collateral:", labelShort: "Coll.", value: formatCurrency(borrowSummary.collateral, 2) },
+          { label: "Debt:", labelShort: "Debt", value: formatCurrency(borrowSummary.liabilities, 2) },
+        ],
+      },
+      {
+        id: "health",
+        title: "Health Factor",
+        titleShort: "Health",
+        icon: "health",
+        value:
+          typeof borrowSummary.health === "number" && Number.isFinite(borrowSummary.health)
+            ? borrowSummary.health.toFixed(2)
+            : "—",
+      },
+    ];
+
+    return { tiles: tilesLocal, sections: sectionsLocal };
+  }, [positions, borrowPositions, borrowSummary.collateral, borrowSummary.liabilities, borrowSummary.health, totalAssetsValue, totalValue]);
 
   const selectedMeta = useMemo(() => {
     const p = selectedPosition;
@@ -1431,374 +1612,33 @@ export function JupiterPositions() {
 
   return (
     <div className="w-full min-w-0 max-w-full space-y-4 text-base">
-      <ScrollArea className="w-full min-w-0 max-w-full">
-        {(() => {
-          type RenderBlock =
-            | { kind: "supply"; sortKey: number; idx: number; position: JupiterPosition }
-            | { kind: "borrow"; sortKey: number; borrow: (typeof borrowPositions)[number] };
+      <LendingProtocolCard<JupiterLendingRow>
+        headerVariant="minimal"
+        tiles={tiles}
+        sections={sections}
+        onDeposit={(row) => {
+          if (row._kind !== "supply" || !row._position) return;
+          void onDepositClick(row._position);
+        }}
+        onWithdraw={(row) => {
+          if (row._kind !== "supply" || !row._position) return;
+          void onWithdrawClick(row._position);
+        }}
+        withdrawDisabled={isWithdrawing || isDepositing}
+      />
 
-          const blocks: RenderBlock[] = [];
-          positions.forEach((position, idx) => {
-            const decimals = toNumber(position?.token?.asset?.decimals, 0);
-            const amount = toNumber(position?.underlyingAssets, 0) / Math.pow(10, decimals || 0);
-            const price = toNumber(position?.token?.asset?.price, 0);
-            const value = amount * price;
-            blocks.push({ kind: "supply", sortKey: value, idx, position });
-          });
-
-          borrowPositions.forEach((p) => {
-            const supplyUsd = typeof p.supplyUsd === "number" && Number.isFinite(p.supplyUsd) ? p.supplyUsd : 0;
-            const borrowUsd = typeof p.borrowUsd === "number" && Number.isFinite(p.borrowUsd) ? p.borrowUsd : 0;
-            if (!(borrowUsd > 0)) return;
-            blocks.push({ kind: "borrow", sortKey: supplyUsd, borrow: p });
-          });
-
-          blocks.sort((a, b) => (b.sortKey ?? 0) - (a.sortKey ?? 0));
-
-          return blocks.map((block) => {
-            if (block.kind === "supply") {
-              const position = block.position;
-              const idx = block.idx;
-            const symbol = position?.token?.asset?.uiSymbol || position?.token?.asset?.symbol || "Unknown";
-            const decimals = toNumber(position?.token?.asset?.decimals, 0);
-            const amount = toNumber(position?.underlyingAssets, 0) / Math.pow(10, decimals || 0);
-            const price = toNumber(position?.token?.asset?.price, 0);
-            const value = amount * price;
-            const logoUrl = getPreferredJupiterTokenIcon(symbol, position?.token?.asset?.logoUrl);
-            const aprPct = toNumber(position?.token?.totalRate, 0) / 100;
-
-            return (
-              <div
-                key={`jupiter-${idx}`}
-                className="box-border w-full min-w-0 max-w-full overflow-hidden border-b p-3 last:border-b-0 sm:p-4"
-              >
-              <div className="hidden sm:flex justify-between items-center">
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 relative">
-                    {logoUrl ? (
-                      <Image src={logoUrl} alt={symbol} width={32} height={32} className="object-contain" unoptimized />
-                    ) : null}
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <div className="text-lg font-semibold">{symbol}</div>
-                      <Badge
-                        variant="outline"
-                        className="bg-green-500/10 text-green-600 border-green-500/20 text-xs font-normal px-2 py-0.5 h-5"
-                      >
-                        Supply
-                      </Badge>
-                    </div>
-                    <div className="text-base text-muted-foreground mt-0.5">{formatCurrency(price, 4)}</div>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <div className="flex items-center justify-end gap-2 mb-1">
-                    <Badge
-                      variant="outline"
-                      className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-xs font-normal px-2 py-0.5 h-5"
-                    >
-                      APR: {formatNumber(aprPct, 2)}%
-                    </Badge>
-                    <div className="text-lg font-bold text-right w-24">{formatCurrency(value, 2)}</div>
-                  </div>
-                  <div className="text-base text-muted-foreground font-semibold">{formatNumber(amount, 4)}</div>
-                  <div className="flex gap-2 mt-2 justify-end">
-                    <Button onClick={() => onDepositClick(position)} size="sm" variant="default" className="h-10">
-                      Deposit
-                    </Button>
-                    <Button onClick={() => onWithdrawClick(position)} size="sm" variant="outline" className="h-10">
-                      Withdraw
-                    </Button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="block sm:hidden w-full min-w-0 max-w-full space-y-3">
-                <div className="flex w-full min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-2">
-                  <div className="relative h-8 w-8 shrink-0">
-                    {logoUrl ? (
-                      <Image src={logoUrl} alt={symbol} width={32} height={32} className="object-contain" unoptimized />
-                    ) : null}
-                  </div>
-                  <div className="min-w-0 max-w-full break-words text-base font-semibold [overflow-wrap:anywhere]">
-                    {symbol}
-                  </div>
-                  <Badge
-                    variant="outline"
-                    className="h-4 shrink-0 border-green-500/20 bg-green-500/10 px-1.5 py-0.5 text-xs font-normal text-green-600"
-                  >
-                    Supply
-                  </Badge>
-                  <Badge
-                    variant="outline"
-                    className="h-4 shrink-0 border-blue-500/20 bg-blue-500/10 px-1.5 py-0.5 text-xs font-normal text-blue-600"
-                  >
-                    APR: {formatNumber(aprPct, 2)}%
-                  </Badge>
-                  <span className="text-sm text-muted-foreground">{formatCurrency(price, 4)}</span>
-                  <span className="text-base font-semibold">{formatCurrency(value, 2)}</span>
-                  <span className="min-w-0 max-w-full break-all text-sm text-muted-foreground">
-                    {formatNumber(amount, 6)}
-                  </span>
-                </div>
-                <div className="flex w-full min-w-0 max-w-full flex-col gap-2">
-                  <Button
-                    onClick={() => onDepositClick(position)}
-                    size="sm"
-                    variant="default"
-                    className="box-border h-10 w-full min-w-0 max-w-full"
-                  >
-                    Deposit
-                  </Button>
-                  <Button
-                    onClick={() => onWithdrawClick(position)}
-                    size="sm"
-                    variant="outline"
-                    className="box-border h-10 w-full min-w-0 max-w-full"
-                  >
-                    Withdraw
-                  </Button>
-                </div>
-              </div>
-              </div>
-            );
-            }
-
-            // Borrow block: keep Supply->Borrow adjacency internally, but sort by Supply leg.
-            const p = block.borrow;
-            const supplySym = p.supplyToken?.symbol || "Supply";
-            const borrowSym = p.borrowToken?.symbol || "Borrow";
-            const supplyLogo = p.supplyToken?.logoUrl;
-            const borrowLogo = p.borrowToken?.logoUrl;
-            const supplyUsd = typeof p.supplyUsd === "number" && Number.isFinite(p.supplyUsd) ? p.supplyUsd : 0;
-            const borrowUsd = typeof p.borrowUsd === "number" && Number.isFinite(p.borrowUsd) ? p.borrowUsd : 0;
-            const supplyAmount = Number(p.supplyAmount);
-            const borrowAmount = Number(p.borrowAmount);
-            const supplyAprPct = typeof p.supplyAprPct === "number" && Number.isFinite(p.supplyAprPct) ? p.supplyAprPct : 0;
-            const borrowAprPct = typeof p.borrowAprPct === "number" && Number.isFinite(p.borrowAprPct) ? p.borrowAprPct : 0;
-            const key = `jup-borrow-${p.vaultId ?? "v"}-${p.nftId ?? "n"}`;
-
-            return (
-              <div key={key} className="box-border w-full min-w-0 max-w-full overflow-hidden border-b p-3 last:border-b-0 sm:p-4">
-                {/* Supply (hover like other supply positions) */}
-                <div className="rounded-md">
-                  <div className="hidden sm:flex justify-between items-center py-2">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 relative">
-                        {supplyLogo ? (
-                          <Image src={supplyLogo} alt={supplySym} width={32} height={32} className="object-contain" unoptimized />
-                        ) : null}
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <div className="text-lg font-semibold">{supplySym}</div>
-                          <Badge
-                            variant="outline"
-                            className="bg-green-500/10 text-green-600 border-green-500/20 text-xs font-normal px-2 py-0.5 h-5"
-                          >
-                            Supply
-                          </Badge>
-                        </div>
-                        <div className="text-base text-muted-foreground mt-0.5">
-                          {formatCurrency(
-                            typeof p.supplyToken?.priceUsd === "number" && Number.isFinite(p.supplyToken.priceUsd)
-                              ? p.supplyToken.priceUsd
-                              : Number.isFinite(supplyAmount) && supplyAmount > 0
-                                ? supplyUsd / supplyAmount
-                                : 0,
-                            4
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="flex items-center justify-end gap-2 mb-1">
-                        <Badge
-                          variant="outline"
-                          className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-xs font-normal px-2 py-0.5 h-5"
-                        >
-                          APR: {formatNumber(supplyAprPct, 2)}%
-                        </Badge>
-                        <div className="text-lg font-bold text-right w-24">{formatCurrency(supplyUsd, 2)}</div>
-                      </div>
-                      <div className="text-base text-muted-foreground font-semibold">
-                        {Number.isFinite(supplyAmount) ? formatNumber(supplyAmount, 6) : p.supplyAmount}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="block sm:hidden w-full min-w-0 max-w-full space-y-2 py-2">
-                    <div className="flex w-full min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-2">
-                      <div className="relative h-8 w-8 shrink-0">
-                        {supplyLogo ? (
-                          <Image src={supplyLogo} alt={supplySym} width={32} height={32} className="object-contain" unoptimized />
-                        ) : null}
-                      </div>
-                      <div className="min-w-0 max-w-full break-words text-base font-semibold [overflow-wrap:anywhere]">
-                        {supplySym}
-                      </div>
-                      <Badge
-                        variant="outline"
-                        className="h-4 shrink-0 border-green-500/20 bg-green-500/10 px-1.5 py-0.5 text-xs font-normal text-green-600"
-                      >
-                        Supply
-                      </Badge>
-                      <span className="text-sm text-muted-foreground">
-                        {formatCurrency(
-                          typeof p.supplyToken?.priceUsd === "number" && Number.isFinite(p.supplyToken.priceUsd)
-                            ? p.supplyToken.priceUsd
-                            : Number.isFinite(supplyAmount) && supplyAmount > 0
-                              ? supplyUsd / supplyAmount
-                              : 0,
-                          4
-                        )}
-                      </span>
-                      <span className="text-base font-semibold">
-                        {formatCurrency(
-                          typeof p.supplyToken?.priceUsd === "number" && Number.isFinite(p.supplyToken.priceUsd)
-                            ? p.supplyToken.priceUsd
-                            : Number.isFinite(supplyAmount) && supplyAmount > 0
-                              ? supplyUsd / supplyAmount
-                              : 0,
-                          4
-                        )}
-                      </span>
-                      <span className="min-w-0 max-w-full break-all text-sm text-muted-foreground">
-                        {Number.isFinite(supplyAmount) ? formatNumber(supplyAmount, 6) : p.supplyAmount}
-                      </span>
-                      <span className="text-xs text-blue-600 border border-blue-500/20 bg-blue-500/10 rounded px-1.5 py-0.5 h-4 inline-flex items-center">
-                        APR: {formatNumber(supplyAprPct, 2)}%
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Borrow (minimal offset, no hover) */}
-                <div className="mt-1">
-                  <div>
-                    <div className="hidden sm:flex justify-between items-center py-2">
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 relative">
-                          {borrowLogo ? (
-                            <Image src={borrowLogo} alt={borrowSym} width={32} height={32} className="object-contain" unoptimized />
-                          ) : null}
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <div className="text-lg font-semibold">{borrowSym}</div>
-                            <Badge
-                              variant="outline"
-                              className="bg-pink-500/10 text-pink-600 border-pink-500/20 text-xs font-normal px-2 py-0.5 h-5"
-                            >
-                              Borrow
-                            </Badge>
-                          </div>
-                          <div className="text-base text-muted-foreground mt-0.5">
-                            {formatCurrency(
-                              typeof p.borrowToken?.priceUsd === "number" && Number.isFinite(p.borrowToken.priceUsd)
-                                ? p.borrowToken.priceUsd
-                                : Number.isFinite(borrowAmount) && borrowAmount > 0
-                                  ? borrowUsd / borrowAmount
-                                  : 0,
-                              4
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="flex items-center justify-end gap-2 mb-1">
-                          <Badge
-                            variant="outline"
-                            className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-xs font-normal px-2 py-0.5 h-5"
-                          >
-                            APR: {formatNumber(borrowAprPct, 2)}%
-                          </Badge>
-                          <div className="text-lg font-bold text-right w-24">{formatCurrency(borrowUsd, 2)}</div>
-                        </div>
-                        <div className="text-base text-muted-foreground font-semibold">
-                          {Number.isFinite(borrowAmount) ? formatNumber(borrowAmount, 6) : p.borrowAmount}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="block sm:hidden w-full min-w-0 max-w-full space-y-2 py-2">
-                      <div className="flex w-full min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-2">
-                        <div className="relative h-8 w-8 shrink-0">
-                          {borrowLogo ? (
-                            <Image src={borrowLogo} alt={borrowSym} width={32} height={32} className="object-contain" unoptimized />
-                          ) : null}
-                        </div>
-                        <div className="min-w-0 max-w-full break-words text-base font-semibold [overflow-wrap:anywhere]">
-                          {borrowSym}
-                        </div>
-                        <Badge
-                          variant="outline"
-                          className="h-4 shrink-0 border-pink-500/20 bg-pink-500/10 px-1.5 py-0.5 text-xs font-normal text-pink-600"
-                        >
-                          Borrow
-                        </Badge>
-                        <span className="text-sm text-muted-foreground">{formatCurrency(borrowUsd, 2)}</span>
-                        <span className="text-base font-semibold">{formatCurrency(borrowUsd, 2)}</span>
-                        <span className="min-w-0 max-w-full break-all text-sm text-muted-foreground">
-                          {Number.isFinite(borrowAmount) ? formatNumber(borrowAmount, 6) : p.borrowAmount}
-                        </span>
-                        <span className="text-xs text-blue-600 border border-blue-500/20 bg-blue-500/10 rounded px-1.5 py-0.5 h-4 inline-flex items-center">
-                          APR: {formatNumber(borrowAprPct, 2)}%
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {typeof p.healthFactor === "number" && Number.isFinite(p.healthFactor) ? (
-                    <div>
-                      <AccountHealthSummary
-                        accountHealth={p.healthFactor}
-                        collateral={supplyUsd}
-                        liabilities={borrowUsd}
-                        border="none"
-                        compact
-                        showHelp
-                      />
-                    </div>
-                  ) : typeof (p as any)?.jupiter?.positionHealthPct === "number" &&
-                    Number.isFinite((p as any).jupiter.positionHealthPct) ? (
-                    <div className="pt-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-lg font-semibold">Account Health:</span>
-                        <span className="text-2xl font-bold">
-                          {formatNumber((p as any).jupiter.positionHealthPct, 1)}%
-                        </span>
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            );
-          });
-        })()}
-
-      </ScrollArea>
-
-      {/* Don't block the page on first load. */}
       {positions.length === 0 && borrowPositions.length === 0 && loading ? (
         <div className="text-muted-foreground">Loading positions...</div>
       ) : positions.length === 0 && borrowPositions.length === 0 && !loading ? (
         <div className="text-muted-foreground">No positions on Jupiter.</div>
       ) : null}
 
-      {/* While borrow loads (can be slow on cold start), show a bottom indicator. */}
       {borrowPositions.length === 0 && jupiterBorrowQuery.isFetching ? (
         <div className="flex items-center justify-center gap-2 text-muted-foreground">
           <span>Loading borrow positions...</span>
           <Loader2 className="h-4 w-4 animate-spin" />
         </div>
       ) : null}
-
-      <div className="flex items-center justify-between pt-6 pb-6">
-        <span className="text-xl">Total assets in Jupiter:</span>
-        <span className="text-xl text-primary font-bold">{formatCurrency(totalAssetsValue, 2)}</span>
-      </div>
 
       <JupiterDepositModal
         isOpen={isDepositOpen}

@@ -6,15 +6,34 @@ import {
   DELTA_NEUTRAL_GET_POSITION_VIEW,
   parseDeltaNeutralPositionView,
 } from "@/lib/protocols/yield-ai/deltaNeutralViews";
-import { fetchIndexerFaBalanceForMetadataAtOwner } from "@/lib/protocols/yield-ai/indexerFaBalance";
+import { fetchFaBalanceIndexerOrOnChain } from "@/lib/protocols/yield-ai/indexerFaBalance";
 import { submitSwapFaToFaWithFallbackLimits } from "@/lib/protocols/yield-ai/swapFaToFa";
+import {
+  APT_FA_METADATA_MAINNET,
+  WBTC_FA_METADATA_MAINNET,
+  XBTC_FA_METADATA_MAINNET,
+  decibelSpotFeeTierForMetadata,
+} from "@/lib/protocols/decibel/deltaNeutralSpotAssets";
 
 const DECIBEL_API_BASE_URL =
   process.env.DECIBEL_API_BASE_URL || "https://api.testnet.aptoslabs.com/decibel";
 const APTOS_API_KEY = process.env.APTOS_API_KEY;
 
 const DEFAULT_SWAP_DEADLINE_SECS = 120;
-const XBTC_USDC_FEE_TIER = 1;
+function feeTierForSpotMetadata(spotMetadata: string): number {
+  return decibelSpotFeeTierForMetadata(spotMetadata);
+}
+
+const ALLOWED_RESIDUAL_METADATA = [
+  normalizeAddress(APT_FA_METADATA_MAINNET),
+  normalizeAddress(WBTC_FA_METADATA_MAINNET),
+  normalizeAddress(XBTC_FA_METADATA_MAINNET),
+];
+
+function isAllowedResidualMetadata(spotMetadata: string): boolean {
+  const n = normalizeAddress(toCanonicalAddress(spotMetadata));
+  return ALLOWED_RESIDUAL_METADATA.includes(n);
+}
 
 function parseAllowlist(): string[] {
   const raw = process.env.DECIBEL_EXECUTOR_ALLOWLIST || "";
@@ -46,19 +65,23 @@ export async function POST(request: NextRequest) {
     const ownerRaw = typeof body.owner === "string" ? body.owner.trim() : "";
     const safeRaw = typeof body.safeAddress === "string" ? body.safeAddress.trim() : "";
     const subRaw = typeof body.subaccount === "string" ? body.subaccount.trim() : "";
+    const explicitSpotRaw = typeof body.spotMetadata === "string" ? body.spotMetadata.trim() : "";
 
-    if (!ownerRaw || !safeRaw || !subRaw) {
+    if (!ownerRaw || !safeRaw) {
       return NextResponse.json(
-        { success: false, error: "owner, safeAddress, and subaccount are required" },
+        { success: false, error: "owner and safeAddress are required" },
         { status: 400 }
       );
     }
 
     const canonicalOwner = toCanonicalAddress(ownerRaw);
     const canonicalSafe = toCanonicalAddress(safeRaw);
-    const canonicalSubaccount = toCanonicalAddress(subRaw);
-    if (!canonicalOwner.startsWith("0x") || !canonicalSafe.startsWith("0x") || !canonicalSubaccount.startsWith("0x")) {
+    if (!canonicalOwner.startsWith("0x") || !canonicalSafe.startsWith("0x")) {
       return NextResponse.json({ success: false, error: "Invalid address" }, { status: 400 });
+    }
+    const canonicalSubaccount = subRaw ? toCanonicalAddress(subRaw) : "";
+    if (canonicalSubaccount && !canonicalSubaccount.startsWith("0x")) {
+      return NextResponse.json({ success: false, error: "Invalid subaccount" }, { status: 400 });
     }
 
     const allowlist = parseAllowlist();
@@ -81,42 +104,84 @@ export async function POST(request: NextRequest) {
       },
     });
     const dn = parseDeltaNeutralPositionView(rawView);
-    if (!dn || !dn.recordExists) {
-      return NextResponse.json({ success: false, error: "No delta-neutral record for this safe" }, { status: 404 });
-    }
-    if (dn.isOpen) {
-      return NextResponse.json(
-        { success: false, error: "Position is still open on-chain; use Close delta-neutral instead" },
-        { status: 400 }
-      );
-    }
-    if (normalizeAddress(dn.decibelSubaccount) !== normalizeAddress(canonicalSubaccount)) {
-      return NextResponse.json(
-        { success: false, error: "subaccount does not match on-chain delta-neutral snapshot" },
-        { status: 400 }
-      );
+
+    let spotMetadata: string;
+    if (explicitSpotRaw) {
+      // Orphan-residual sweep: caller specifies which asset to convert. Allows clearing
+      // spot tokens that no longer match the current DN-record (e.g. APT left over after
+      // an APT cycle that was followed by a fresh BTC open).
+      if (!isAllowedResidualMetadata(explicitSpotRaw)) {
+        return NextResponse.json(
+          { success: false, error: "Asset not allowed for residual sweep (WBTC, xBTC, or APT only)" },
+          { status: 400 }
+        );
+      }
+      spotMetadata = toCanonicalAddress(explicitSpotRaw);
+      // Refuse to unwind a still-active hedge: explicit metadata must NOT equal the active DN spot.
+      if (
+        dn?.recordExists &&
+        dn.isOpen &&
+        normalizeAddress(toCanonicalAddress(dn.spotAssetMetadata)) === normalizeAddress(spotMetadata)
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "This asset is the active delta-neutral hedge; close the position before converting it.",
+          },
+          { status: 400 }
+        );
+      }
+    } else {
+      // Default behaviour: derive from on-chain DN-record (closed-state residual).
+      if (!dn || !dn.recordExists) {
+        return NextResponse.json(
+          { success: false, error: "No delta-neutral record for this safe" },
+          { status: 404 }
+        );
+      }
+      if (dn.isOpen) {
+        return NextResponse.json(
+          { success: false, error: "Position is still open on-chain; use Close delta-neutral instead" },
+          { status: 400 }
+        );
+      }
+      if (
+        canonicalSubaccount &&
+        normalizeAddress(dn.decibelSubaccount) !== normalizeAddress(canonicalSubaccount)
+      ) {
+        return NextResponse.json(
+          { success: false, error: "subaccount does not match on-chain delta-neutral snapshot" },
+          { status: 400 }
+        );
+      }
+      spotMetadata = toCanonicalAddress(dn.spotAssetMetadata);
+      const metaNorm = normalizeAddress(spotMetadata);
+      if (!metaNorm || metaNorm === normalizeAddress("0x0")) {
+        return NextResponse.json(
+          { success: false, error: "On-chain record has no spot metadata; cannot swap" },
+          { status: 400 }
+        );
+      }
     }
 
-    const spotMetadata = toCanonicalAddress(dn.spotAssetMetadata);
-    const metaNorm = normalizeAddress(spotMetadata);
-    if (!metaNorm || metaNorm === normalizeAddress("0x0")) {
-      return NextResponse.json(
-        { success: false, error: "On-chain record has no spot metadata; cannot swap" },
-        { status: 400 }
-      );
-    }
-
-    const spotBalanceBaseUnits = await fetchIndexerFaBalanceForMetadataAtOwner(
-      canonicalSafe,
-      spotMetadata,
-      APTOS_API_KEY
-    );
+    const balanceLookup = await fetchFaBalanceIndexerOrOnChain({
+      aptos,
+      owner: canonicalSafe,
+      metadata: spotMetadata,
+      aptosApiKey: APTOS_API_KEY,
+    });
+    const spotBalanceBaseUnits = balanceLookup.amount;
     if (spotBalanceBaseUnits <= BigInt(0)) {
       return NextResponse.json(
         {
           success: false,
           error:
-            "Indexer reports zero spot FA for this safe and recorded metadata. Wait for indexer sync or verify the canonical safe address.",
+            "Both indexer and on-chain primary store report zero spot FA for this safe and recorded metadata. Verify the canonical safe address.",
+          debug: {
+            indexer: balanceLookup.indexer.toString(),
+            onchain: balanceLookup.onchain.toString(),
+          },
         },
         { status: 409 }
       );
@@ -126,7 +191,7 @@ export async function POST(request: NextRequest) {
     const { swapTxHash, usedSqrtPriceLimit } = await submitSwapFaToFaWithFallbackLimits({
       network,
       safe: canonicalSafe,
-      feeTier: XBTC_USDC_FEE_TIER,
+      feeTier: feeTierForSpotMetadata(spotMetadata),
       amountIn: spotBalanceBaseUnits,
       fromMetadata: spotMetadata,
       toMetadata: USDC_FA_METADATA_MAINNET,
@@ -139,11 +204,12 @@ export async function POST(request: NextRequest) {
       data: {
         owner: canonicalOwner,
         safeAddress: canonicalSafe,
-        subaccount: canonicalSubaccount,
+        subaccount: canonicalSubaccount || null,
         spotSwapAmountInBaseUnits: spotBalanceBaseUnits.toString(),
         swapTxHash,
         spotMetadata,
         usedSqrtPriceLimit: usedSqrtPriceLimit.toString(),
+        explicitMetadata: Boolean(explicitSpotRaw),
       },
     });
   } catch (error) {

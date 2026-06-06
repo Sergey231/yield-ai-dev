@@ -184,6 +184,15 @@ export const queryKeys = {
         ['protocols', 'decibel', 'delegation', subaccount] as const,
       accountBalance: (address: string) =>
         ['protocols', 'decibel', 'accountBalance', address] as const,
+      referralDashboard: (address: string) =>
+        ['protocols', 'decibel', 'referralDashboard', address] as const,
+      approvedBuilderFee: (subaccount: string, builder: string) =>
+        ['protocols', 'decibel', 'approvedBuilderFee', subaccount, builder] as const,
+      builderConfig: () => ['protocols', 'decibel', 'builderConfig'] as const,
+      deltaNeutralOpenPreview: (asset: string, sizeUsd: number | string) =>
+        ['protocols', 'decibel', 'deltaNeutralOpenPreview', asset, sizeUsd] as const,
+      deltaNeutralClosePreview: (safeAddress: string) =>
+        ['protocols', 'decibel', 'deltaNeutralClosePreview', safeAddress] as const,
     },
 
     /**
@@ -219,12 +228,18 @@ export const queryKeys = {
         ['protocols', 'yield-ai', 'depositHistory', safeAddress, currentValue ?? null] as const,
       deltaNeutralState: (safeAddress: string) =>
         ['protocols', 'yield-ai', 'deltaNeutralState', safeAddress] as const,
+      deltaNeutralHistory: (safeAddress: string, limit?: number) =>
+        ['protocols', 'yield-ai', 'deltaNeutralHistory', safeAddress, limit ?? 100] as const,
       safePaused: (safeAddress: string) =>
         ['protocols', 'yield-ai', 'safePaused', safeAddress] as const,
       strategyRegistryInitialized: () =>
         ['protocols', 'yield-ai', 'strategyRegistryInitialized'] as const,
       safeActiveStrategy: (safeAddress: string) =>
         ['protocols', 'yield-ai', 'safeActiveStrategy', safeAddress] as const,
+      vaultFaSwapLimits: (safeAddress: string) =>
+        ['protocols', 'yield-ai', 'vaultFaSwapLimits', safeAddress] as const,
+      hyperionLpPositions: (safeAddress: string) =>
+        ['protocols', 'yield-ai', 'hyperionLpPositions', safeAddress] as const,
     },
 
     /**
@@ -336,6 +351,40 @@ export const queryKeys = {
         ['protocols', 'kamino', 'userPositions', address] as const,
       rewards: (address: string) =>
         ['protocols', 'kamino', 'rewards', address] as const,
+    },
+
+    /**
+     * Meteora (Solana) DLMM protocol specific queries
+     */
+    meteora: {
+      userPositions: (address: string) =>
+        ['protocols', 'meteora', 'userPositions', address] as const,
+    },
+
+    /**
+     * Raydium (Solana) protocol specific queries
+     */
+    raydium: {
+      userPositions: (address: string) =>
+        ['protocols', 'raydium', 'userPositions', address] as const,
+    },
+
+    /**
+     * Orca (Solana) Whirlpool protocol specific queries
+     */
+    orca: {
+      userPositions: (address: string) =>
+        ['protocols', 'orca', 'userPositions', address] as const,
+    },
+
+    /**
+     * Tramplin (Solana) protocol specific queries
+     */
+    tramplin: {
+      userPositions: (address: string) =>
+        ['protocols', 'tramplin', 'userPositions', address] as const,
+      rewards: (address: string) =>
+        ['protocols', 'tramplin', 'rewards', address] as const,
     },
   },
 

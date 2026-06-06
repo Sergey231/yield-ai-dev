@@ -82,13 +82,17 @@ export async function GET(request: NextRequest) {
           : false,
     }));
 
+    // Match by account + expiration only. We previously also filtered by
+    // `permission_type` substring (`trade` + `perp|vault`) but Decibel's
+    // permission strings drift over time and that caused stale "Not delegated"
+    // states even when the on-chain `delegate_trading_to_for_subaccount` row
+    // was active. Our codebase has only one delegation path (the trading-grant
+    // entry), so if executor is in the delegations list and not expired, the
+    // grant is for trading.
     const isDelegatedToExecutor = !!executorAddress && normalizedDelegations.some((item) => {
       if (!item.delegatedAccount) return false;
       if (normalizeAddress(item.delegatedAccount) !== normalizeAddress(executorAddress)) return false;
-      if (item.isExpired) return false;
-      const permission = item.permissionType.toLowerCase();
-      // Check for trade permissions - 'TradeVaultTokens' or permissions containing both 'trade' and 'perp'
-      return permission.includes('trade') && (permission.includes('perp') || permission.includes('vault'));
+      return !item.isExpired;
     });
 
     return NextResponse.json({

@@ -19,6 +19,8 @@ export interface ProtocolCardProps {
   protocol: Protocol;
   totalValue: number;
   totalRewardsUsd?: string;
+  /** Override the "💰 Total rewards:" row label (e.g. "💰 Total fees:" for DLMM protocols). */
+  rewardsLabel?: string;
   /** Optional tooltip body (e.g. per-token breakdown), shown when hovering the rewards row. */
   rewardsBreakdown?: ReactNode;
   /** Optional extra block inside expanded content (below positions). */
@@ -35,12 +37,17 @@ export interface ProtocolCardProps {
   className?: string;
   /** When false, hides the "Manage positions" button (e.g. on portfolio grid). Default true. */
   showManageButton?: boolean;
+  /** Override section key used by `useCollapsible`. Default: protocol.key. */
+  sectionKey?: string;
+  /** Optional dim suffix shown after the protocol name (e.g. strategy label or safe slice). */
+  titleSuffix?: string;
 }
 
 export function ProtocolCard({
   protocol,
   totalValue,
   totalRewardsUsd,
+  rewardsLabel = "💰 Total rewards:",
   rewardsBreakdown,
   extraContent,
   belowRewardsContent,
@@ -49,10 +56,12 @@ export function ProtocolCard({
   isLoading = false,
   className,
   showManageButton = true,
+  sectionKey: sectionKeyProp,
+  titleSuffix,
 }: ProtocolCardProps) {
   const { formatUsd, maskUsd } = usePortfolioAmountsPrivacy();
   const { isExpanded, toggleSection } = useCollapsible();
-  const sectionKey = protocol.key;
+  const sectionKey = sectionKeyProp ?? protocol.key;
   const expanded = isExpanded(sectionKey);
   const logoUrl = protocol.logoUrl;
 
@@ -72,6 +81,9 @@ export function ProtocolCard({
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
           {logoUrl ? <Image src={logoUrl} alt="" width={20} height={20} className={styles.logo} unoptimized /> : null}
           <span className={styles.title}>{protocol.name}</span>
+          {titleSuffix ? (
+            <span className="text-xs text-muted-foreground truncate">· {titleSuffix}</span>
+          ) : null}
           <ProtocolClosureNotice protocolKey={protocol.key} stopPropagation className="-ml-1" />
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
@@ -108,7 +120,7 @@ export function ProtocolCard({
                       <span
                         className={rewardsEchelonStyle ? "text-sm text-muted-foreground" : styles.totalRewardsLabel}
                       >
-                        💰 Total rewards:
+                        {rewardsLabel}
                       </span>
                       <span
                         className={rewardsEchelonStyle ? "text-sm font-medium" : styles.totalRewardsValue}
@@ -136,7 +148,7 @@ export function ProtocolCard({
                 <span
                   className={rewardsEchelonStyle ? "text-sm text-muted-foreground" : styles.totalRewardsLabel}
                 >
-                  💰 Total rewards:
+                  {rewardsLabel}
                 </span>
                 <span className={rewardsEchelonStyle ? "text-sm font-medium" : styles.totalRewardsValue}>
                   {maskUsd(totalRewardsUsd)}

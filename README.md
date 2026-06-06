@@ -4,60 +4,10 @@ A comprehensive DeFi investment dashboard built on the Aptos blockchain that all
 
 ---
 
-## 🏆 Solana PRIVACY HACK — Private Bridge
-
-We built a **privacy-preserving cross-chain bridge** from Solana to Aptos, integrated into the Yield AI app.
-
-**Problem:** Standard bridges let anyone link a user's Solana wallet to their destination wallet on another chain—a real security and privacy risk for users moving meaningful capital.
-
-**Approach:** We add a **privacy layer on top of a standard, battle-tested bridge** (Circle CCTP), instead of replacing core infrastructure.
-
-### 🔧 Architecture
-
-| Layer | Implementation |
-|-------|----------------|
-| **Asset** | USDC |
-| **Bridge** | Circle CCTP |
-| **Privacy** | Privacy Cache Private Pool |
-| **Account abstraction** | Aptos X-Chain Derived Accounts |
-
-### 📋 Flow
-
-1. **Private pool deposit (Solana)** — User deposits USDC into a Privacy Cache Private Pool by signing with their Solana wallet. Funds are pooled and the direct link between the main Solana wallet and the future bridge tx is broken.
-2. **Temporary Solana wallet (browser-only)** — A temporary Solana wallet is generated only in the browser: session-only, no keys stored or sent to the backend. It acts as an unlinkable intermediary.
-3. **CCTP bridge** — From this temporary wallet we run a standard Circle CCTP bridge to Aptos. Privacy comes from isolating the bridge source from the user's main Solana account; the user can bridge immediately or later to reduce timing correlation.
-4. **Derived Aptos account** — On Aptos, funds land in a **X-Chain Derived Account** (Aptos Labs). The user does not create or manage an Aptos wallet; the account is deterministically derived from the Solana wallet in the browser and is not observable on-chain.
-5. **Post-bridge (Aptos)** — USDC sits in a private Aptos account with no on-chain link to the original Solana wallet. The user can deposit into yield protocols, swap, and use DeFi on Aptos as usual.
-
-### ✅ What we built (hackathon)
-
-- End-to-end private Solana → Aptos bridge flow
-- Privacy Cache Private Pool as pre-bridge privacy layer
-- Browser-only temporary wallet generation
-- Circle CCTP integration for USDC
-- X-Chain Derived Account integration (no separate Aptos wallet setup)
-- Frontend that hides the complexity from the user
-
-### 🚀 How to use
-
-1. Open **[Private Bridge](/privacy-bridge)**.
-2. Connect your **Solana wallet** (deposit/withdraw in the private pool).
-3. Connect or derive your **Aptos account** (receiver of USDC after mint).
-4. **Deposit:** Enter USDC amount and deposit into the private pool (sign message for encryption).
-5. **Withdraw → Aptos:** Enter amount → withdraw from pool to tmp wallet → automatic CCTP burn on Solana and mint on Aptos (attestation ~10–30 s).
-
-### 🔮 Future extensions
-
-- Confidential reverse bridge (Aptos → Solana)
-- Private deposits into lending and yield protocols on both chains
-- Stronger resistance to timing and amount-based correlation
-
----
-
 ## 🚀 Features
 
 ### Core Functionality
-- **Multi-Protocol Support**: Connect and manage positions across 6 major DeFi protocols (including Echelon)
+- **Multi-Protocol Support**: Connect and manage positions across **14+** integrated Aptos DeFi protocols (plus Solana positions where applicable)
 - **Real-time Portfolio Tracking**: Monitor your assets and positions in real-time
 - **Yield Discovery**: Find the best APY opportunities across different protocols
 - **One-Click Deposits**: Seamless deposit functionality with native and external protocol integration
@@ -502,4 +452,3 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 See Public Wallet API usage guide:
 
 - [PUBLIC_API.md](./PUBLIC_API.md)
- 

@@ -156,7 +156,7 @@ export function SwapAndDepositStatusModal({ isOpen, onClose, provider = 'panora'
             recipient: userAddress,
           });
 
-          modifiedPayload = { ...payload, type_arguments: ['0x1::aptos_coin::AptosCoin'] };
+          modifiedPayload = payload;
         }
 
         // 2) Отправить payload через wallet-адаптер (с нормализацией имён полей)
@@ -645,4 +645,4 @@ export function SwapAndDepositStatusModal({ isOpen, onClose, provider = 'panora'
       </DialogContent>
     </Dialog>
   );
-} 
+}

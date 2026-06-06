@@ -3,6 +3,7 @@ import { toCanonicalAddress } from '@/lib/utils/addressNormalization';
 import {
   YIELD_AI_VAULT_MODULE,
   USDC_FA_METADATA_MAINNET,
+  USD1_FA_METADATA_MAINNET,
 } from '@/lib/constants/yieldAiVault';
 import { createErrorResponse, createSuccessResponse } from '@/lib/utils/http';
 
@@ -12,6 +13,13 @@ const USDC_DECIMALS = 6;
 
 const VAULT_DEPOSIT_FN = `${YIELD_AI_VAULT_MODULE}::deposit`;
 const VAULT_WITHDRAW_FN = `${YIELD_AI_VAULT_MODULE}::withdraw`;
+
+/**
+ * Stablecoins a user can fund the safe with. Both are 6-decimal and ≈ $1,
+ * so deposits/withdrawals are aggregated 1:1 into a single USD-denominated
+ * history (formatUsdc / PnL math below assume 6 decimals).
+ */
+const STABLE_DEPOSIT_ASSETS = [USDC_FA_METADATA_MAINNET, USD1_FA_METADATA_MAINNET];
 
 type Direction = 'deposit' | 'withdraw';
 
@@ -44,11 +52,11 @@ interface DepositHistorySummary {
 }
 
 const QUERY = `
-  query GetVaultUserFlows($safeAddress: String!, $usdcAsset: String!, $entryFunctions: [String!]!) {
+  query GetVaultUserFlows($safeAddress: String!, $stableAssets: [String!]!, $entryFunctions: [String!]!) {
     fungible_asset_activities(
       where: {
         owner_address: { _eq: $safeAddress }
-        asset_type: { _eq: $usdcAsset }
+        asset_type: { _in: $stableAssets }
         is_transaction_success: { _eq: true }
         entry_function_id_str: { _in: $entryFunctions }
       }
@@ -70,7 +78,7 @@ const QUERY = `
  * Returns chronological list of user deposit/withdraw operations for a Yield AI safe,
  * aggregated totals, and PnL / APR when currentValue is provided.
  *
- * currentValue — current total USD value of the safe (tokens + Moar positions + rewards).
+ * currentValue — current total USD value of the safe (tokens + protocol positions + rewards).
  * The client already computes this; passing it here avoids duplicate fetches.
  */
 export async function GET(request: NextRequest) {
@@ -99,7 +107,7 @@ export async function GET(request: NextRequest) {
         query: QUERY,
         variables: {
           safeAddress: address,
-          usdcAsset: USDC_FA_METADATA_MAINNET,
+          stableAssets: STABLE_DEPOSIT_ASSETS,
           entryFunctions: [VAULT_DEPOSIT_FN, VAULT_WITHDRAW_FN],
         },
       }),

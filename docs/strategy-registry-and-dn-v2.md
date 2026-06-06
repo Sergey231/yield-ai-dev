@@ -8,6 +8,9 @@ This document is for frontend engineers integrating the Yield AI Aptos package w
 If you need a product-level mental model (Safe + tags + automation), start here:
 - `docs/ai-agent-strategies.md`
 
+If you need V1 limitations and the best-effort heuristic for estimating spot close output:
+- `docs/delta-neutral-v1.md`
+
 > Conventions:
 > - `{pkg}` = your deployed Yield AI package address (e.g. `VITE_MODULE_ADDRESS`).
 > - `safe_address` is the **safe object address** returned by `vault::get_safe_address(owner, index)`.
@@ -172,6 +175,23 @@ Recommended sequencing:
 2) Executor calls `{pkg}::delta_neutral::record_open_v2(...)`.
 3) **User** (or executor) calls `{pkg}::strategy_registry::attach_strategy(safe, "dn-decibel-<asset>")`.
 
+#### Spot hedge sizing caveat
+
+The current executor estimates the spot leg with a Hyperion exact-out quote, but the vault executes the swap via `vault::execute_swap_fa_to_fa`, which is an exact-input path. In practice:
+
+- target output is derived from the filled Decibel short size, e.g. `filled_short_size` in WBTC base units
+- `amount_in` is `Hyperion exact-out amountIn + INPUT_BUFFER_BPS`
+- `amount_out_min` is only a lower safety floor, not a cap on how much spot can be bought
+- any input buffer or favorable tick movement is converted into extra spot inventory
+
+Observed WBTC result: a target short around `0.00127000 BTC` produced a safe spot balance around `0.00128256 WBTC`, roughly a 1% over-hedge. This is technically safe from an under-hedge perspective, but it is not a clean delta-neutral match.
+
+For V2 production behavior, prefer one of:
+
+1) Reduce or disable `INPUT_BUFFER_BPS` for WBTC and add an executor-side exact-in preflight quote immediately before submit, so expected output stays close to `filled_short_size`.
+2) Add a true exact-output swap path in the vault/adapter and record the exact input/output amounts.
+3) If exact-input remains the only available path, store both `target_spot_out` and `actual_spot_out` in V2 so UI and PnL can explicitly show the hedge mismatch.
+
 #### record_open_v2
 
 - **Entry**: `{pkg}::delta_neutral::record_open_v2`
@@ -234,6 +254,82 @@ Specifically:
 - the vault’s internal dispatch for `execute_deposit` is limited to the mock adapter route (Moar deposit path is blocked)
 
 Withdraw/claim paths may still exist for emergency exits, depending on your deployment version.
+
+---
+
+## Frontend backlog: DN position chart (Phase 2 follow-ups)
+
+The Position Summary block on Manage Position now embeds a Decibel candlestick chart (TradingView's `lightweight-charts` v5) collapsed by default, with the position's entry price drawn as a horizontal line. Source code: `src/components/decibel/decibel-chart.tsx`. Open items for future iterations:
+
+- **2.2 — Funding APR overlay.** Add a second pane below the price chart with funding rate history pulled from `/api/protocols/decibel/fundingRateHistory`. Lets the user see whether they entered when funding was rich and whether the trend is still favorable. Requires a `useDecibelFundingHistory(market, fromSec)` hook + a `LineSeries` with its own price scale on lightweight-charts. Estimate: 3-4h.
+- **2.3 — Open-time marker.** Use `createSeriesMarkers(series, [{ time, position: 'aboveBar', shape: 'arrowDown', color, text: 'Open' }])` (v5 helper) to anchor the entry visually. The horizontal entry-price line gives the price; the marker gives the moment. Estimate: 30 min.
+- **2.4 — Crosshair → unrealized PnL tooltip.** On `chart.subscribeCrosshairMove`, compute `(crosshairPrice − entry) × shortSize − (crosshairPrice − entry) × spotAmount` (≈ funding only, since it's a sized DN) and surface in a small overlay. Educational: shows the user "what would my PnL have been if I'd closed at this point." Estimate: 2-3h.
+- **2.5 — Timeframe toggles.** `1h / 4h / 1d / All` buttons that swap the `interval` and adjust `startTime`. Trivial — extend `DecibelChart` with an optional segmented control. Estimate: 1h.
+- **2.6 — Chart inline in close-position confirmation modal.** Same component, smaller footprint (200px), shows the user the price they're closing into. Builds confidence before signing. Estimate: 1h.
+
+All five items are additive — none need contract changes. The data sources (`/candlesticks`, `/fundingRateHistory`) already proxy through to Decibel's REST API.
+
+---
+
+## Future change: combined `init_vault_with_strategy` (one-tx onboarding)
+
+**Problem.** The Decibel AI agent onboarding currently requires the user to sign **two transactions**:
+
+1. `vault::init_vault_v2(...limits)` — creates the safe; the safe address is derived from `(owner, index)` and only becomes known after the tx executes.
+2. `strategy_registry::attach_strategy(safe_addr, strategy_id)` — tags the new safe as `decibel_delta_neutral`.
+
+Between (1) and (2) the frontend has to poll the indexer until the safe is observable so it can pass the freshly created `safe_addr` into `attach_strategy`. This adds latency, a second wallet popup, and a partial-failure mode where (1) succeeds but (2) is rejected/abandoned, leaving an untagged safe.
+
+**Proposal.** Add a new entry function on the Yield AI vault package that bundles both steps:
+
+```move
+public entry fun init_vault_with_strategy(
+    owner: &signer,
+    // existing init_vault_v2 limits
+    max_per_tx_usdc_base_units: u64,
+    max_daily_usdc_base_units: u64,
+    swap_max_per_tx_usdc_base_units: u64,
+    swap_max_daily_usdc_base_units: u64,
+    // new
+    strategy_id: vector<u8>,
+)
+```
+
+Inside the function:
+
+1. Create the safe resource account exactly as `init_vault_v2` does.
+2. Compute `safe_addr` from the just-created resource account.
+3. Call `strategy_registry::attach_strategy(safe_addr, strategy_id)` directly (same package or via friend, so no external call from the user).
+
+**Frontend impact (after deploy).** In `src/components/ui/yield-ai-safe-settings-form.tsx` the
+`handleCreateSafe` flow can be simplified to a single `signAndSubmitTransaction` call when
+`fixedStrategy` is set; the indexer-polling loop and the second tx branch become unreachable. The
+2-step progress UI (`Step 1/2 → Step 2/2`) and the “you will sign 2 transactions” copy become
+obsolete and can be removed.
+
+**Compatibility.** Pure additive change — `init_vault_v2` and `attach_strategy` keep their current signatures and remain callable for legacy flows.
+
+**Open question.** Whether the same entry should also accept `extras_u64` map upfront, so DN-specific numeric metadata (e.g. preferred market) can be set in the same tx. Probably yes; cheap to add.
+
+---
+
+## Future change: server-enforced safe-balance pre-check for DN open (M2)
+
+**Problem.** When the executor calls `delta_neutral::record_open` followed by the safe's swap path, the swap can revert with `EINSUFFICIENT_BALANCE` after the Decibel short has already been opened. The user sees a confusing partial state (short open on Decibel, no spot leg in the safe) and the recovery path requires the force-close flow we ship now.
+
+Root cause: Decibel lot-rounding + 50 bps pool fee + 20 bps input buffer + tick drift can make the swap input exceed the safe's USDC balance even when the executor's `availableToTradeUsdc` math passes. The Yield AI vault contract doesn't validate the swap input vs. the safe balance before submitting the inner swap call.
+
+**Proposal.** Add a safe-balance precondition inside the vault entry that wraps the swap (e.g. `vault::execute_swap_fa_to_fa` or its successor in V2):
+
+- Read the safe's USDC balance.
+- Require `safe_usdc_balance >= amount_in + small_dust_buffer` (e.g. 50_000 base units = $0.05).
+- Abort with a dedicated error code (e.g. `EVAULT_SAFE_INSUFFICIENT_BALANCE`) **before** any state changes happen on the safe or downstream protocols.
+
+**Why on-chain and not just executor-side.** The executor already estimates input size with a buffer, but the chain is the only source of truth for the safe's exact balance at execution time, and the abort needs to land before the swap call to avoid the partial-state outcome. With this guard the worst case is a clean revert, which the executor already handles by retrying or surfacing a friendly error.
+
+**Frontend impact.** Map the new error code in `parseTransactionError` so users see a clear "Safe doesn't have enough USDC for this swap; try a smaller size" instead of the generic `EINSUFFICIENT_BALANCE`. The current 2.5% reserve heuristic in `YieldAIPositions.maxSizeUsd` can stay as a UX guardrail.
+
+**Open question.** Should the same check live in `delta_neutral::record_open` to also block the Decibel short when the eventual swap would fail? That requires the contract to know the swap's `amount_in`, which V1 doesn't pass through. V2's `record_open_v2` could accept it as a parameter so the whole open is atomic.
 
 ---
 

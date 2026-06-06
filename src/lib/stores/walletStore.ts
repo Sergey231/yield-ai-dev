@@ -25,11 +25,7 @@ export interface ClaimableRewardsSummary {
   totalValue: number;
   protocols: {
     echelon: { value: number; count: number };
-    auro: { value: number; count: number };
     hyperion: { value: number; count: number };
-    meso: { value: number; count: number };
-    earnium: { value: number; count: number };
-    moar: { value: number; count: number };
   };
 }
 
@@ -40,6 +36,11 @@ const CACHE_TTL = {
   REWARDS: 30 * 1000,      // 30 seconds
   PRICES: 60 * 1000,       // 1 minute
 } as const;
+
+export const DIRECT_CLAIM_REWARD_PROTOCOLS = [
+  'echelon',
+  'hyperion',
+] as const;
 
 // If NEXT_PUBLIC_DEBUG_PROTOCOLS is set (e.g. "decibel" or "decibel,thala"), use only those protocols
 const getDebugProtocols = (): string[] | null => {
@@ -330,9 +331,14 @@ export const useWalletStore = create<WalletState>()(
             const debugProtocols = typeof process.env.NEXT_PUBLIC_DEBUG_PROTOCOLS === 'string'
               ? process.env.NEXT_PUBLIC_DEBUG_PROTOCOLS.split(',').map((p) => p.trim()).filter(Boolean)
               : null;
-            const defaultRewardProtocols = ['echelon', 'auro', 'hyperion', 'meso', 'earnium', 'moar'];
-            const protocolsToFetch = protocols ?? (debugProtocols?.length ? debugProtocols : defaultRewardProtocols);
-            const newRewards: ProtocolRewards = { ...state.rewards };
+            const defaultRewardProtocols = [...DIRECT_CLAIM_REWARD_PROTOCOLS];
+            const activeRewardProtocolSet = new Set<string>(DIRECT_CLAIM_REWARD_PROTOCOLS);
+            const protocolsToFetch = protocols ?? (
+              debugProtocols?.length
+                ? debugProtocols.filter((protocol) => activeRewardProtocolSet.has(protocol))
+                : defaultRewardProtocols
+            );
+            const newRewards: ProtocolRewards = protocols ? { ...state.rewards } : {};
             
             console.log('[WalletStore] Protocols to fetch:', protocolsToFetch);
             
@@ -730,10 +736,7 @@ export const useWalletStore = create<WalletState>()(
           console.log('[WalletStore] getClaimableRewardsSummary called');
           console.log('[WalletStore] Current rewards state:', {
             echelon: state.rewards.echelon,
-            auro: state.rewards.auro,
-            hyperion: state.rewards.hyperion,
-            meso: state.rewards.meso,
-            earnium: state.rewards.earnium
+            hyperion: state.rewards.hyperion
           });
           
           // DEBUG: Log all available prices (can be removed after testing)
@@ -790,131 +793,11 @@ export const useWalletStore = create<WalletState>()(
             }
           };
 
-          // Helper function to get Auro token prices directly from Panora
-          const getAuroTokenPrices = async (auroRewards: Record<string, any>) => {
-            try {
-              const { PanoraPricesService } = await import('@/lib/services/panora/prices');
-              const pricesService = PanoraPricesService.getInstance();
-              
-              // Collect unique token addresses from auro rewards
-              const addresses = new Set<string>();
-              Object.values(auroRewards).forEach((positionRewards: any) => {
-                if (positionRewards.collateral) {
-                  positionRewards.collateral.forEach((reward: any) => {
-                    if (reward?.key) {
-                      let cleanAddress = reward.key;
-                      if (cleanAddress.startsWith('@')) {
-                        cleanAddress = cleanAddress.slice(1);
-                      }
-                      if (!cleanAddress.startsWith('0x')) {
-                        cleanAddress = `0x${cleanAddress}`;
-                      }
-                      addresses.add(cleanAddress);
-                    }
-                  });
-                }
-                if (positionRewards.borrow) {
-                  positionRewards.borrow.forEach((reward: any) => {
-                    if (reward?.key) {
-                      let cleanAddress = reward.key;
-                      if (cleanAddress.startsWith('@')) {
-                        cleanAddress = cleanAddress.slice(1);
-                      }
-                      if (!cleanAddress.startsWith('0x')) {
-                        cleanAddress = `0x${cleanAddress}`;
-                      }
-                      addresses.add(cleanAddress);
-                    }
-                  });
-                }
-              });
-              
-              const uniqueAddresses = Array.from(addresses);
-              if (uniqueAddresses.length === 0) return {};
-              
-              console.log('[WalletStore] Fetching Auro prices for addresses:', uniqueAddresses);
-              const response = await pricesService.getPrices(1, uniqueAddresses);
-              
-              const prices: Record<string, string> = {};
-              if (response.data) {
-                response.data.forEach((price: any) => {
-                  if (price.tokenAddress) {
-                    prices[price.tokenAddress] = price.usdPrice;
-                  }
-                  if (price.faAddress) {
-                    prices[price.faAddress] = price.usdPrice;
-                  }
-                });
-              }
-              
-              console.log('[WalletStore] Auro prices fetched:', prices);
-              return prices;
-            } catch (error) {
-              console.error('[WalletStore] Error fetching Auro prices:', error);
-              return {};
-            }
-          };
-
-          // Helper function to get Earnium token prices directly from Panora
-          const getEarniumTokenPrices = async (earniumRewards: any[]) => {
-            try {
-              const { PanoraPricesService } = await import('@/lib/services/panora/prices');
-              const pricesService = PanoraPricesService.getInstance();
-              
-              // Collect unique token addresses from earnium rewards
-              const addresses = new Set<string>();
-              earniumRewards.forEach((pool: any) => {
-                if (pool.rewards && Array.isArray(pool.rewards)) {
-                  pool.rewards.forEach((reward: any) => {
-                    if (reward.tokenKey) {
-                      let cleanAddress = reward.tokenKey;
-                      if (cleanAddress.startsWith('@')) {
-                        cleanAddress = cleanAddress.slice(1);
-                      }
-                      if (!cleanAddress.startsWith('0x')) {
-                        cleanAddress = `0x${cleanAddress}`;
-                      }
-                      addresses.add(cleanAddress);
-                    }
-                  });
-                }
-              });
-              
-              const uniqueAddresses = Array.from(addresses);
-              if (uniqueAddresses.length === 0) return {};
-              
-              console.log('[WalletStore] Fetching Earnium prices for addresses:', uniqueAddresses);
-              const response = await pricesService.getPrices(1, uniqueAddresses);
-              
-              const prices: Record<string, string> = {};
-              if (response.data) {
-                response.data.forEach((price: any) => {
-                  if (price.tokenAddress) {
-                    prices[price.tokenAddress] = price.usdPrice;
-                  }
-                  if (price.faAddress) {
-                    prices[price.faAddress] = price.usdPrice;
-                  }
-                });
-              }
-              
-              console.log('[WalletStore] Earnium prices fetched:', prices);
-              return prices;
-            } catch (error) {
-              console.error('[WalletStore] Error fetching Earnium prices:', error);
-              return {};
-            }
-          };
-          
           const summary: ClaimableRewardsSummary = {
             totalValue: 0,
             protocols: {
               echelon: { value: 0, count: 0 },
-              auro: { value: 0, count: 0 },
               hyperion: { value: 0, count: 0 },
-              meso: { value: 0, count: 0 },
-              earnium: { value: 0, count: 0 },
-              moar: { value: 0, count: 0 }
             }
           };
           
@@ -1038,169 +921,6 @@ export const useWalletStore = create<WalletState>()(
             }
           });
           
-          // Process Auro rewards
-          const auroRewards = typeof state.rewards.auro === 'object' && !Array.isArray(state.rewards.auro) ? state.rewards.auro : {};
-          console.log('[WalletStore] Processing Auro rewards:', {
-            type: typeof auroRewards,
-            keys: Object.keys(auroRewards),
-            sample: Object.entries(auroRewards).slice(0, 2)
-          });
-          
-          // Get Auro token prices directly from Panora API
-          let auroPrices: Record<string, string> = {};
-          if (Object.keys(auroRewards).length > 0) {
-            auroPrices = await getAuroTokenPrices(auroRewards);
-          }
-          
-          // Auro rewards are structured as { positionAddress: { collateral: [], borrow: [] } }
-          Object.values(auroRewards).forEach((positionRewards: any) => {
-            if (positionRewards && typeof positionRewards === 'object') {
-              // Process collateral rewards
-              if (positionRewards.collateral && Array.isArray(positionRewards.collateral)) {
-                positionRewards.collateral.forEach((reward: any) => {
-                  if (reward && reward.key && reward.value && parseFloat(reward.value) > 0) {
-                    // Get token info to calculate proper amount
-                    try {
-                      const tokenList = require('@/lib/data/tokenList.json');
-                      
-                      // Clean the address from reward.key (it's a token address, not symbol)
-                      let cleanAddress = reward.key;
-                      if (cleanAddress.startsWith('@')) {
-                        cleanAddress = cleanAddress.slice(1);
-                      }
-                      if (!cleanAddress.startsWith('0x')) {
-                        cleanAddress = `0x${cleanAddress}`;
-                      }
-                      
-                      console.log(`[WalletStore] Processing Auro collateral reward:`, {
-                        key: reward.key,
-                        cleanAddress: cleanAddress,
-                        value: reward.value
-                      });
-                      
-                      // Find token by address
-                      const tokenInfo = tokenList.data.data.find((token: any) => 
-                        (token.tokenAddress === cleanAddress || token.faAddress === cleanAddress)
-                      );
-                      
-                      if (tokenInfo) {
-                        const decimals = tokenInfo.decimals || 8;
-                        const amount = parseFloat(reward.value) / Math.pow(10, decimals);
-                        
-                        // Check direct prices first, then fallback to store prices
-                        let price = '0';
-                        if (auroPrices[cleanAddress]) {
-                          price = auroPrices[cleanAddress];
-                          console.log(`[WalletStore] Found direct Auro price: ${price}`);
-                        } else if (state.prices[cleanAddress]) {
-                          price = state.prices[cleanAddress];
-                          console.log(`[WalletStore] Found store price: ${price}`);
-                        } else {
-                          console.log(`[WalletStore] No price found for address: ${cleanAddress}`);
-                        }
-                        
-                        if (parseFloat(price) > 0) {
-                          const value = amount * parseFloat(price);
-                          summary.protocols.auro.value += value;
-                          summary.protocols.auro.count++;
-                          console.log(`[WalletStore] Auro collateral reward processed:`, {
-                            token: tokenInfo.symbol,
-                            amount: amount,
-                            price: price,
-                            value: value
-                          });
-                        } else {
-                          console.log(`[WalletStore] Auro collateral reward skipped (no price):`, {
-                            token: tokenInfo.symbol,
-                            amount: amount,
-                            address: cleanAddress,
-                            reason: 'Price is 0 or not found'
-                          });
-                        }
-                      } else {
-                        console.log(`[WalletStore] No token info found for address: ${cleanAddress}`);
-                      }
-                    } catch (error) {
-                      console.warn('Failed to process Auro collateral reward:', reward.key, error);
-                    }
-                  }
-                });
-              }
-              
-              // Process borrow rewards
-              if (positionRewards.borrow && Array.isArray(positionRewards.borrow)) {
-                positionRewards.borrow.forEach((reward: any) => {
-                  if (reward && reward.key && reward.value && parseFloat(reward.value) > 0) {
-                    // Get token info to calculate proper amount
-                    try {
-                      const tokenList = require('@/lib/data/tokenList.json');
-                      
-                      // Clean the address from reward.key (it's a token address, not symbol)
-                      let cleanAddress = reward.key;
-                      if (cleanAddress.startsWith('@')) {
-                        cleanAddress = cleanAddress.slice(1);
-                      }
-                      if (!cleanAddress.startsWith('0x')) {
-                        cleanAddress = `0x${cleanAddress}`;
-                      }
-                      
-                      console.log(`[WalletStore] Processing Auro borrow reward:`, {
-                        key: reward.key,
-                        cleanAddress: cleanAddress,
-                        value: reward.value
-                      });
-                      
-                      // Find token by address
-                      const tokenInfo = tokenList.data.data.find((token: any) => 
-                        (token.tokenAddress === cleanAddress || token.faAddress === cleanAddress)
-                      );
-                      
-                      if (tokenInfo) {
-                        const decimals = tokenInfo.decimals || 8;
-                        const amount = parseFloat(reward.value) / Math.pow(10, decimals);
-                        
-                        // Check direct prices first, then fallback to store prices
-                        let price = '0';
-                        if (auroPrices[cleanAddress]) {
-                          price = auroPrices[cleanAddress];
-                          console.log(`[WalletStore] Found direct Auro price: ${price}`);
-                        } else if (state.prices[cleanAddress]) {
-                          price = state.prices[cleanAddress];
-                          console.log(`[WalletStore] Found store price: ${price}`);
-                        } else {
-                          console.log(`[WalletStore] No price found for address: ${cleanAddress}`);
-                        }
-                        
-                        if (parseFloat(price) > 0) {
-                          const value = amount * parseFloat(price);
-                          summary.protocols.auro.value += value;
-                          summary.protocols.auro.count++;
-                          console.log(`[WalletStore] Auro borrow reward processed:`, {
-                            token: tokenInfo.symbol,
-                            amount: amount,
-                            price: price,
-                            value: value
-                          });
-                        } else {
-                          console.log(`[WalletStore] Auro borrow reward skipped (no price):`, {
-                            token: tokenInfo.symbol,
-                            amount: amount,
-                            address: cleanAddress,
-                            reason: 'Price is 0 or not found'
-                          });
-                        }
-                      } else {
-                        console.log(`[WalletStore] No token info found for address: ${cleanAddress}`);
-                      }
-                    } catch (error) {
-                      console.warn('Failed to process Auro borrow reward:', reward.key, error);
-                    }
-                  }
-                });
-              }
-            }
-          });
-          
           // Process Hyperion rewards (calculate by positions, not individual rewards)
           const hyperionPositions = state.positions.hyperion || [];
           console.log('[WalletStore] Processing Hyperion positions:', {
@@ -1245,95 +965,6 @@ export const useWalletStore = create<WalletState>()(
               }
             }
           }
-          
-          // Process Meso rewards (array from API; already in USD per item)
-          const mesoRewards = Array.isArray(state.rewards.meso) ? state.rewards.meso : [];
-          console.log('[WalletStore] Processing Meso rewards:', {
-            count: mesoRewards.length,
-            sample: mesoRewards.slice(0, 2)
-          });
-          
-          if (Array.isArray(mesoRewards) && mesoRewards.length > 0) {
-            let mesoTotal = 0;
-            mesoRewards.forEach((reward: any) => {
-              const usd = typeof reward.usdValue === 'number' ? reward.usdValue : 0;
-              const amt = typeof reward.amount === 'number' ? reward.amount : 0;
-              // Count rewards by token amount > 0 to include sub-cent USD values
-              if (amt > 0) {
-                summary.protocols.meso.count += 1;
-              }
-              if (usd > 0) {
-                mesoTotal += usd;
-              }
-            });
-            summary.protocols.meso.value = mesoTotal;
-          }
-
-          // Process Earnium rewards (array of pools from API)
-          const earniumRewards = Array.isArray(state.rewards.earnium) ? state.rewards.earnium : [];
-          console.log('[WalletStore] Processing Earnium rewards:', {
-            count: earniumRewards.length,
-            sample: earniumRewards.slice(0, 2)
-          });
-
-          // Get Earnium token prices directly from Panora API
-          let earniumPrices: Record<string, string> = {};
-          if (earniumRewards.length > 0) {
-            earniumPrices = await getEarniumTokenPrices(earniumRewards);
-          }
-
-          earniumRewards.forEach((pool: any) => {
-            if (pool.rewards && Array.isArray(pool.rewards)) {
-              pool.rewards.forEach((reward: any) => {
-                if (reward.amount && reward.amount > 0) {
-                  // Clean the token address
-                  let cleanAddress = reward.tokenKey;
-                  if (cleanAddress.startsWith('@')) {
-                    cleanAddress = cleanAddress.slice(1);
-                  }
-                  if (!cleanAddress.startsWith('0x')) {
-                    cleanAddress = `0x${cleanAddress}`;
-                  }
-
-                  // Check direct prices first, then fallback to store prices
-                  let price = '0';
-                  if (earniumPrices[cleanAddress]) {
-                    price = earniumPrices[cleanAddress];
-                  } else if (state.prices[cleanAddress]) {
-                    price = state.prices[cleanAddress];
-                  }
-
-                  if (parseFloat(price) > 0) {
-                    const value = reward.amount * parseFloat(price);
-                    summary.protocols.earnium.value += value;
-                    summary.protocols.earnium.count++;
-                  }
-                }
-              });
-            }
-          });
-
-          // Process Moar rewards
-          const moarRewards = Array.isArray(state.rewards.moar) ? state.rewards.moar : [];
-          console.log('[WalletStore] Processing Moar rewards:', {
-            count: moarRewards.length,
-            sample: moarRewards.slice(0, 2)
-          });
-
-          moarRewards.forEach((reward: any) => {
-            if (reward.usdValue && reward.usdValue > 0) {
-              console.log(`[WalletStore] Processing Moar reward:`, {
-                symbol: reward.symbol,
-                amount: reward.amount,
-                usdValue: reward.usdValue,
-                farming_identifier: reward.farming_identifier,
-                reward_id: reward.reward_id
-              });
-
-              summary.protocols.moar.value += reward.usdValue;
-              summary.protocols.moar.count += 1;
-            }
-          });
           
           // Calculate total value
           summary.totalValue = Object.values(summary.protocols).reduce((sum: number, protocol: any) => sum + protocol.value, 0);
@@ -1486,4 +1117,4 @@ export const useWalletStore = create<WalletState>()(
       }
     )
   )
-); 
+);

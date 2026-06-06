@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect, useMemo, useRef } from 'react';
-import Image from 'next/image';
 import { ArrowLeftRight, Loader2, Info, AlertCircle, CheckCircle, XCircle, Copy, ExternalLink, Settings, X, Search, LineChart } from 'lucide-react';
 import {
   Dialog,
@@ -23,6 +22,7 @@ import {
   isYieldAiNativeAppNow,
   signAndSubmitSolanaTransaction,
 } from "@/lib/mobile/nativeBridge";
+import { submitAptosTransaction } from "@/lib/mobile/submitAptosTransaction";
 import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 import { Token } from '@/lib/types/panora';
 import tokenList from '@/lib/data/tokenList.json';
@@ -187,6 +187,39 @@ const SOLANA_SWAP_TOKENS: SolanaTokenStub[] = [
       "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/assets/EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v/logo.png",
   },
   {
+    name: "Tether USD",
+    symbol: "USDT",
+    decimals: 6,
+    tokenAddress: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    faAddress: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    logoUrl:
+      "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/assets/Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB/logo.png",
+  },
+  {
+    name: "PayPal USD",
+    symbol: "PYUSD",
+    decimals: 6,
+    tokenAddress: "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
+    faAddress: "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
+    logoUrl: "https://424565.fs1.hubspotusercontent-na1.net/hubfs/424565/PYUSDLOGO.png",
+  },
+  {
+    name: "USDS",
+    symbol: "USDS",
+    decimals: 6,
+    tokenAddress: "USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA",
+    faAddress: "USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA",
+    logoUrl: "https://ipfs.io/ipfs/QmTW9HWfb2wsQqEVJiixkQ73Nsfp2Rx4ESaDSiQ7ThwnFM",
+  },
+  {
+    name: "Ethena USDe",
+    symbol: "USDe",
+    decimals: 9,
+    tokenAddress: "DEkqHyPN7GMRJ5cArtQFAWefqbZb33Hyf6s5iCwjEonT",
+    faAddress: "DEkqHyPN7GMRJ5cArtQFAWefqbZb33Hyf6s5iCwjEonT",
+    logoUrl: "https://arweave.net/qeSnRm_FIyp_khPfmg8o1zQeGO4AczDaEKe8jEUOzL4",
+  },
+  {
     name: "Jupiter",
     symbol: "JUP",
     decimals: 6,
@@ -347,6 +380,54 @@ const SOLANA_SWAP_TOKENS: SolanaTokenStub[] = [
     tokenAddress: "XsqE9cRRpzxcGKDXj1BJ7Xmg4GRhZoyY1KpmGSxAWT2",
     faAddress: "XsqE9cRRpzxcGKDXj1BJ7Xmg4GRhZoyY1KpmGSxAWT2",
     logoUrl: "https://xstocks-metadata.backed.fi/logos/tokens/MCDx.png",
+  },
+  {
+    name: "Amazon xStock",
+    symbol: "AMZNx",
+    decimals: 8,
+    tokenAddress: "Xs3eBt7uRfJX8QUs4suhyU8p2M6DoUDrJyWBa8LLZsg",
+    faAddress: "Xs3eBt7uRfJX8QUs4suhyU8p2M6DoUDrJyWBa8LLZsg",
+    logoUrl: "https://xstocks-metadata.backed.fi/logos/tokens/AMZNx.png",
+  },
+  {
+    name: "Microsoft xStock",
+    symbol: "MSFTx",
+    decimals: 8,
+    tokenAddress: "XspzcW1PRtgf6Wj92HCiZdjzKCyFekVD8P5Ueh3dRMX",
+    faAddress: "XspzcW1PRtgf6Wj92HCiZdjzKCyFekVD8P5Ueh3dRMX",
+    logoUrl: "https://xstocks-metadata.backed.fi/logos/tokens/MSFTx.png",
+  },
+  {
+    name: "Coinbase xStock",
+    symbol: "COINx",
+    decimals: 8,
+    tokenAddress: "Xs7ZdzSHLU9ftNJsii5fCeJhoRWSC32SQGzGQtePxNu",
+    faAddress: "Xs7ZdzSHLU9ftNJsii5fCeJhoRWSC32SQGzGQtePxNu",
+    logoUrl: "https://xstocks-metadata.backed.fi/logos/tokens/COINx.png",
+  },
+  {
+    name: "Robinhood xStock",
+    symbol: "HOODx",
+    decimals: 8,
+    tokenAddress: "XsvNBAYkrDRNhA7wPHQfX3ZUXZyZLdnCQDfHZ56bzpg",
+    faAddress: "XsvNBAYkrDRNhA7wPHQfX3ZUXZyZLdnCQDfHZ56bzpg",
+    logoUrl: "https://xstocks-metadata.backed.fi/logos/tokens/HOODx.png",
+  },
+  {
+    name: "MicroStrategy xStock",
+    symbol: "MSTRx",
+    decimals: 8,
+    tokenAddress: "XsP7xzNPvEHS1m6qfanPUGjNmdnmsLKEoNAnHjdxxyZ",
+    faAddress: "XsP7xzNPvEHS1m6qfanPUGjNmdnmsLKEoNAnHjdxxyZ",
+    logoUrl: "https://xstocks-metadata.backed.fi/logos/tokens/MSTRx.png",
+  },
+  {
+    name: "Nasdaq xStock",
+    symbol: "QQQx",
+    decimals: 8,
+    tokenAddress: "Xs8S1uUs1zvS2p7iwtsG3b6fkhpvmwz4GYU3gWAmWHZ",
+    faAddress: "Xs8S1uUs1zvS2p7iwtsG3b6fkhpvmwz4GYU3gWAmWHZ",
+    logoUrl: "https://xstocks-metadata.backed.fi/logos/tokens/QQQx.png",
   },
   {
     name: "Tether Gold",
@@ -1527,7 +1608,8 @@ export function SwapModal({
       }
       return;
     }
-    if (!connected) {
+    const aptosNativeFlowActive = isNativeApp && !!userAddress;
+    if (!aptosNativeFlowActive && !connected) {
       setError('Wallet not connected. Please connect your wallet first.');
       return;
     }
@@ -1604,23 +1686,27 @@ export function SwapModal({
           console.log('Processed type arguments:', typeArguments);
           console.log('Function arguments (as is):', functionArguments);
 
-          console.log('Executing swap via signAndSubmitTransaction with Gas Station...');
+          console.log(
+            aptosNativeFlowActive
+              ? 'Executing swap via native Aptos bridge...'
+              : 'Executing swap via signAndSubmitTransaction...',
+          );
 
-          // Use signAndSubmitTransaction with global Gas Station transactionSubmitter from WalletProvider
-          // Gas Station will automatically sponsor the transaction (free for user)
-          if (!connected || !signAndSubmitTransaction) {
-            throw new Error('Wallet not connected');
-          }
-
-          const tx = await signAndSubmitTransaction({
-            data: {
-              function: txPayload.function as `${string}::${string}::${string}`,
-              typeArguments: typeArguments,
-              functionArguments: functionArguments
+          const tx = await submitAptosTransaction({
+            transaction: {
+              data: {
+                function: txPayload.function as `${string}::${string}::${string}`,
+                typeArguments: typeArguments,
+                functionArguments: functionArguments
+              },
+              options: {
+                maxGasAmount: 20000,
+              }
             },
-            options: {
-              maxGasAmount: 20000,
-            }
+            signAndSubmitTransaction: signAndSubmitTransaction as any,
+            connected,
+            address: userAddress,
+            isNativeApp,
           });
 
           setSwapResult({
@@ -2361,8 +2447,7 @@ export function SwapModal({
           {/* Header */}
           <div className="flex flex-col gap-3 px-4 pt-4 sm:flex-row sm:items-center sm:justify-between sm:px-5 sm:pt-5">
             <div className="flex min-w-0 items-center gap-2">
-              <Image src="/logo.png" alt="" width={28} height={28} className="rounded-full" />
-              <span className="min-w-0 truncate text-base font-semibold tracking-tight sm:overflow-visible sm:text-clip">
+              <span className="min-w-0 truncate text-base font-semibold tracking-tight">
                 {variantTitle ??
                   (chainSelection === "solana"
                     ? (gaslessSwapEnabled ? "Gasless Swap" : "Swap Tokens")
@@ -2740,7 +2825,7 @@ export function SwapModal({
                   <span className="text-sm font-medium text-amber-700 dark:text-amber-300">Swap cancelled</span>
                 </div>
                 {swapResult.error && (
-                  <div className="mt-1 text-xs text-amber-600 dark:text-amber-400">User rejected swap</div>
+                  <div className="mt-1 text-xs text-amber-600 dark:text-amber-400">{swapResult.error}</div>
                 )}
               </div>
             )}

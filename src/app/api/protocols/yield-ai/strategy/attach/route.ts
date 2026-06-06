@@ -26,10 +26,17 @@ export async function POST(request: NextRequest) {
     if (!safeAddress) {
       return NextResponse.json(createErrorResponse(new Error("safeAddress is required")), { status: 400 });
     }
-    if (strategyId !== "stablecoin_compound" && strategyId !== "decibel_delta_neutral") {
-      return NextResponse.json(createErrorResponse(new Error("strategyId must be stablecoin_compound or decibel_delta_neutral")), {
-        status: 400,
-      });
+    if (
+      strategyId !== "stablecoin_compound" &&
+      strategyId !== "decibel_delta_neutral" &&
+      strategyId !== "hyperion_lp"
+    ) {
+      return NextResponse.json(
+        createErrorResponse(
+          new Error("strategyId must be stablecoin_compound, decibel_delta_neutral or hyperion_lp")
+        ),
+        { status: 400 }
+      );
     }
 
     const res = await submitYieldAiExecutorEntryFunction({

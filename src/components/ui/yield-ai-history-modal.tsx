@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -18,6 +18,12 @@ interface YieldAiHistoryModalProps {
   onClose: () => void;
   safeAddress?: string;
   history: YieldAiDepositHistory | undefined;
+  operations?: {
+    txVersion: string;
+    timestamp: string;
+    label: string;
+    legs: Array<{ direction: "in" | "out"; assetLabel: string; amountHuman: string }>;
+  }[];
   currentValueUsd?: number | null;
 }
 
@@ -44,12 +50,14 @@ export function YieldAiHistoryModal({
   onClose,
   safeAddress,
   history,
+  operations,
   currentValueUsd,
 }: YieldAiHistoryModalProps) {
   const entries = history?.entries ?? [];
   const pnl = history?.pnlStats?.pnl ?? null;
   const apr = history?.pnlStats?.apr ?? null;
   const holdingDays = history?.pnlStats?.holdingDays ?? 0;
+  const [showCapitalTimeline, setShowCapitalTimeline] = useState(false);
 
   const timeline = useMemo((): TimelineRow[] => {
     if (entries.length === 0) return [];
@@ -98,7 +106,7 @@ export function YieldAiHistoryModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => (!open ? onClose() : undefined)}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="w-[calc(100vw-2rem)] sm:max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Deposit history</DialogTitle>
           <DialogDescription>
@@ -146,22 +154,86 @@ export function YieldAiHistoryModal({
 
           {timeline.length > 0 && (
             <div className="rounded-lg border bg-card p-3 space-y-2">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div className="text-sm font-medium">Capital timeline</div>
-                <div className="text-xs text-muted-foreground">
-                  Shows intervals used in APR calculation (days × running balance)
+                <div className="flex items-center gap-2">
+                  <div className="text-xs text-muted-foreground">
+                    Shows intervals used in APR calculation (days × running balance)
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 px-2"
+                    onClick={() => setShowCapitalTimeline((v) => !v)}
+                  >
+                    {showCapitalTimeline ? "Hide" : "Show"}
+                  </Button>
                 </div>
               </div>
-              <div className="space-y-1 text-xs">
-                {timeline.map((row, idx) => (
-                  <div key={idx} className="flex items-center justify-between gap-3">
-                    <div className="min-w-0 text-muted-foreground">
-                      {fmtDateTime(row.from)} → {fmtDateTime(row.to)}
+              {showCapitalTimeline ? (
+                <div className="space-y-1 text-xs">
+                  {timeline.map((row, idx) => (
+                    <div key={idx} className="flex items-center justify-between gap-3">
+                      <div className="min-w-0 text-muted-foreground">
+                        {fmtDateTime(row.from)} → {fmtDateTime(row.to)}
+                      </div>
+                      <div className="shrink-0 tabular-nums">
+                        {formatNumber(row.days, 2)}d × {formatNumber(row.balance, 6)} ={" "}
+                        {formatNumber(row.dollarDays, 2)}
+                      </div>
                     </div>
-                    <div className="shrink-0 tabular-nums">
-                      {formatNumber(row.days, 2)}d × {formatNumber(row.balance, 6)} ={" "}
-                      {formatNumber(row.dollarDays, 2)}
+                  ))}
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground italic">
+                  Hidden by default. Click “Show” to review.
+                </div>
+              )}
+            </div>
+          )}
+
+          {operations && operations.length > 0 && (
+            <div className="rounded-lg border overflow-hidden">
+              <div className="flex items-center justify-between gap-2 bg-muted px-3 py-2">
+                <div className="text-xs font-medium text-muted-foreground">Executor operations</div>
+                <div className="text-[11px] text-muted-foreground">
+                  swaps · claims · deposits
+                </div>
+              </div>
+              <div className="max-h-[260px] overflow-y-auto">
+                {operations.slice(0, 100).map((op) => (
+                  <div
+                    key={`${op.txVersion}-${op.timestamp}-${op.label}`}
+                    className="px-3 py-2 text-sm border-t space-y-1"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-xs text-muted-foreground">{fmtDateTime(op.timestamp)}</div>
+                        <div className="font-medium">{op.label}</div>
+                      </div>
+                      <a
+                        href={explorerTxUrl(op.txVersion)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="shrink-0 text-blue-600 hover:text-blue-800 underline text-xs"
+                      >
+                        View
+                      </a>
                     </div>
+                    {op.legs.length > 0 ? (
+                      <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                        {op.legs.map((leg, i) => (
+                          <span key={i} className="tabular-nums">
+                            <span className={leg.direction === "in" ? "text-green-600" : "text-destructive"}>
+                              {leg.direction === "in" ? "+" : "−"}
+                              {leg.amountHuman}
+                            </span>{" "}
+                            <span className="text-muted-foreground">{leg.assetLabel}</span>
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -218,7 +290,7 @@ export function YieldAiHistoryModal({
             </div>
           </div>
 
-          <div className="flex justify-end">
+          <div className="flex justify-end pt-1">
             <Button variant="outline" onClick={onClose}>
               Close
             </Button>

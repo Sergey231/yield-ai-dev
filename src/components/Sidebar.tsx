@@ -30,6 +30,10 @@ import { PositionsList as DecibelPositionsList } from "./protocols/decibel/Posit
 import { PositionsList as AptreePositionsList } from "./protocols/aptree/PositionsList";
 import { PositionsList as JupiterPositionsList } from "./protocols/jupiter/PositionsList";
 import { PositionsList as KaminoPositionsList } from "./protocols/kamino/PositionsList";
+import { PositionsList as MeteoraPositionsList } from "./protocols/meteora/PositionsList";
+import { PositionsList as RaydiumPositionsList } from "./protocols/raydium/PositionsList";
+import { PositionsList as OrcaPositionsList } from "./protocols/orca/PositionsList";
+import { PositionsList as TramplinPositionsList } from "./protocols/tramplin/PositionsList";
 import { PositionsList as YieldAIPositionsList } from "./protocols/yield-ai/PositionsList";
 import { useSolanaPortfolio } from "@/hooks/useSolanaPortfolio";
 import { ProtocolIcon } from "@/shared/ProtocolIcon/ProtocolIcon";
@@ -107,7 +111,6 @@ export default function Sidebar() {
     refresh: refreshSolana,
   } = useSolanaPortfolio({ overrideAddress: effectiveSolanaOverrideAddress });
   const [tokens, setTokens] = useState<Token[]>([]);
-  const [totalValue, setTotalValue] = useState(0);
   const [hyperionValue, setHyperionValue] = useState(0);
   const [echelonValue, setEchelonValue] = useState(0);
   const [ariesValue, setAriesValue] = useState(0);
@@ -127,6 +130,10 @@ export default function Sidebar() {
   const [yieldAIValue, setYieldAIValue] = useState(0);
   const [jupiterValue, setJupiterValue] = useState(0);
   const [kaminoValue, setKaminoValue] = useState(0);
+  const [meteoraValue, setMeteoraValue] = useState(0);
+  const [raydiumValue, setRaydiumValue] = useState(0);
+  const [orcaValue, setOrcaValue] = useState(0);
+  const [tramplinValue, setTramplinValue] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [checkingAptosProtocols, setCheckingAptosProtocols] = useState<string[]>([]);
   const [checkingSolanaProtocols, setCheckingSolanaProtocols] = useState<string[]>([]);
@@ -155,7 +162,7 @@ export default function Sidebar() {
     "APTree",
     "AI agent",
   ];
-  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino"];
+  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino", "Meteora", "Raydium", "Orca", "Tramplin"];
 
   // When set (e.g. "decibel" or "decibel,thala"), only these protocols are shown in the positions list
   const debugProtocolKeys =
@@ -198,7 +205,6 @@ export default function Sidebar() {
   const loadPortfolio = useCallback(async () => {
     if (!effectiveAptosAddress) {
       setTokens([]);
-      setTotalValue(0);
       return;
     }
 
@@ -219,13 +225,8 @@ export default function Sidebar() {
       setTokens(displayTokens);
 
       // Вычисляем общую стоимость из токенов
-      const total = displayTokens.reduce((sum, token) => {
-        return sum + (token.value ? parseFloat(token.value) : 0);
-      }, 0);
-      setTotalValue(total);
-    } catch (error) {
+    } catch {
       setTokens([]);
-      setTotalValue(0);
     } finally {
       setIsRefreshing(false);
     }
@@ -252,6 +253,10 @@ export default function Sidebar() {
     setYieldAIValue(0);
     setJupiterValue(0);
     setKaminoValue(0);
+    setMeteoraValue(0);
+    setRaydiumValue(0);
+    setOrcaValue(0);
+    setTramplinValue(0);
     if (effectiveAptosAddress) resetAptosChecking();
     if (solanaAddress) resetSolanaChecking();
     setRefreshKey((k) => k + 1);
@@ -351,6 +356,22 @@ export default function Sidebar() {
     setKaminoValue(Number.isFinite(value) ? value : 0);
   }, []);
 
+  const handleMeteoraValueChange = useCallback((value: number) => {
+    setMeteoraValue(Number.isFinite(value) ? value : 0);
+  }, []);
+
+  const handleRaydiumValueChange = useCallback((value: number) => {
+    setRaydiumValue(Number.isFinite(value) ? value : 0);
+  }, []);
+
+  const handleOrcaValueChange = useCallback((value: number) => {
+    setOrcaValue(Number.isFinite(value) ? value : 0);
+  }, []);
+
+  const handleTramplinValueChange = useCallback((value: number) => {
+    setTramplinValue(Number.isFinite(value) ? value : 0);
+  }, []);
+
   // Считаем сумму по кошельку
   const walletTotal = tokens.reduce((sum, token) => {
     const value = token.value ? parseFloat(token.value) : 0;
@@ -381,10 +402,14 @@ export default function Sidebar() {
   // Итоговая сумма
   const totalAssets = walletTotal + totalProtocolsValue;
 
-  // Solana total = wallet tokens value + protocol positions value (Jupiter/Kamino)
+  // Solana total = wallet tokens value + protocol positions value (Jupiter/Kamino/Tramplin)
   const solanaProtocolsTotal =
     (Number.isFinite(jupiterValue) ? jupiterValue : 0) +
-    (Number.isFinite(kaminoValue) ? kaminoValue : 0);
+    (Number.isFinite(kaminoValue) ? kaminoValue : 0) +
+    (Number.isFinite(meteoraValue) ? meteoraValue : 0) +
+    (Number.isFinite(raydiumValue) ? raydiumValue : 0) +
+    (Number.isFinite(orcaValue) ? orcaValue : 0) +
+    (Number.isFinite(tramplinValue) ? tramplinValue : 0);
   const solanaWalletTotal = Number.isFinite(solanaTotalValue) ? (solanaTotalValue ?? 0) : 0;
   const solanaTotalAssets = solanaWalletTotal + solanaProtocolsTotal;
   const solanaWalletTotalDisplay =
@@ -519,7 +544,15 @@ export default function Sidebar() {
               onMainnetValueChange={name === "Decibel" ? handleDecibelMainnetValueChange : undefined}
               onPositionsCheckComplete={() => {
                 const runId = aptosCheckRunId;
-                setCheckingAptosProtocols((prev) => (aptosCheckRunId === runId ? prev.filter((p) => p !== name) : prev));
+                setCheckingAptosProtocols((prev) => {
+                  if (aptosCheckRunId !== runId) return prev;
+                  // Idempotent: if name is already removed, return the same
+                  // reference so React bails (no extra render). This lets child
+                  // components fire onComplete defensively on every render
+                  // without driving an update loop.
+                  if (!prev.includes(name)) return prev;
+                  return prev.filter((p) => p !== name);
+                });
               }}
             />
           ));
@@ -585,6 +618,66 @@ export default function Sidebar() {
                 onPositionsCheckComplete={() => {
                   const runId = solanaCheckRunId;
                   setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Kamino") : prev));
+                }}
+              />
+            ),
+          },
+          {
+            name: "Meteora" as const,
+            value: meteoraValue,
+            component: (
+              <MeteoraPositionsList
+                key="Meteora"
+                address={solanaProtocolsAddress ?? undefined}
+                onPositionsValueChange={handleMeteoraValueChange}
+                onPositionsCheckComplete={() => {
+                  const runId = solanaCheckRunId;
+                  setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Meteora") : prev));
+                }}
+              />
+            ),
+          },
+          {
+            name: "Raydium" as const,
+            value: raydiumValue,
+            component: (
+              <RaydiumPositionsList
+                key="Raydium"
+                address={solanaProtocolsAddress ?? undefined}
+                onPositionsValueChange={handleRaydiumValueChange}
+                onPositionsCheckComplete={() => {
+                  const runId = solanaCheckRunId;
+                  setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Raydium") : prev));
+                }}
+              />
+            ),
+          },
+          {
+            name: "Orca" as const,
+            value: orcaValue,
+            component: (
+              <OrcaPositionsList
+                key="Orca"
+                address={solanaProtocolsAddress ?? undefined}
+                onPositionsValueChange={handleOrcaValueChange}
+                onPositionsCheckComplete={() => {
+                  const runId = solanaCheckRunId;
+                  setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Orca") : prev));
+                }}
+              />
+            ),
+          },
+          {
+            name: "Tramplin" as const,
+            value: tramplinValue,
+            component: (
+              <TramplinPositionsList
+                key="Tramplin"
+                address={solanaProtocolsAddress ?? undefined}
+                onPositionsValueChange={handleTramplinValueChange}
+                onPositionsCheckComplete={() => {
+                  const runId = solanaCheckRunId;
+                  setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Tramplin") : prev));
                 }}
               />
             ),

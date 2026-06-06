@@ -31,14 +31,13 @@ function topoSort(actions: StrategyRunContext["mergedActions"]): StrategyRunCont
 export async function executeActionDag(options: {
   ctx: StrategyRunContext;
   state: ComputedState;
-  adapters: { echelonAdapterAddress: string; moarAdapterAddress: string };
-  moarAptClaimLines: Array<{ reward_id: string; farming_identifier: string; claimable_amount: string }>;
+  adapters: { echelonAdapterAddress: string };
 }): Promise<{
   results: ActionExecutionResult[];
   totalTxCount: number;
   txHashes: string[];
 }> {
-  const { ctx, state, adapters, moarAptClaimLines } = options;
+  const { ctx, state, adapters } = options;
 
   const ordered = topoSort(ctx.mergedActions);
   const maxActions = Number(ctx.strategy.execution?.maxActionsPerRun ?? 100);
@@ -52,7 +51,7 @@ export async function executeActionDag(options: {
     if (executedActions >= maxActions) break;
 
     try {
-      const r = await executeAction({ ctx, action, state, adapters, moarAptClaimLines });
+      const r = await executeAction({ ctx, action, state, adapters });
       results.push(r);
       if (r.executed) executedActions += 1;
       totalTxCount += r.txCount;
@@ -64,11 +63,8 @@ export async function executeActionDag(options: {
       if (!ctx.dryRun && r.executed && r.txCount > 0) {
         const t = action.type;
         const changesBalance =
-          t === "withdrawMoarFull" ||
           t === "swapFaToFa" ||
           t === "depositEchelonFa" ||
-          t === "depositMoar" ||
-          t === "claimMoarReward" ||
           t === "claimEchelonReward";
         if (changesBalance) {
           await refreshBalancesForAllowedAssets({ ctx, state });

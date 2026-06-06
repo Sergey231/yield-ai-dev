@@ -2,68 +2,44 @@
 
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Card } from "@/components/ui/card";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
-import Image from "next/image";
 import tokenList from "@/lib/data/tokenList.json";
-import { Badge } from "@/shared/Badge/Badge";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import { useWithdraw } from "@/lib/hooks/useWithdraw";
 import { WithdrawModal } from "@/components/ui/withdraw-modal";
 import echelonMarkets from "@/lib/data/echelonMarkets.json";
 import { useDragDrop } from "@/contexts/DragDropContext";
-import { PositionDragData } from "@/types/dragDrop";
-import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { PanoraPricesService } from "@/lib/services/panora/prices";
-import { TokenPrice } from "@/lib/types/panora";
-import { useClaimRewards } from "@/lib/hooks/useClaimRewards";
 import { ClaimAllRewardsEchelonModal } from "@/components/ui/claim-all-rewards-echelon-modal";
 import { DepositModal } from "@/components/ui/deposit-modal";
 import { ProtocolKey } from "@/lib/transactions/types";
 import { createDualAddressPriceMap } from "@/lib/utils/addressNormalization";
 import { TokenInfoService } from "@/lib/services/tokenInfoService";
-import { formatNumber, formatCurrency } from "@/lib/utils/numberFormat";
 import { queryKeys } from "@/lib/query/queryKeys";
-import { AccountHealthSummary } from "@/components/protocols/manage-positions/AccountHealthSummary";
+import { LendingProtocolCard } from "@/shared/ProtocolCard";
 import {
   useEchelonPositions,
   useEchelonRewards,
   useEchelonPools,
 } from "@/lib/query/hooks/protocols/echelon";
-
-interface Position {
-  coin: string;
-  amount?: number | string;
-  market?: string;
-  type?: string; // supply или borrow
-}
-
-interface EchelonReward {
-  token: string;
-  tokenType: string;
-  rewardName?: string;
-  amount: number;
-  rawAmount: string;
-  farmingId: string;
-  stakeAmount: number;
-}
+import type { EchelonPosition } from "@/lib/query/hooks/protocols/echelon/useEchelonPositions";
+import { CACHE_TIME, STALE_TIME } from "@/lib/query/config";
+import {
+  useEchelonLendingCardModel,
+  type EchelonLendingRow,
+} from "./useEchelonLendingCardModel";
 
 export function EchelonPositions() {
-  const { account, signAndSubmitTransaction } = useWallet();
+  const { account } = useWallet();
   const queryClient = useQueryClient();
-  const [totalValue, setTotalValue] = useState<number>(0);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [showDepositModal, setShowDepositModal] = useState(false);
   const [showClaimAllModal, setShowClaimAllModal] = useState(false);
-  const [selectedPosition, setSelectedPosition] = useState<Position | null>(null);
+  const [selectedPosition, setSelectedPosition] = useState<EchelonPosition | null>(null);
   const [selectedDepositMarketAddress, setSelectedDepositMarketAddress] = useState<string | undefined>(undefined);
   const [tokenPrices, setTokenPrices] = useState<Record<string, string>>({});
   const [fallbackTokenInfo, setFallbackTokenInfo] = useState<Record<string, any>>({});
   const { withdraw, isLoading: isWithdrawing } = useWithdraw();
-  const { claimRewards, isLoading: isClaiming } = useClaimRewards();
-  const { startDrag, endDrag, state, closePositionModal, closeAllModals, setPositionConfirmHandler } = useDragDrop();
+  const { closePositionModal, closeAllModals } = useDragDrop();
   const isModalOpenRef = useRef(false);
   const pricesService = PanoraPricesService.getInstance();
   const walletAddress = account?.address?.toString();
@@ -72,10 +48,18 @@ export function EchelonPositions() {
     data: positions = [],
     isLoading: positionsLoading,
     error: positionsError,
-  } = useEchelonPositions(walletAddress, { refetchOnMount: "always" });
+  } = useEchelonPositions(walletAddress, {
+    refetchOnMount: "always",
+    staleTime: STALE_TIME.POSITIONS * 3,
+    gcTime: CACHE_TIME.VERY_LONG,
+  });
   const { data: rewardsData = [], isLoading: rewardsLoading } = useEchelonRewards(
     walletAddress,
-    { refetchOnMount: "always" }
+    {
+      refetchOnMount: "always",
+      staleTime: STALE_TIME.POSITIONS * 3,
+      gcTime: CACHE_TIME.VERY_LONG,
+    }
   );
   const { data: poolsResponse } = useEchelonPools();
 
@@ -216,14 +200,7 @@ export function EchelonPositions() {
     const normalizedAddress = normalizeAddress(cleanAddress);
     
     // Try both original and normalized addresses
-    const price = tokenPrices[cleanAddress] || tokenPrices[normalizedAddress] || '0';
-    console.log('getTokenPrice for', coinAddress, ':', {
-      cleanAddress,
-      normalizedAddress,
-      foundPrice: price,
-      availablePrices: Object.keys(tokenPrices).slice(0, 5)
-    });
-    return price;
+    return tokenPrices[cleanAddress] || tokenPrices[normalizedAddress] || '0';
   };
 
 
@@ -297,48 +274,6 @@ export function EchelonPositions() {
       isLiquidatable: healthFactor < 1
     };
   }, [positions, apyData, tokenPrices]);
-
-
-  // Claim rewards
-  const handleClaimRewards = async () => {
-    if (!account?.address || rewardsData.length === 0) return;
-    
-    try {
-      // Separate rewards into rewards_pool and farming rewards
-      const rewardsPoolRewards = rewardsData.filter(r => r.farmingId === 'rewards_pool' && r.amount > 0);
-      const farmingRewards = rewardsData.filter(r => r.farmingId !== 'rewards_pool' && r.farmingId && r.tokenType && r.amount > 0);
-
-      // Claim rewards_pool rewards with single claim_all_rewards transaction
-      if (rewardsPoolRewards.length > 0 && signAndSubmitTransaction) {
-        const REWARDS_POOL_ADDRESS = "0xfdb653ffa48e91f39396ce87c656406f9b5e7a6686475446d92e79b098f0f4b5";
-        
-        await signAndSubmitTransaction({
-          data: {
-            function: `${REWARDS_POOL_ADDRESS}::rewards_pool::claim_all_rewards` as `${string}::${string}::${string}`,
-            typeArguments: [],
-            functionArguments: []
-          },
-          options: { maxGasAmount: 20000 },
-        });
-      }
-
-      // Claim farming rewards separately (old mechanism)
-      for (const reward of farmingRewards) {
-        await claimRewards('echelon', [reward.farmingId], [reward.tokenType]);
-      }
-      
-      const addr = account?.address?.toString();
-      if (addr) {
-        queryClient.invalidateQueries({
-          queryKey: queryKeys.protocols.echelon.userPositions(addr),
-        });
-        queryClient.invalidateQueries({
-          queryKey: queryKeys.protocols.echelon.rewards(addr),
-        });
-      }
-    } catch (error) {
-    }
-  };
 
   // Получаем цены токенов через Panora API с fallback к Echelon API
   useEffect(() => {
@@ -582,31 +517,30 @@ export function EchelonPositions() {
     return valueB - valueA;
   });
 
-  // Считаем общую сумму: supply плюсуем, borrow вычитаем, rewards плюсуем
-  useEffect(() => {
-    const positionsValue = sortedPositions.reduce((sum, position) => {
-      const tokenInfo = getTokenInfo(position.coin);
-      const amount = parseFloat(String(position.amount)) / (tokenInfo?.decimals ? 10 ** tokenInfo.decimals : 1e8);
-      const price = getTokenPrice(position.coin);
-      const value = price ? amount * parseFloat(price) : 0;
-      if (position.type === 'borrow') {
-        return sum - value;
-      }
-      return sum + value;
-    }, 0);
-    
-    const rewardsValue = calculateRewardsValue();
-    setTotalValue(positionsValue + rewardsValue);
-  }, [sortedPositions, tokenPrices, calculateRewardsValue]);
+  const openClaimAllModal = useCallback(() => {
+    setShowClaimAllModal(true);
+  }, []);
+
+  const { tiles, sections } = useEchelonLendingCardModel({
+    sortedPositions,
+    getTokenInfo,
+    getTokenPrice,
+    getApyForPosition,
+    calculateHealthFactor,
+    calculateRewardsValue,
+    rewardsDataLength: rewardsData.length,
+    isClaiming: false,
+    onOpenClaimModal: openClaimAllModal,
+  });
 
   // Обработчик открытия модального окна withdraw
-  const handleWithdrawClick = (position: Position) => {
+  const handleWithdrawClick = (position: EchelonPosition) => {
     setSelectedPosition(position);
     setShowWithdrawModal(true);
   };
 
   // Обработчик открытия модального окна deposit
-  const handleDepositClick = (position: Position) => {
+  const handleDepositClick = (position: EchelonPosition) => {
     
          // Попробуем найти market address для депозита
      let marketAddress = position.market;
@@ -632,48 +566,17 @@ export function EchelonPositions() {
      }
      
      // Если все еще нет market address, попробуем найти в локальных данных
-     if (!marketAddress) {
-       const normalizedCoin = normalizeTokenAddress(position.coin);
-       let localMarket = echelonMarkets.markets.find((m: any) => m.coin === normalizedCoin);
-       if (localMarket?.market) {
-         marketAddress = localMarket.market;
+       if (!marketAddress) {
+         const normalizedCoin = normalizeTokenAddress(position.coin);
+         const localMarket = echelonMarkets.markets.find((m: any) => m.coin === normalizedCoin);
+         if (localMarket?.market) {
+           marketAddress = localMarket.market;
+         }
        }
-     }
     
     setSelectedPosition(position);
     setSelectedDepositMarketAddress(marketAddress);
     setShowDepositModal(true);
-  };
-
-  // Drag and drop handlers
-  const handleDragStart = (e: React.DragEvent, position: Position) => {
-    const tokenInfo = getTokenInfo(position.coin);
-    // const market = marketData.find((m: any) => m.coin === position.coin); // This line is removed
-    
-    const dragData: PositionDragData = {
-      type: 'position',
-      positionId: position.coin,
-      asset: position.coin,
-      amount: String(position.amount),
-      positionType: 'lend',
-      protocol: 'Echelon',
-      // market: market?.market, // This line is removed
-      tokenInfo: tokenInfo ? {
-        symbol: tokenInfo.symbol,
-        logoUrl: tokenInfo.logoUrl,
-        decimals: tokenInfo.decimals,
-        usdPrice: tokenInfo.usdPrice,
-      } : undefined,
-    };
-
-    e.dataTransfer.setData('application/json', JSON.stringify(dragData));
-    e.dataTransfer.effectAllowed = 'move';
-    
-    startDrag(dragData);
-  };
-
-  const handleDragEnd = () => {
-    endDrag();
   };
 
   // Обработчик подтверждения withdraw
@@ -719,11 +622,10 @@ export function EchelonPositions() {
              // Если все еще нет market address, используем локальные данные
        if (!marketAddress) {
          const normalizedCoin = normalizeTokenAddress(selectedPosition.coin);
-         let localMarket = echelonMarkets.markets.find((m: any) => m.coin === normalizedCoin);
-         
-
-         
-         marketAddress = localMarket?.market;
+         const localMarket = echelonMarkets.markets.find((m: any) => m.coin === normalizedCoin);
+         if (localMarket?.market) {
+           marketAddress = localMarket.market;
+         }
        }
       
       if (!marketAddress) {
@@ -747,7 +649,7 @@ export function EchelonPositions() {
           queryKey: queryKeys.protocols.echelon.rewards(addr),
         });
       }
-    } catch (error) {
+    } catch {
     }
   };
 
@@ -759,404 +661,20 @@ export function EchelonPositions() {
     return <div className="text-red-500">{error}</div>;
   }
 
-
   if (positions.length === 0) {
     return null;
   }
 
   return (
     <div className="space-y-4 text-base">
-      <ScrollArea>
-        {sortedPositions.map((position, index) => {
-          const tokenInfo = getTokenInfo(position.coin);
-          const rawAmount = typeof position.amount === 'number'
-            ? position.amount
-            : parseFloat(String(position.amount ?? 0));
-          const amount = !isNaN(rawAmount) && tokenInfo?.decimals ? rawAmount / 10 ** tokenInfo.decimals : 0;
-          const price = getTokenPrice(position.coin);
-          const value = price ? formatCurrency(amount * parseFloat(price), 2) : 'N/A';
-          const apy = getApyForPosition(position);
-          const isBorrow = position.type === 'borrow';
-          
-          return (
-                        <div
-              key={`${position.coin}-${index}`}
-              className={cn(
-                'p-3 sm:p-4 border-b last:border-b-0 transition-colors'
-              )}
-              draggable={false}
-            >
-              {/* Desktop Layout */}
-              <div className="hidden sm:flex justify-between items-center">
-                <div className="flex items-center gap-2">
-                  {tokenInfo?.logoUrl && (
-                    <div className="w-8 h-8 relative">
-                      <Image 
-                        src={tokenInfo.logoUrl} 
-                        alt={tokenInfo.symbol}
-                        width={32}
-                        height={32}
-                        className="object-contain"
-                      />
-                    </div>
-                  )}
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <div className="text-lg">{tokenInfo?.symbol || position.coin.substring(0, 4).toUpperCase()}</div>
-                      <Badge
-                        variant={isBorrow ? "danger" : "success"}
-                        className="text-xs font-normal px-2 py-0.5 h-5"
-                      >
-                        {isBorrow ? 'Borrow' : 'Supply'}
-                      </Badge>
-                    </div>
-                    <div className="text-base text-muted-foreground mt-0.5">
-                      {price ? formatCurrency(parseFloat(price), 2) : 'N/A'}
-                    </div>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <div className="flex items-center justify-between mb-1">
-                    <Badge
-                      variant={isBorrow ? "danger" : "success"}
-                      className="text-xs font-normal px-2 py-0.5 h-5"
-                    >
-                      {apy !== null ? (
-                        <TooltipProvider>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="cursor-help">
-                                APR: {formatNumber(apy * 100, 2)}%
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent className="bg-popover text-popover-foreground border-border max-w-xs">
-                              <div className="text-xs font-semibold mb-1">APR Breakdown:</div>
-                              <div className="space-y-1">
-                                {!isBorrow && apyData[position.coin]?.lendingApr > 0 && (
-                                  <div className="flex justify-between">
-                                    <span>Lending APR:</span>
-                                    <span className="text-green-400">{formatNumber(apyData[position.coin].lendingApr, 2)}%</span>
-                                  </div>
-                                )}
-                                {!isBorrow && apyData[position.coin]?.stakingAprOnly > 0 && (
-                                  <div className="flex justify-between">
-                                    <span>Staking APR:</span>
-                                    <span className="text-blue-400">{formatNumber(apyData[position.coin].stakingAprOnly, 2)}%</span>
-                                  </div>
-                                )}
-                                {!isBorrow && apyData[position.coin]?.supplyRewardsApr > 0 && (
-                                  <div className="flex justify-between">
-                                    <span>Rewards APR:</span>
-                                    <span className="text-yellow-400">{formatNumber(apyData[position.coin].supplyRewardsApr, 2)}%</span>
-                                  </div>
-                                )}
-                                {isBorrow && apyData[position.coin]?.borrowAPY > 0 && (
-                                  <div className="flex justify-between">
-                                    <span>Borrow APR:</span>
-                                    <span className="text-red-400">{formatNumber(apyData[position.coin].borrowAPY, 2)}%</span>
-                                  </div>
-                                )}
-                                {isBorrow && apyData[position.coin]?.borrowRewardsApr > 0 && (
-                                  <div className="flex justify-between">
-                                    <span>Borrow Rewards APR (subtract):</span>
-                                    <span className="text-yellow-400">{formatNumber(apyData[position.coin].borrowRewardsApr, 2)}%</span>
-                                  </div>
-                                )}
-                                <div className="border-t border-gray-600 pt-1 mt-1">
-                                  <div className="flex justify-between font-semibold">
-                                    <span>Total:</span>
-                                    <span className="text-white">{formatNumber(apy * 100, 2)}%</span>
-                                  </div>
-                                </div>
-                                {/* LTV Information */}
-                                {apyData[position.coin]?.ltv && apyData[position.coin].ltv > 0 && (
-                                  <div className="border-t border-gray-600 pt-1 mt-1">
-                                    <div className="text-xs font-semibold mb-1 text-cyan-400">Collateral Info:</div>
-                                    <div className="space-y-1">
-                                      <div className="flex justify-between">
-                                        <span>LTV:</span>
-                                        <span className="text-cyan-400">{formatNumber(apyData[position.coin].ltv * 100, 0)}%</span>
-                                      </div>
-                                      {apyData[position.coin].lt && apyData[position.coin].lt > 0 && (
-                                        <div className="flex justify-between">
-                                          <span>Liquidation Threshold:</span>
-                                          <span className="text-orange-400">{formatNumber(apyData[position.coin].lt * 100, 0)}%</span>
-                                        </div>
-                                      )}
-                                      {apyData[position.coin].emodeLtv && apyData[position.coin].emodeLtv > 0 && (
-                                        <div className="flex justify-between">
-                                          <span>E-Mode LTV:</span>
-                                          <span className="text-purple-400">{formatNumber(apyData[position.coin].emodeLtv * 100, 0)}%</span>
-                                        </div>
-                                      )}
-                                      {apyData[position.coin].emodeLt && apyData[position.coin].emodeLt > 0 && (
-                                        <div className="flex justify-between">
-                                          <span>E-Mode LT:</span>
-                                          <span className="text-pink-400">{formatNumber(apyData[position.coin].emodeLt * 100, 0)}%</span>
-                                        </div>
-                                      )}
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
-                      ) : (
-                        'APR: N/A'
-                      )}
-                    </Badge>
-                    <div className="text-lg font-bold text-right w-24">{value}</div>
-                  </div>
-                  <div className="text-base text-muted-foreground font-semibold">{formatNumber(amount, 4)}</div>
-                  <div className="flex flex-col gap-1 mt-2">
-                    {!isBorrow && (
-                      <div className="flex gap-2 justify-end">
-                        <Button
-                          onClick={() => handleDepositClick(position)}
-                          disabled={false}
-                          size="sm"
-                          variant="default"
-                          className="h-10"
-                        >
-                          Deposit
-                        </Button>
-                        <Button
-                          onClick={() => handleWithdrawClick(position)}
-                          disabled={isWithdrawing}
-                          size="sm"
-                          variant="outline"
-                          className="h-10"
-                        >
-                          {isWithdrawing ? 'Withdrawing...' : 'Withdraw'}
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* Mobile Layout */}
-              <div className="sm:hidden space-y-3">
-                {/* Header with token info and USD value */}
-                <div className="flex justify-between items-start">
-                  <div className="flex items-center gap-2">
-                    {tokenInfo?.logoUrl && (
-                      <div className="w-6 h-6 relative">
-                        <Image 
-                          src={tokenInfo.logoUrl} 
-                          alt={tokenInfo.symbol}
-                          width={24}
-                          height={24}
-                          className="object-contain"
-                        />
-                      </div>
-                    )}
-                    <div>
-                      <div className="flex items-center gap-1">
-                        <div className="text-base font-medium">{tokenInfo?.symbol || position.coin.substring(0, 4).toUpperCase()}</div>
-                        <Badge
-                          variant={isBorrow ? "danger" : "success"}
-                          className="text-xs font-normal px-1.5 py-0.5 h-4"
-                        >
-                          {isBorrow ? 'Borrow' : 'Supply'}
-                        </Badge>
-                      </div>
-                      <div className="text-sm text-muted-foreground">
-                        {price ? formatCurrency(parseFloat(price), 2) : 'N/A'}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-lg font-bold text-right w-24">{value}</div>
-                    <div className="text-sm text-muted-foreground">{formatNumber(amount, 4)}</div>
-                  </div>
-                </div>
-
-                {/* APR Badge */}
-                <div className="flex justify-center">
-                  <Badge
-                    variant={isBorrow ? "danger" : "success"}
-                    className="text-xs font-normal px-2 py-0.5 h-5"
-                  >
-                    {apy !== null ? (
-                      <TooltipProvider>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span className="cursor-help">
-                              APR: {formatNumber(apy * 100, 2)}%
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent className="bg-popover text-popover-foreground border-border max-w-xs">
-                            <div className="text-xs font-semibold mb-1">APR Breakdown:</div>
-                            <div className="space-y-1">
-                              {!isBorrow && apyData[position.coin]?.lendingApr > 0 && (
-                                <div className="flex justify-between">
-                                  <span>Lending APR:</span>
-                                  <span className="text-green-400">{formatNumber(apyData[position.coin].lendingApr, 2)}%</span>
-                                </div>
-                              )}
-                              {!isBorrow && apyData[position.coin]?.stakingAprOnly > 0 && (
-                                <div className="flex justify-between">
-                                  <span>Staking APR:</span>
-                                  <span className="text-blue-400">{formatNumber(apyData[position.coin].stakingAprOnly, 2)}%</span>
-                                </div>
-                              )}
-                              {!isBorrow && apyData[position.coin]?.supplyRewardsApr > 0 && (
-                                <div className="flex justify-between">
-                                  <span>Rewards APR:</span>
-                                  <span className="text-yellow-400">{formatNumber(apyData[position.coin].supplyRewardsApr, 2)}%</span>
-                                </div>
-                              )}
-                              {isBorrow && apyData[position.coin]?.borrowAPY > 0 && (
-                                <div className="flex justify-between">
-                                  <span>Borrow APR:</span>
-                                  <span className="text-red-400">{formatNumber(apyData[position.coin].borrowAPY, 2)}%</span>
-                                </div>
-                              )}
-                              {isBorrow && apyData[position.coin]?.borrowRewardsApr > 0 && (
-                                <div className="flex justify-between">
-                                  <span>Borrow Rewards APR (subtract):</span>
-                                  <span className="text-yellow-400">{formatNumber(apyData[position.coin].borrowRewardsApr, 2)}%</span>
-                                </div>
-                              )}
-                              <div className="border-t border-gray-600 pt-1 mt-1">
-                                <div className="flex justify-between font-semibold">
-                                  <span>Total:</span>
-                                  <span className="text-white">{formatNumber(apy * 100, 2)}%</span>
-                                </div>
-                              </div>
-                              {/* LTV Information */}
-                              {apyData[position.coin]?.ltv && apyData[position.coin].ltv > 0 && (
-                                <div className="border-t border-gray-600 pt-1 mt-1">
-                                  <div className="text-xs font-semibold mb-1 text-cyan-400">Collateral Info:</div>
-                                  <div className="space-y-1">
-                                    <div className="flex justify-between">
-                                      <span>LTV:</span>
-                                      <span className="text-cyan-400">{formatNumber(apyData[position.coin].ltv * 100, 0)}%</span>
-                                    </div>
-                                    {apyData[position.coin].lt && apyData[position.coin].lt > 0 && (
-                                      <div className="flex justify-between">
-                                        <span>Liquidation Threshold:</span>
-                                        <span className="text-orange-400">{formatNumber(apyData[position.coin].lt * 100, 0)}%</span>
-                                      </div>
-                                    )}
-                                    {apyData[position.coin].emodeLtv && apyData[position.coin].emodeLtv > 0 && (
-                                      <div className="flex justify-between">
-                                        <span>E-Mode LTV:</span>
-                                        <span className="text-purple-400">{formatNumber(apyData[position.coin].emodeLtv * 100, 0)}%</span>
-                                      </div>
-                                    )}
-                                    {apyData[position.coin].emodeLt && apyData[position.coin].emodeLt > 0 && (
-                                      <div className="flex justify-between">
-                                        <span>E-Mode LT:</span>
-                                        <span className="text-pink-400">{formatNumber(apyData[position.coin].emodeLt * 100, 0)}%</span>
-                                      </div>
-                                    )}
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          </TooltipContent>
-                        </Tooltip>
-                      </TooltipProvider>
-                    ) : (
-                      'APR: N/A'
-                    )}
-                  </Badge>
-                </div>
-
-                {/* Action Buttons */}
-                {!isBorrow && (
-                  <div className="flex gap-2 justify-end">
-                    <Button
-                      onClick={() => handleDepositClick(position)}
-                      disabled={false}
-                      size="sm"
-                      variant="default"
-                      className="h-10"
-                    >
-                      Deposit
-                    </Button>
-                    <Button
-                      onClick={() => handleWithdrawClick(position)}
-                      disabled={isWithdrawing}
-                      size="sm"
-                      variant="outline"
-                      className="h-10"
-                    >
-                      {isWithdrawing ? 'Withdrawing...' : 'Withdraw'}
-                    </Button>
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </ScrollArea>
-      <div className="flex items-center justify-between pt-6 pb-6">
-        <span className="text-xl">Total assets in Echelon:</span>
-        <div className="text-right">
-          <span className="text-xl text-primary font-bold">{formatCurrency(totalValue, 2)}</span>
-          {calculateRewardsValue() > 0 && (
-            <div className="flex flex-col items-end gap-1">
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div className="text-sm text-muted-foreground cursor-help">
-                     💰 including rewards {formatCurrency(calculateRewardsValue(), 2)}
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent className="bg-popover text-popover-foreground border-border max-w-xs">
-                    <div className="text-xs font-semibold mb-1">Rewards breakdown:</div>
-                    <div className="space-y-2 max-h-60 overflow-y-auto">
-                      {rewardsData.map((reward, idx) => {
-                        const tokenInfo = getRewardTokenInfoHelper(reward.token);
-                        if (!tokenInfo) return null;
-                        const price = getTokenPrice(tokenInfo.faAddress || tokenInfo.address || '');
-                        const value = price && price !== '0' ? formatCurrency(reward.amount * parseFloat(price), 2) : 'N/A';
-                        return (
-                          <div key={idx} className="flex items-center gap-2">
-                            {tokenInfo.icon_uri && (
-                              <img src={tokenInfo.icon_uri} alt={tokenInfo.symbol} className="w-3 h-3 rounded-full" />
-                            )}
-                            <span>{tokenInfo.symbol}</span>
-                            <span>{formatNumber(reward.amount, 6)}</span>
-                            <span className="text-gray-300">{value}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-              {rewardsData.length > 0 && (
-                <button
-                  className="px-3 py-1 bg-success text-success-foreground rounded text-sm font-semibold disabled:opacity-60 hover:bg-success/90 transition-colors"
-                  onClick={() => setShowClaimAllModal(true)}
-                  disabled={isClaiming}
-                >
-                  {isClaiming ? 'Claiming...' : `Claim All Rewards (${rewardsData.length})`}
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Health Factor Display */}
-      {(() => {
-        const healthData = calculateHealthFactor();
-        if (!healthData) return null;
-        
-        return (
-          <AccountHealthSummary
-            accountHealth={healthData.healthFactor}
-            collateral={healthData.accountMargin}
-            liabilities={healthData.totalLiabilities}
-          />
-        );
-      })()}
+      <LendingProtocolCard<EchelonLendingRow>
+        headerVariant="minimal"
+        tiles={tiles}
+        sections={sections}
+        onDeposit={(row) => handleDepositClick(row._position)}
+        onWithdraw={(row) => handleWithdrawClick(row._position)}
+        withdrawDisabled={isWithdrawing}
+      />
 
       {/* Deposit Modal */}
       {selectedPosition && (

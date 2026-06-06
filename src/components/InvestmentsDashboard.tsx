@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { SegmentedControl, Box } from "@radix-ui/themes";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -22,23 +22,20 @@ import { Search, Funnel, X } from "lucide-react";
 import { ExternalLink, Gift } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { DepositButton } from "@/components/ui/deposit-button";
-import { getProtocolByName, getProtocolsList } from "@/lib/protocols/getProtocolsList";
+import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import Image from "next/image";
 import Link from "next/link";
 import { ManagePositions } from "./protocols/manage-positions/ManagePositions";
-import { Protocol } from "@/lib/protocols/getProtocolsList";
 import { useProtocol } from "@/lib/contexts/ProtocolContext";
 import { useDragDrop } from "@/contexts/DragDropContext";
 import { DragData } from "@/types/dragDrop";
 import { cn } from "@/lib/utils";
 import { CollapsibleProvider } from "@/contexts/CollapsibleContext";
 import { useMobileManagement } from "@/contexts/MobileManagementContext";
-import { useWalletStore } from "@/lib/stores/walletStore";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
-import { ClaimRewardsBlock } from "@/components/ui/claim-rewards-block";
-import { ClaimAllRewardsModal } from "@/components/ui/claim-all-rewards-modal";
 import { AirdropInfoTooltip } from "@/components/ui/airdrop-info-tooltip";
-import { YieldAiAgentWalletBlock } from "@/components/ui/yield-ai-agent-wallet-block";
+import { YieldAiAgentWalletBlock, YieldAiStablecoinAgentAction } from "@/components/ui/yield-ai-agent-wallet-block";
+import { DecibelAiAgentWalletBlock } from "@/components/ui/decibel-ai-agent-wallet-block";
 import { Settings } from "lucide-react";
 import {
   DropdownMenu,
@@ -50,15 +47,37 @@ import { InvestmentsDashboardLoading } from "./InvestmentsDashboardLoading";
 import { DecibelIdeasBlock } from "./decibel-ideas-block";
 import { TokenInfoService, type TokenInfo } from "@/lib/services/tokenInfoService";
 import { useSolanaPortfolio } from "@/hooks/useSolanaPortfolio";
+import { useEchelonPools } from "@/lib/query/hooks/protocols/echelon/useEchelonPools";
+import { USD1_FA_METADATA_MAINNET } from "@/lib/constants/yieldAiVault";
+import { normalizeAddress } from "@/lib/utils/addressNormalization";
 
-// Список адресов токенов Echelon, которые нужно исключить из отображения
-const EXCLUDED_ECHELON_TOKENS = [
+// Ideas exclusions for protocols and Echelon assets that must not accept new deposits.
+const HIDDEN_IDEAS_PROTOCOLS = new Set(["Earnium", "Auro Finance", "Aries", "Meso Finance", "Moar Market", "Tapp Exchange", "Kofi Finance", "Joule", "Panora"]);
+const EXCLUDED_ECHELON_IDEA_SYMBOLS = new Set(['kapt', 'stkapt']);
+const EXCLUDED_ECHELON_IDEA_TOKENS = new Set([
   "0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa::asset::USDT",
   "0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa::asset::USDC",
   "0x2b3be0a97a73c87ff62cbdd36837a9fb5bbd1d7f06a73b7ed62ec15c5326c1b8",
   "0x5e156f1207d0ebfa19a9eeff00d62a282278fb8719f4fab3a586a0a2c0fffbea::coin::T",
-  "0x54fc0d5fa5ad975ede1bf8b1c892ae018745a1afd4a4da9b70bb6e5448509fc0"
-];
+  "0x54fc0d5fa5ad975ede1bf8b1c892ae018745a1afd4a4da9b70bb6e5448509fc0",
+  "0x821c94e69bc7ca058c913b7b5e6b0a5c9fd1523d58723a966fb8c1f5ea888105",
+  "0x42556039b88593e768c97ab1a3ab0c6a17230825769304482dff8fdebe4c002b",
+]);
+const USDC_LOGO_APTOS = "https://assets.panora.exchange/tokens/aptos/USDC.svg";
+const MIN_VISIBLE_TVL_USD = 10000;
+type PoolTypeFilter = "Lending" | "DEX";
+type ChainFilter = "Aptos" | "Solana";
+
+function isHiddenIdeasPool(item: InvestmentData): boolean {
+  if (item.protocol === 'Kofi Finance') return true;
+  if (item.protocol !== 'Echelon') return false;
+
+  if (EXCLUDED_ECHELON_IDEA_SYMBOLS.has(item.asset.toLowerCase())) return true;
+
+  return [item.token, item.coinAddress, item.faAddress].some(
+    (address) => address && EXCLUDED_ECHELON_IDEA_TOKENS.has(address)
+  );
+}
 
 interface InvestmentsDashboardProps {
   className?: string;
@@ -82,10 +101,24 @@ interface Token {
 function getChainLogoForProtocol(protocolName: string): { src: string; alt: string } {
   const protocol = getProtocolByName(protocolName);
   const normalizedProtocol = (protocol?.name || protocolName).toLowerCase();
-  const isSolana = normalizedProtocol === "jupiter" || normalizedProtocol === "kamino";
+  const isSolana =
+    normalizedProtocol === "jupiter" ||
+    normalizedProtocol === "kamino" ||
+    normalizedProtocol === "tramplin";
   return isSolana
     ? { src: "/chain_ico/solana.png?v=1", alt: "Solana" }
     : { src: "/chain_ico/aptos.png?v=1", alt: "Aptos" };
+}
+
+function getChainForProtocol(protocolName: string): ChainFilter {
+  return getChainLogoForProtocol(protocolName).alt === "Solana" ? "Solana" : "Aptos";
+}
+
+function getPoolTypeFilter(item: InvestmentData): PoolTypeFilter {
+  const poolType = String(item.poolType || "").toLowerCase();
+  const itemWithTokens = item as InvestmentData & { tokensInfo?: TokenInfo[] };
+  const hasDexTokens = !!(item.token1Info && item.token2Info) || !!itemWithTokens.tokensInfo?.length;
+  return hasDexTokens || poolType.includes("dex") || poolType.includes("clmm") ? "DEX" : "Lending";
 }
 
 export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
@@ -119,17 +152,12 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
     overrideAddress: solanaAddressOverride,
   });
 
-  // Protocols that are closed/winding down must not appear in Ideas pools filter
-  const HIDDEN_IDEAS_PROTOCOLS = new Set(["Earnium", "Auro Finance", "Aries", "Meso Finance", "Moar Market", "Tapp Exchange"]);
-
   // New states for progressive loading
   // Initialize loading states immediately to show tabs and skeletons right away
   const [protocolsLoading, setProtocolsLoading] = useState<Record<string, boolean>>({
-    'Joule': false,
     'Hyperion': true,
     'Thala': true,
     'Amnis Finance': true,
-    'Kofi Finance': true,
     'Echelon': true,
     'Aave': true,
     'Decibel': true,
@@ -141,11 +169,9 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
   const [protocolsError, setProtocolsError] = useState<Record<string, string | null>>({});
   const [protocolsData, setProtocolsData] = useState<Record<string, InvestmentData[]>>({});
   const [protocolsLogos, setProtocolsLogos] = useState<Record<string, string>>({
-    'Joule': '/protocol_ico/joule.png',
     'Hyperion': '/protocol_ico/hyperion.png',
     'Thala': '/protocol_ico/thala.png',
     'Amnis Finance': '/protocol_ico/amnis.png',
-    'Kofi Finance': '/protocol_ico/kofi.png',
     'Echelon': '/protocol_ico/echelon.png',
     'Aave': '/protocol_ico/aave.ico',
     'Decibel': '/protocol_ico/decibel.png',
@@ -154,18 +180,28 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
     'Jupiter': '/protocol_ico/jupiter.png',
     'Kamino': '/protocol_ico/kamino.png',
   });
-  const [claimModalOpen, setClaimModalOpen] = useState(false);
-  const [summary, setSummary] = useState<any>(null);
-
   // For Echelon (e.g. DLP) tokenList.json may not contain the token.
   // Resolve missing token metadata from /api/tokens/info to show correct icons and decimals.
   const tokenInfoService = TokenInfoService.getInstance();
   const [resolvedTokenInfos, setResolvedTokenInfos] = useState<Record<string, TokenInfo>>({});
   const requestedResolvedTokenInfosRef = useRef<Set<string>>(new Set());
+  const { data: echelonPoolsResp } = useEchelonPools();
+  const yieldAiStablecoinApr = useMemo(() => {
+    const target = normalizeAddress(USD1_FA_METADATA_MAINNET);
+    const pool = echelonPoolsResp?.data?.find(
+      (p) => p.token && normalizeAddress(p.token) === target
+    );
+    return pool?.depositApy ?? null;
+  }, [echelonPoolsResp]);
 
   const [showSearchOptions, setShowSearchOptions] = useState(false);
   const [searchByProtocols, setSearchByProtocols] = useState(false);
   const [selectedFilterProtocols, setSelectedFilterProtocols] = useState<string[]>([]);
+  const [selectedPoolTypeFilters, setSelectedPoolTypeFilters] = useState<PoolTypeFilter[]>([]);
+  const [selectedChainFilters, setSelectedChainFilters] = useState<ChainFilter[]>([]);
+  const [hideSmallTvlPools, setHideSmallTvlPools] = useState(true);
+  const [yieldAiTvlUSD, setYieldAiTvlUSD] = useState<number | null>(null);
+  const [isMobileProLayout, setIsMobileProLayout] = useState(false);
 
   // Column visibility settings for Pro tab
   const [showBorrowColumn, setShowBorrowColumn] = useState(false);
@@ -173,9 +209,20 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
   const [showTvlColumn, setShowTvlColumn] = useState(true);
 
   const { state, handleDrop, validateDrop } = useDragDrop();
-  const { getClaimableRewardsSummary, fetchRewards, fetchPositions, rewardsLoading, rewards } = useWalletStore();
   const { account } = useWallet();
   const { setActiveTab: setMobileTab } = useMobileManagement();
+
+  const togglePoolTypeFilter = (filter: PoolTypeFilter) => {
+    setSelectedPoolTypeFilters((prev) =>
+      prev.includes(filter) ? prev.filter((item) => item !== filter) : [...prev, filter]
+    );
+  };
+
+  const toggleChainFilter = (filter: ChainFilter) => {
+    setSelectedChainFilters((prev) =>
+      prev.includes(filter) ? prev.filter((item) => item !== filter) : [...prev, filter]
+    );
+  };
 
   const hasAptosWallet = Boolean(account?.address);
   const hasSolanaWallet = Boolean(solanaConnectedAddress);
@@ -196,25 +243,6 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
     return out;
   })();
 
-  // Load rewards and positions data when wallet is connected
-  useEffect(() => {
-    if (account?.address) {
-      fetchRewards(account.address.toString());
-      fetchPositions(account.address.toString(), ['hyperion']); // Load Hyperion positions for claim all
-    }
-  }, [account?.address, fetchRewards, fetchPositions]);
-
-  // Load summary when rewards change
-  useEffect(() => {
-    const loadSummary = async () => {
-      if (account?.address) {
-        const summaryData = await getClaimableRewardsSummary();
-        setSummary(summaryData);
-      }
-    };
-    loadSummary();
-  }, [account?.address, getClaimableRewardsSummary, rewardsLoading, rewards]);
-
   const getTokenInfo = (asset: string, tokenAddress?: string): Token | undefined => {
     if (tokenAddress) {
       return (tokenList.data.data as Token[]).find(token =>
@@ -222,13 +250,6 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
       );
     }
     return undefined;
-  };
-
-  const getProvider = (item: InvestmentData): string => {
-    if (item.provider !== 'Unknown') return item.provider;
-
-    const tokenInfo = getTokenInfo(item.asset, item.token);
-    return tokenInfo?.bridge || 'Unknown';
   };
 
   const isStablePool = (item: InvestmentData): boolean => {
@@ -263,11 +284,6 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
 
     // Echelon пулы считаем стабильными (они все лендинговые)
     if (item.protocol === 'Echelon') {
-      return true;
-    }
-
-    // Kofi Finance стейкинг-пулы считаем стабильными
-    if (item.protocol === 'Kofi Finance' && item.isStakingPool) {
       return true;
     }
 
@@ -445,42 +461,6 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
             }
           },
           {
-            name: 'Kofi Finance',
-            url: '/api/protocols/kofi/pools',
-			logoUrl: '/protocol_ico/kofi.png',
-            transform: (data: any) => {
-              const pools = data.data || [];
-
-              return pools.map((pool: any) => {
-                return {
-                  asset: pool.asset || 'Unknown',
-                  provider: pool.provider || 'Kofi Finance',
-                  totalAPY: pool.totalAPY || 0,
-                  depositApy: pool.depositApy || 0,
-                  borrowAPY: pool.borrowAPY || 0,
-                  token: pool.token || '',
-                  protocol: pool.protocol || 'Kofi Finance',
-                  poolType: pool.poolType || 'Staking',
-                  tvlUSD: pool.tvlUSD || 0,
-                  dailyVolumeUSD: pool.dailyVolumeUSD || 0,
-                  // KoFi-specific fields
-                  stakingApr: pool.stakingApr,
-                  isStakingPool: pool.isStakingPool,
-                  stakingToken: pool.stakingToken,
-                  underlyingToken: pool.underlyingToken,
-                  // Echelon-specific data
-                  supplyCap: pool.supplyCap,
-                  borrowCap: pool.borrowCap,
-                  supplyRewardsApr: pool.supplyRewardsApr,
-                  borrowRewardsApr: pool.borrowRewardsApr,
-                  marketAddress: pool.marketAddress,
-                  totalSupply: pool.totalSupply,
-                  totalBorrow: pool.totalBorrow
-                };
-              });
-            }
-          },
-          {
             name: 'Echelon',
             url: '/api/protocols/echelon/v2/pools',
 			logoUrl: '/protocol_ico/echelon.png',
@@ -556,15 +536,23 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
           },
           {
             name: 'Decibel',
-            url: '/api/protocols/decibel/vaults',
+            // We only render the single "Decibel Protocol Vault" pool. The
+            // proxy accepts `vault_address` and `limit` — filter server-side
+            // so the dashboard does not wait for 50 vaults to download just
+            // to discard 49 of them. This was the slowest pool fetch and
+            // gated the entire "Checking pools" placeholder.
+            url: '/api/protocols/decibel/vaults?vault_address=0x06ad70a9a4f30349b489791e2f2bcf58363dad30e54a9d2d4095d6213d7a9bf9&limit=1',
             logoUrl: '/protocol_ico/decibel.png',
             transform: (data: any) => {
               const items = data?.data?.items ?? [];
+              // Belt-and-braces: still resolve by name/address in case the
+              // upstream API returns siblings (e.g. when vault_address is
+              // unknown to it and it falls back to the unfiltered list).
               const vault = items.find(
                 (v: { name?: string; address?: string }) =>
                   v.name === 'Decibel Protocol Vault' ||
                   v.address === '0x06ad70a9a4f30349b489791e2f2bcf58363dad30e54a9d2d4095d6213d7a9bf9'
-              );
+              ) ?? items[0];
               if (!vault) return [];
               // API returns apr in % (e.g. 2.98 = 2.98%), do not multiply by 100
               const aprPct = typeof vault.apr === 'number' ? vault.apr : 0;
@@ -770,6 +758,37 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
     fetchData();
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const response = await fetch('/api/protocols/yield-ai/defillama');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const tvl = Number(data?.tvlUSD);
+        if (!cancelled && Number.isFinite(tvl) && tvl > 0) {
+          setYieldAiTvlUSD(tvl);
+        }
+      } catch (error) {
+        console.error('[Yield AI Ideas] DeFi Llama TVL fetch failed:', error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const media = window.matchMedia("(max-width: 767px)");
+    const update = () => setIsMobileProLayout(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
   const handleDragOver = (e: React.DragEvent, investment: InvestmentData) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
@@ -822,12 +841,31 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
   const filteredData = allLoadedData.filter(item => {
 
     // Фильтруем исключенные токены Echelon
-    if (item.protocol === 'Echelon' && EXCLUDED_ECHELON_TOKENS.includes(item.token)) {
+    if (isHiddenIdeasPool(item)) {
       return false;
     }
 
     // Фильтруем по стабильным пулам, если включен чекбокс
     if (showOnlyStablePools && !isStablePool(item)) {
+      return false;
+    }
+
+    if (hideSmallTvlPools) {
+      const tvl = typeof item.tvlUSD === "number" ? item.tvlUSD : 0;
+      if (tvl < MIN_VISIBLE_TVL_USD) return false;
+    }
+
+    if (
+      selectedPoolTypeFilters.length > 0 &&
+      !selectedPoolTypeFilters.includes(getPoolTypeFilter(item))
+    ) {
+      return false;
+    }
+
+    if (
+      selectedChainFilters.length > 0 &&
+      !selectedChainFilters.includes(getChainForProtocol(item.protocol))
+    ) {
       return false;
     }
 
@@ -848,7 +886,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
   const currentTabData = activeTab === "lite"
     ? allLoadedData.filter(item => {
         // Фильтруем исключенные токены Echelon
-        if (item.protocol === 'Echelon' && EXCLUDED_ECHELON_TOKENS.includes(item.token)) {
+        if (isHiddenIdeasPool(item)) {
           return false;
         }
 
@@ -869,7 +907,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
   useEffect(() => {
     if (activeTab !== 'pro') return;
 
-    const echelonItems = allLoadedData.filter((item) => item.protocol === 'Echelon');
+    const echelonItems = allLoadedData.filter((item) => item.protocol === 'Echelon' && !isHiddenIdeasPool(item));
     const toResolve: string[] = [];
 
     for (const item of echelonItems) {
@@ -917,18 +955,40 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
     );
   }
 
-  // Show loading indicators for protocols that are still loading
-  const showLoadingIndicators = loading && Object.values(uiProtocolsLoading).some(Boolean);
-  // Use protocolsLoading keys to show all protocols immediately, fallback to protocolsData if available
+  // Show the skeleton "Checking pools" placeholder only while we have zero
+  // data. As soon as any protocol resolves, render the dashboard with the
+  // partial result — the inline header indicator ("Loading X protocols…
+  // (Y pools loaded)") communicates that more is on the way. This stops a
+  // single slow upstream (e.g. Decibel) from gating the whole UI.
+  const hasAnyProtocolData = Object.keys(protocolsData).length > 0;
+  const showLoadingIndicators =
+    loading && !hasAnyProtocolData && Object.values(uiProtocolsLoading).some(Boolean);
   const protocolNames = [
-    ...new Set([
-      ...Object.keys(protocolsLoading),
-      ...Object.keys(protocolsData),
-      ...getProtocolsList().map((p) => p.name),
-    ]),
+    ...new Set(
+      Object.values(protocolsData)
+        .flat()
+        .filter((item) => !isHiddenIdeasPool(item))
+        .map((item) => item.protocol)
+    ),
   ]
-    .filter((name) => !HIDDEN_IDEAS_PROTOCOLS.has(name))
+    .filter((name) => name && !HIDDEN_IDEAS_PROTOCOLS.has(name))
     .sort((a, b) => a.localeCompare(b));
+  const proVisibleData = activeTab === "pro"
+    ? currentTabData
+        .filter(item => {
+          const depositTokenAddress =
+            item.protocol === 'Echelon' ? (item.coinAddress ?? item.token) : item.token;
+
+          const tokenInfo = getTokenInfo(item.asset, depositTokenAddress);
+          const hasTokenInfo = !!tokenInfo;
+          const hasAssetColon = item.asset.includes('::');
+          const hasDexTokens = !!(item.token1Info && item.token2Info) || !!(item as any).tokensInfo?.length;
+
+          // Include whitelisted protocols that may not resolve tokenInfo yet.
+          return hasAssetColon || hasTokenInfo || hasDexTokens || item.protocol === 'Echelon' || item.protocol === 'Decibel' || item.protocol === 'Echo Protocol' || item.protocol === 'APTree' || item.protocol === 'Jupiter' || item.protocol === 'Kamino';
+        })
+        .sort((a, b) => b.totalAPY - a.totalAPY)
+    : [];
 
   if (showLoadingIndicators) {
     return (
@@ -960,34 +1020,10 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
         </CollapsibleProvider>
       )}
 
-      {/* Claim Rewards + Yield AI agent wallet CTA */}
-      {(() => {
-        const hasClaimRewards =
-          !rewardsLoading &&
-          summary?.protocols &&
-          typeof summary.totalValue === "number" &&
-          summary.totalValue > 0;
-
-        if (hasClaimRewards) {
-          return (
-            <div className="mb-6 grid gap-4 md:grid-cols-2 items-stretch">
-              <ClaimRewardsBlock
-                summary={summary}
-                onClaim={() => setClaimModalOpen(true)}
-                loading={rewardsLoading}
-                className="mb-0"
-              />
-              <YieldAiAgentWalletBlock />
-            </div>
-          );
-        }
-
-        return (
-          <div className="mb-6">
-            <YieldAiAgentWalletBlock />
-          </div>
-        );
-      })()}
+      <div className="mb-6 grid gap-4 md:grid-cols-2 items-stretch">
+        <YieldAiAgentWalletBlock />
+        <DecibelAiAgentWalletBlock />
+      </div>
 
       <div className="mb-4 pl-4">
         <div className="flex items-center justify-between">
@@ -1038,7 +1074,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
                   const bestPool = 'stable' in item && item.stable
                     ? allLoadedData
                         .filter(pool => {
-                          if (pool.protocol === 'Echelon' && EXCLUDED_ECHELON_TOKENS.includes(pool.token)) return false;
+                          if (isHiddenIdeasPool(pool)) return false;
                           const protocol = getProtocolByName(pool.protocol);
                           if (!protocol || protocol.depositType !== 'native') return false;
                           return pool.asset.toUpperCase().includes('USDT') ||
@@ -1049,6 +1085,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
                         .sort((a, b) => b.totalAPY - a.totalAPY)[0]
                     : allLoadedData
                         .filter(pool => {
+                          if (isHiddenIdeasPool(pool)) return false;
                           const protocol = getProtocolByName(pool.protocol);
                           if (!protocol || protocol.depositType !== 'native') return false;
                           if (!('symbol' in item) || !('exact' in item)) return false;
@@ -1277,9 +1314,9 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
 			  </div>
 			)}
 			</div>
-		  </div>
+            </div>
             <div className="flex gap-1 flex-none">
-              {['USD', 'APT', 'BTC', 'ETH'].map((token) => (
+              {['USD', 'APT', 'BTC'].map((token) => (
                 <Button
                   key={token}
                   variant="outline"
@@ -1290,6 +1327,41 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
                   {token}
                 </Button>
               ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-3 flex-none rounded-md border bg-muted/20 px-2 py-1.5">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Type</span>
+                <div className="flex gap-1">
+                  {(['Lending', 'DEX'] as PoolTypeFilter[]).map((filter) => (
+                    <Button
+                      key={filter}
+                      variant={selectedPoolTypeFilters.includes(filter) ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => togglePoolTypeFilter(filter)}
+                      className="h-8 px-2"
+                    >
+                      {filter}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+              <div className="hidden h-6 w-px bg-border sm:block" />
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Chain</span>
+                <div className="flex gap-1">
+                  {(['Solana', 'Aptos'] as ChainFilter[]).map((filter) => (
+                    <Button
+                      key={filter}
+                      variant={selectedChainFilters.includes(filter) ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => toggleChainFilter(filter)}
+                      className="h-8 px-2"
+                    >
+                      {filter}
+                    </Button>
+                  ))}
+                </div>
+              </div>
             </div>
             <div className="flex items-center space-x-2">
               <Checkbox
@@ -1320,6 +1392,13 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
                   Columns
                 </div>
                 <DropdownMenuCheckboxItem
+                  checked={hideSmallTvlPools}
+                  onCheckedChange={(checked) => setHideSmallTvlPools(!!checked)}
+                >
+                  Hide TVL &lt; $10,000
+                </DropdownMenuCheckboxItem>
+                <div className="my-1 h-px bg-border" />
+                <DropdownMenuCheckboxItem
                   checked={showTvlColumn}
                   onCheckedChange={(checked) => setShowTvlColumn(!!checked)}
                 >
@@ -1341,7 +1420,224 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
             </DropdownMenu>
           </div>
 
+          {isMobileProLayout && (
+          <div className="space-y-3">
+            {showOnlyStablePools && (
+              <div className="rounded-md border border-emerald-200 bg-emerald-50/80 p-3 dark:border-emerald-900/60 dark:bg-emerald-950/30">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <Avatar className="h-8 w-8 ring-2 ring-emerald-200 dark:ring-emerald-800">
+                      <AvatarImage src={USDC_LOGO_APTOS} />
+                      <AvatarFallback>US</AvatarFallback>
+                    </Avatar>
+                    <div className="min-w-0">
+                      <div className="font-semibold leading-tight">Yield AI Stablecoin Agent</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">Featured</Badge>
+                        <Badge variant="outline">Yield AI</Badge>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <div className="font-semibold">
+                      {yieldAiStablecoinApr != null ? `${yieldAiStablecoinApr.toFixed(2)}%` : "-"}
+                    </div>
+                    <div className="text-xs text-muted-foreground">Supply</div>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                  <div>
+                    <div className="text-xs text-muted-foreground">TVL</div>
+                    <div>
+                      {yieldAiTvlUSD != null && yieldAiTvlUSD > 0
+                        ? `$${Math.round(yieldAiTvlUSD).toLocaleString()}`
+                        : "-"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-muted-foreground">Type</div>
+                    <div>Lending</div>
+                  </div>
+                </div>
+                <YieldAiStablecoinAgentAction className="mt-3" />
+              </div>
+            )}
+
+            {proVisibleData.map((item, index) => {
+              const depositTokenAddress =
+                item.protocol === 'Echelon' ? (item.coinAddress ?? item.token) : item.token;
+
+              const tokenInfo = getTokenInfo(item.asset, depositTokenAddress);
+              const resolvedTokenInfo = resolvedTokenInfos[depositTokenAddress];
+              const displaySymbol = tokenInfo?.symbol || resolvedTokenInfo?.symbol || item.asset;
+              const logoUrl = tokenInfo?.logoUrl || resolvedTokenInfo?.logoUrl || item.logoUrl;
+              const decimals = tokenInfo?.decimals ?? resolvedTokenInfo?.decimals ?? 8;
+              const priceUSD =
+                tokenInfo?.usdPrice != null
+                  ? Number(tokenInfo.usdPrice || 0)
+                  : (resolvedTokenInfo?.price ?? 0);
+              const protocol = getProtocolByName(item.protocol);
+              const chainLogo = getChainLogoForProtocol(item.protocol);
+              const isDex = !!(item.token1Info && item.token2Info) || !!(item as any).tokensInfo?.length;
+
+              return (
+                <div
+                  key={`mobile-${index}`}
+                  className={cn("rounded-md border p-3", getDropZoneClassName(item))}
+                  onDragOver={(e) => handleDragOver(e, item)}
+                  onDragLeave={handleDragLeave}
+                  onDrop={(e) => handleDropEvent(e, item)}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        {isDex ? (
+                          <>
+                            <div className="flex shrink-0">
+                              {(item as any).tokensInfo?.slice(0,3)?.map((t: any, idx: number) => (
+                                <Avatar key={idx} className={`h-6 w-6 ${idx > 0 ? '-ml-2' : ''}`}>
+                                  {t.logoUrl ? <img src={t.logoUrl} alt={t.symbol} className="object-contain" /> : null}
+                                </Avatar>
+                              )) || (
+                                <>
+                                  {item.token1Info?.logoUrl && (
+                                    <Avatar className="h-6 w-6">
+                                      <img src={item.token1Info.logoUrl} alt={item.token1Info.symbol} className="object-contain" />
+                                    </Avatar>
+                                  )}
+                                  {item.token2Info?.logoUrl && (
+                                    <Avatar className="h-6 w-6 -ml-2">
+                                      <img src={item.token2Info.logoUrl} alt={item.token2Info.symbol} className="object-contain" />
+                                    </Avatar>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                            <span className="min-w-0 break-words font-medium">
+                              {((item as any).tokensInfo?.slice(0,3)?.map((t: any) => t.symbol) || [item.token1Info?.symbol, item.token2Info?.symbol]).filter(Boolean).join(' / ')}
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <Avatar className="h-6 w-6 shrink-0">
+                              {logoUrl ? <AvatarImage src={logoUrl} /> : <AvatarFallback>{displaySymbol.slice(0, 2)}</AvatarFallback>}
+                            </Avatar>
+                            <span className="min-w-0 break-words font-medium">{displaySymbol}</span>
+                          </>
+                        )}
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        <img
+                          src={chainLogo.src}
+                          alt={chainLogo.alt}
+                          width={16}
+                          height={16}
+                          className="rounded-full shrink-0"
+                        />
+                        <Badge variant="outline" className="text-xs">{item.protocol}</Badge>
+                        <Badge variant="secondary" className="text-xs">{getPoolTypeFilter(item)}</Badge>
+                      </div>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <div className="font-semibold">{item.depositApy ? `${item.depositApy.toFixed(2)}%` : "-"}</div>
+                      <div className="text-xs text-muted-foreground">Supply</div>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                    {showTvlColumn && (
+                      <div>
+                        <div className="text-xs text-muted-foreground">TVL</div>
+                        <div>
+                          {typeof item.tvlUSD === "number" && item.tvlUSD > 0
+                            ? `$${Math.round(item.tvlUSD).toLocaleString()}`
+                            : "-"}
+                        </div>
+                      </div>
+                    )}
+                    {showBorrowColumn && (
+                      <div>
+                        <div className="text-xs text-muted-foreground">Borrow</div>
+                        <div>{item.borrowAPY ? `${item.borrowAPY.toFixed(2)}%` : "-"}</div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-3">
+                    {protocol ? (
+                      isDex ? (
+                        <Button
+                          variant="secondary"
+                          onClick={() => {
+                            if (item.protocol === 'Hyperion') {
+                              window.open(`https://hyperion.xyz/pool/${item.token}`, '_blank');
+                            } else if (item.protocol === 'Tapp Exchange') {
+                              window.open(`https://tapp.exchange/pool`, '_blank');
+                            } else if (item.protocol === 'Thala') {
+                              const poolAddress = (item as any).lptAddress || item.token;
+                              if (poolAddress) {
+                                window.open(`https://app.thala.fi/pools/${poolAddress}`, '_blank');
+                              }
+                            }
+                          }}
+                          className="w-full"
+                        >
+                          Deposit
+                          <ExternalLink className="ml-2 h-4 w-4" />
+                        </Button>
+                      ) : (
+                        <DepositButton
+                          protocol={protocol}
+                          className="w-full"
+                          tokenIn={{
+                            symbol:
+                              item.protocol === "Kamino"
+                                ? String(item.originalPool?.tokenSymbol ?? displaySymbol)
+                                : displaySymbol,
+                            logo: logoUrl || '/file.svg',
+                            decimals:
+                              protocol?.name === 'Jupiter' || protocol?.name === 'Kamino'
+                                ? (item.tokenDecimals ?? tokenInfo?.decimals ?? resolvedTokenInfo?.decimals ?? 6)
+                                : decimals,
+                            address:
+                              protocol?.name === 'Jupiter' ? item.token : depositTokenAddress
+                          }}
+                          balance={BigInt(1000000000)}
+                          priceUSD={
+                            protocol?.name === 'Jupiter'
+                              ? Number(tokenInfo?.usdPrice || 0)
+                              : priceUSD
+                          }
+                          solanaTokensOverride={solanaTokens}
+                          refreshSolanaOverride={refreshSolana}
+                          kaminoVaultAddress={
+                            item.protocol === 'Kamino' && item.originalPool?.vaultAddress
+                              ? String(item.originalPool.vaultAddress)
+                              : undefined
+                          }
+                          kaminoVaultLabel={
+                            item.protocol === "Kamino"
+                              ? String(item.originalPool?.tokenSymbol ?? displaySymbol)
+                              : undefined
+                          }
+                          kaminoDepositApy={item.protocol === 'Kamino' ? item.depositApy : undefined}
+                        />
+                      )
+                    ) : (
+                      <Button disabled className="w-full">
+                        Protocol not found
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          )}
+
+          {!isMobileProLayout && (
           <TooltipProvider>
+            <div>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -1410,22 +1706,59 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {currentTabData
-                  .filter(item => {
-                    const depositTokenAddress =
-                      item.protocol === 'Echelon' ? (item.coinAddress ?? item.token) : item.token;
-
-                    const tokenInfo = getTokenInfo(item.asset, depositTokenAddress);
-                    const hasTokenInfo = !!tokenInfo;
-                    const hasAssetColon = item.asset.includes('::');
-                    const hasDexTokens = !!(item.token1Info && item.token2Info) || !!(item as any).tokensInfo?.length;
-
-
-                    // Include whitelisted protocols that may not resolve tokenInfo yet.
-                    return hasAssetColon || hasTokenInfo || hasDexTokens || item.protocol === 'Echelon' || item.protocol === 'Decibel' || item.protocol === 'Echo Protocol' || item.protocol === 'APTree' || item.protocol === 'Jupiter' || item.protocol === 'Kamino';
-                  })
-                  .sort((a, b) => b.totalAPY - a.totalAPY)
-                  .map((item, index) => {
+                {showOnlyStablePools && (
+                  <TableRow className="border-y border-emerald-200 bg-emerald-50/80 hover:bg-emerald-50 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:hover:bg-emerald-950/40">
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <Avatar className="h-7 w-7 ring-2 ring-emerald-200 dark:ring-emerald-800">
+                          <AvatarImage src={USDC_LOGO_APTOS} />
+                          <AvatarFallback>US</AvatarFallback>
+                        </Avatar>
+                        <div className="flex flex-col">
+                          <span className="font-semibold">Yield AI Stablecoin Agent</span>
+                          <span className="text-xs text-muted-foreground">USDC strategy</span>
+                        </div>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <img
+                          src={getChainLogoForProtocol("AI agent").src}
+                          alt="Aptos"
+                          width={18}
+                          height={18}
+                          className="rounded-full shrink-0"
+                        />
+                        <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">
+                          Featured
+                        </Badge>
+                        <Badge variant="outline">Yield AI</Badge>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      {yieldAiStablecoinApr != null ? `${yieldAiStablecoinApr.toFixed(2)}%` : "-"}
+                    </TableCell>
+                    {showBorrowColumn && <TableCell>-</TableCell>}
+                    {showTvlColumn && (
+                      <TableCell>
+                        {yieldAiTvlUSD != null && yieldAiTvlUSD > 0
+                          ? `$${Math.round(yieldAiTvlUSD).toLocaleString()}`
+                          : "-"}
+                      </TableCell>
+                    )}
+                    {showTypeColumn && (
+                      <TableCell>
+                        <Badge variant="outline" className="text-xs">
+                          Lending
+                        </Badge>
+                      </TableCell>
+                    )}
+                    <TableCell className="text-right">
+                      <YieldAiStablecoinAgentAction />
+                    </TableCell>
+                  </TableRow>
+                )}
+                {proVisibleData.map((item, index) => {
 
                     const depositTokenAddress =
                       item.protocol === 'Echelon' ? (item.coinAddress ?? item.token) : item.token;
@@ -1455,91 +1788,50 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
                         onDrop={(e) => handleDropEvent(e, item)}
                       >
                         <TableCell>
-                          <TooltipProvider>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <div className="flex items-center gap-2">
-                                  {isDex ? (
-                                    // DEX pool display with up to three tokens
-                                    <div className="flex items-center gap-2">
-                                      <div className="flex">
-                                        {(item as any).tokensInfo?.slice(0,3)?.map((t: any, idx: number) => (
-                                          <Avatar key={idx} className={`w-6 h-6 ${idx > 0 ? '-ml-2' : ''}`}>
-                                            {t.logoUrl ? (
-                                              <img src={t.logoUrl} alt={t.symbol} className="object-contain" />
-                                            ) : null}
-                                          </Avatar>
-                                        )) || (
-                                          <>
-                                            {item.token1Info?.logoUrl && (
-                                              <Avatar className="w-6 h-6">
-                                                <img src={item.token1Info.logoUrl} alt={item.token1Info.symbol} className="object-contain" />
-                                              </Avatar>
-                                            )}
-                                            {item.token2Info?.logoUrl && (
-                                              <Avatar className="w-6 h-6 -ml-2">
-                                                <img src={item.token2Info.logoUrl} alt={item.token2Info.symbol} className="object-contain" />
-                                              </Avatar>
-                                            )}
-                                          </>
-                                        )}
-                                      </div>
-                                      <span>{((item as any).tokensInfo?.slice(0,3)?.map((t: any) => t.symbol) || [item.token1Info?.symbol, item.token2Info?.symbol]).filter(Boolean).join(' / ')}</span>
-                                    </div>
-                                  ) : (
-                                    // Lending pool display (existing logic)
+                          <div className="flex items-center gap-2">
+                            {isDex ? (
+                              // DEX pool display with up to three tokens
+                              <div className="flex items-center gap-2">
+                                <div className="flex">
+                                  {(item as any).tokensInfo?.slice(0,3)?.map((t: any, idx: number) => (
+                                    <Avatar key={idx} className={`w-6 h-6 ${idx > 0 ? '-ml-2' : ''}`}>
+                                      {t.logoUrl ? (
+                                        <img src={t.logoUrl} alt={t.symbol} className="object-contain" />
+                                      ) : null}
+                                    </Avatar>
+                                  )) || (
                                     <>
-                                      <Avatar className="h-6 w-6">
-                                        {logoUrl ? (
-                                          <AvatarImage src={logoUrl} />
-                                        ) : (
-                                          <AvatarFallback>{displaySymbol.slice(0, 2)}</AvatarFallback>
-                                        )}
-                                      </Avatar>
-                                      <div className="flex flex-col">
-                                        <span>{displaySymbol}</span>
-                                      </div>
+                                      {item.token1Info?.logoUrl && (
+                                        <Avatar className="w-6 h-6">
+                                          <img src={item.token1Info.logoUrl} alt={item.token1Info.symbol} className="object-contain" />
+                                        </Avatar>
+                                      )}
+                                      {item.token2Info?.logoUrl && (
+                                        <Avatar className="w-6 h-6 -ml-2">
+                                          <img src={item.token2Info.logoUrl} alt={item.token2Info.symbol} className="object-contain" />
+                                        </Avatar>
+                                      )}
                                     </>
                                   )}
                                 </div>
-                              </TooltipTrigger>
-                              <TooltipContent>
-                                <div className="space-y-1">
-                                  <p className="font-medium">Token Info</p>
-                                  <p className="text-xs">Address: {depositTokenAddress}</p>
-                                  {isDex ? (
-                                    // DEX tooltip content
-                                    <>
-                                      <p className="text-xs">Type: DEX Pool</p>
-                                      {item.poolType && (
-                                        <p className="text-xs">Pool Type: {item.poolType}</p>
-                                      )}
-                                      <p className="text-xs">Token 1: {item.token1Info?.symbol} ({item.token1Info?.name})</p>
-                                      <p className="text-xs">Token 2: {item.token2Info?.symbol} ({item.token2Info?.name})</p>
-                                      {item.dailyVolumeUSD && (
-                                        <p className="text-xs">Volume: ${item.dailyVolumeUSD.toLocaleString()}</p>
-                                      )}
-                                      {item.tvlUSD && (
-                                        <p className="text-xs">TVL: ${item.tvlUSD.toLocaleString()}</p>
-                                      )}
-                                    </>
+                                <span>{((item as any).tokensInfo?.slice(0,3)?.map((t: any) => t.symbol) || [item.token1Info?.symbol, item.token2Info?.symbol]).filter(Boolean).join(' / ')}</span>
+                              </div>
+                            ) : (
+                              // Lending pool display (existing logic)
+                              <>
+                                <Avatar className="h-6 w-6">
+                                  {logoUrl ? (
+                                    <AvatarImage src={logoUrl} />
                                   ) : (
-                                    (tokenInfo || resolvedTokenInfo) && (
-                                      <>
-                                        <p className="text-xs">
-                                          Name: {tokenInfo?.name ?? resolvedTokenInfo?.name ?? displaySymbol}
-                                        </p>
-                                        <p className="text-xs">
-                                          Symbol: {tokenInfo?.symbol ?? resolvedTokenInfo?.symbol ?? displaySymbol}
-                                        </p>
-                                      </>
-                                    )
+                                    <AvatarFallback>{displaySymbol.slice(0, 2)}</AvatarFallback>
                                   )}
-                                  <p className="text-xs">Provider: {getProvider(item)}</p>
+                                </Avatar>
+                                <div className="flex flex-col">
+                                  <span>{displaySymbol}</span>
                                 </div>
-                              </TooltipContent>
-                            </Tooltip>
-                          </TooltipProvider>
+                              </>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-2">
@@ -1733,20 +2025,12 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
                   })}
               </TableBody>
             </Table>
+            </div>
           </TooltipProvider>
+          )}
           </>
         )}
       </Box>
-
-      {/* Claim All Rewards Modal */}
-      {summary && (
-        <ClaimAllRewardsModal
-          isOpen={claimModalOpen}
-          onClose={() => setClaimModalOpen(false)}
-          summary={summary}
-          positions={useWalletStore.getState().positions.hyperion}
-        />
-      )}
     </div>
   );
 }

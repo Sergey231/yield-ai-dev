@@ -30,6 +30,10 @@ import { PositionsList as DecibelPositionsList } from "./protocols/decibel/Posit
 import { PositionsList as AptreePositionsList } from "./protocols/aptree/PositionsList";
 import { PositionsList as JupiterPositionsList } from "./protocols/jupiter/PositionsList";
 import { PositionsList as KaminoPositionsList } from "./protocols/kamino/PositionsList";
+import { PositionsList as MeteoraPositionsList } from "./protocols/meteora/PositionsList";
+import { PositionsList as RaydiumPositionsList } from "./protocols/raydium/PositionsList";
+import { PositionsList as OrcaPositionsList } from "./protocols/orca/PositionsList";
+import { PositionsList as TramplinPositionsList } from "./protocols/tramplin/PositionsList";
 import { PositionsList as YieldAIPositionsList } from "./protocols/yield-ai/PositionsList";
 import { CardTitle } from '@/components/ui/card';
 import { usePortfolioAddressResolver } from '@/lib/hooks/usePortfolioAddressResolver';
@@ -79,6 +83,10 @@ export default function PortfolioPage() {
   const [aptreeValue, setAptreeValue] = useState(0);
   const [jupiterValue, setJupiterValue] = useState(0);
   const [kaminoValue, setKaminoValue] = useState(0);
+  const [meteoraValue, setMeteoraValue] = useState(0);
+  const [raydiumValue, setRaydiumValue] = useState(0);
+  const [orcaValue, setOrcaValue] = useState(0);
+  const [tramplinValue, setTramplinValue] = useState(0);
   const [yieldAIValue, setYieldAIValue] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [checkingAptosProtocols, setCheckingAptosProtocols] = useState<string[]>([]);
@@ -259,7 +267,7 @@ export default function PortfolioPage() {
    "APTree",
    "AI agent",
   ];
-  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino"];
+  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino", "Meteora", "Raydium", "Orca", "Tramplin"];
 
   const resetAptosChecking = useCallback(() => {
     setAptosCheckRunId((x) => x + 1);
@@ -330,6 +338,10 @@ export default function PortfolioPage() {
     setAptreeValue(0);
     setJupiterValue(0);
     setKaminoValue(0);
+    setMeteoraValue(0);
+    setRaydiumValue(0);
+    setOrcaValue(0);
+    setTramplinValue(0);
     setYieldAIValue(0);
     resetAptosChecking();
     resetSolanaChecking();
@@ -354,6 +366,10 @@ export default function PortfolioPage() {
     if (!solanaProtocolsAddress) {
       setJupiterValue(0);
       setKaminoValue(0);
+      setMeteoraValue(0);
+      setRaydiumValue(0);
+      setOrcaValue(0);
+      setTramplinValue(0);
     }
   }, [solanaProtocolsAddress]);
 
@@ -448,6 +464,22 @@ export default function PortfolioPage() {
     setKaminoValue(Number.isFinite(value) ? value : 0);
   }, []);
 
+  const handleMeteoraValueChange = useCallback((value: number) => {
+    setMeteoraValue(Number.isFinite(value) ? value : 0);
+  }, []);
+
+  const handleRaydiumValueChange = useCallback((value: number) => {
+    setRaydiumValue(Number.isFinite(value) ? value : 0);
+  }, []);
+
+  const handleOrcaValueChange = useCallback((value: number) => {
+    setOrcaValue(Number.isFinite(value) ? value : 0);
+  }, []);
+
+  const handleTramplinValueChange = useCallback((value: number) => {
+    setTramplinValue(Number.isFinite(value) ? value : 0);
+  }, []);
+
   // Считаем сумму по кошельку (value или amount × price — как в Solana)
   const walletTotal = tokens.reduce((sum, token) => {
     const value = getTokenUsdValue(token);
@@ -476,7 +508,8 @@ export default function PortfolioPage() {
 
   // Итоговая сумма
   const totalAssets = walletTotal + totalProtocolsValue;
-  const chartTotalAssets = totalAssets + (solanaTotalValue ?? 0) + jupiterValue + kaminoValue;
+  const chartTotalAssets =
+    totalAssets + (solanaTotalValue ?? 0) + jupiterValue + kaminoValue + meteoraValue + raydiumValue + orcaValue + tramplinValue;
 
   useEffect(() => {
     // Global total assets (used e.g. in ChatPanel): include Solana wallet + Solana protocols too.
@@ -504,6 +537,10 @@ export default function PortfolioPage() {
     { name: 'APTree', value: aptreeValue },
     { name: 'Jupiter', value: jupiterValue },
     { name: 'Kamino', value: kaminoValue, color: '#000000' },
+    { name: 'Meteora', value: meteoraValue },
+    { name: 'Raydium', value: raydiumValue },
+    { name: 'Orca', value: orcaValue },
+    { name: 'Tramplin', value: tramplinValue },
     { name: 'AI agent', value: yieldAIValue },
   ];
 
@@ -807,7 +844,11 @@ export default function PortfolioPage() {
                               onMainnetValueChange={name === 'Decibel' ? handleDecibelMainnetValueChange : undefined}
                               onPositionsCheckComplete={() => {
                                 const runId = aptosCheckRunId;
-                                setCheckingAptosProtocols((prev) => (aptosCheckRunId === runId ? prev.filter((p) => p !== name) : prev));
+                                setCheckingAptosProtocols((prev) => {
+                                  if (aptosCheckRunId !== runId) return prev;
+                                  if (!prev.includes(name)) return prev;
+                                  return prev.filter((p) => p !== name);
+                                });
                               }}
                             />
                           )) : null}
@@ -882,6 +923,30 @@ export default function PortfolioPage() {
                           name: "Kamino" as const,
                           value: kaminoValue,
                           onValue: handleKaminoValueChange,
+                        },
+                        {
+                          component: MeteoraPositionsList,
+                          name: "Meteora" as const,
+                          value: meteoraValue,
+                          onValue: handleMeteoraValueChange,
+                        },
+                        {
+                          component: RaydiumPositionsList,
+                          name: "Raydium" as const,
+                          value: raydiumValue,
+                          onValue: handleRaydiumValueChange,
+                        },
+                        {
+                          component: OrcaPositionsList,
+                          name: "Orca" as const,
+                          value: orcaValue,
+                          onValue: handleOrcaValueChange,
+                        },
+                        {
+                          component: TramplinPositionsList,
+                          name: "Tramplin" as const,
+                          value: tramplinValue,
+                          onValue: handleTramplinValueChange,
                         },
                       ]
                         .sort((a, b) => b.value - a.value)

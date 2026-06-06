@@ -2,6 +2,8 @@
 
 Server-side worker that paginates Yield AI safes and may submit transactions signed by **`YIELD_AI_EXECUTOR_PRIVATE_KEY`** (claim → swap → deposit). The frontend does not sign these transactions.
 
+The primary `/cron/run` entrypoint now also runs Hyperion LP auto-claim after the stablecoin compound pass. Recenter remains on the dedicated Hyperion endpoint and is not part of the hourly default.
+
 ### Endpoint
 
 - **Method:** `POST`
@@ -29,6 +31,11 @@ The **`dryRun` flag is read only from the JSON body**, not from custom headers. 
 | `maxSafesProcessedPerRun` | number | Cap on safes processed per invocation (optional). |
 | `maxTxPerRun` | number | Cap on transaction submissions per invocation (optional). |
 | `concurrencyReads` | number | Parallelism for balance/view reads (optional). |
+| `includeHyperionLp` | boolean (or string) | Default `true`. If `false`, skips the Hyperion LP auto-claim pass and runs only the stablecoin worker. |
+| `hyperionMinClaimUsd` | number (or string) | Optional override for the Hyperion LP fee claim threshold. Default is the Hyperion helper default (`0.1`). |
+| `hyperionMinRewardClaimUsd` | number (or string) | Optional override for the Hyperion LP reward claim threshold. Defaults to `hyperionMinClaimUsd` / `0.1`. |
+| `hyperionMinRewardSwapUsd` | number (or string) | Optional override for the claimed APT reward swap threshold. Defaults to `hyperionMinRewardClaimUsd` / `0.1`. |
+| `hyperionSwapRewardsToUsdc` | boolean (or string) | Default `true`. If `false`, Hyperion APT rewards are claimed but not swapped to USDC. |
 
 **Minimal dry-run body:**
 
@@ -72,12 +79,20 @@ Success shape (via `createSuccessResponse`):
       "swap": [],
       "deposit": []
     },
+    "hyperionLp": {
+      "action": "claim",
+      "dryRun": false,
+      "safesProcessed": 0,
+      "actedPositions": 0,
+      "results": []
+    },
     "dryRun": false
   }
 }
 ```
 
 - **`txCount`** is the sum of claim + swap + deposit steps (including **`dryRun: true`**). **`txCountByKind`** breaks it down by type.
+- **`hyperionLp`** reports the separate Hyperion LP auto-claim pass. These transactions are not folded into the stablecoin `txCount` fields.
 - **Hashes** are populated only when transactions are actually submitted (`dryRun: false`).
 - If the body is invalid JSON, the handler may fall back to defaults and **`dryRun` may be `false`** — fix the JSON (valid JSON uses `:` not `=` in objects, e.g. `{"dryRun":false}` not `{"dryRun":=false}`).
 
@@ -126,4 +141,5 @@ curl -X POST "https://yieldai.app/api/protocols/yield-ai/cron/run" \
 
 - Route: `src/app/api/protocols/yield-ai/cron/run/route.ts`
 - Worker: `src/lib/protocols/yield-ai/yieldAiVaultWorker.ts`
+- Hyperion LP cron helper: `src/lib/protocols/yield-ai/hyperionLpCron.ts`
 - Executor / submit + wait for confirmation: `src/lib/protocols/yield-ai/vaultExecutor.ts`

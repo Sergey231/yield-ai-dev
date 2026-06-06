@@ -1,22 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { ProtocolCard } from "@/shared/ProtocolCard";
 import { formatCurrency } from "@/lib/utils/numberFormat";
-import {
-  useMoarPositions,
-  useMoarRewards,
-  useMoarPools,
-} from "@/lib/query/hooks/protocols/moar";
-import { mapMoarPositionsToProtocolPositionsAiAgent } from "./mapMoarToProtocolPositionsAiAgent";
 import { queryKeys } from "@/lib/query/queryKeys";
-import { useYieldAiSafes, useYieldAiSafeTokens, useSelectedYieldAiSafe } from "@/lib/query/hooks/protocols/yield-ai";
-import { useEchelonProtocolCardModel } from "@/lib/query/hooks/protocols/echelon/useEchelonProtocolCardModel";
-import { mapYieldAiSafeTokensToProtocolPositions } from "./mapYieldAiSafeTokensToProtocolPositions";
-import { mapEchelonProtocolPositionsToAiAgent } from "./mapEchelonToProtocolPositionsAiAgent";
+import { useYieldAiSafes } from "@/lib/query/hooks/protocols/yield-ai";
+import { toCanonicalAddress } from "@/lib/utils/addressNormalization";
+import { SafePositionsCard, type SafePositionsData } from "./SafePositionsCard";
+
+const MIN_VISIBLE_USD = 0.0001;
 
 interface PositionsListProps {
   address?: string;
@@ -33,7 +28,6 @@ export function PositionsList({
   onPositionsCheckComplete,
   showManageButton = true,
 }: PositionsListProps) {
-  const MIN_VISIBLE_USD = 0.0001;
   const { account } = useWallet();
   const queryClient = useQueryClient();
   const walletAddress = address || account?.address?.toString();
@@ -42,126 +36,98 @@ export function PositionsList({
   onValueRef.current = onPositionsValueChange;
   onCompleteRef.current = onPositionsCheckComplete;
 
-  const { data: safeAddresses = [], isLoading: safesLoading, isFetching: safesFetching } =
-    useYieldAiSafes(walletAddress);
+  const { data: safeAddresses = [] } = useYieldAiSafes(walletAddress);
 
-  const { selectedSafeAddress: safeAddress } = useSelectedYieldAiSafe({
-    owner: walletAddress,
-    safeAddresses,
-  });
+  const normalizedSafes = useMemo(
+    () => Array.from(new Set(safeAddresses.map((s) => toCanonicalAddress(s)))),
+    [safeAddresses]
+  );
 
-  const {
-    data: safeTokens = [],
-    isLoading: safeTokensLoading,
-    isFetching: safeTokensFetching,
-  } = useYieldAiSafeTokens(safeAddress ?? undefined, {
-    refetchOnMount: refreshKey != null ? "always" : undefined,
-    enabled: Boolean(safeAddress),
-  });
+  const [dataBySafe, setDataBySafe] = useState<Record<string, SafePositionsData>>({});
 
-  const {
-    data: moarPositions = [],
-    isLoading: moarPositionsLoading,
-    isFetching: moarPositionsFetching,
-    error: moarPositionsError,
-  } = useMoarPositions(safeAddress ?? undefined, {
-    refetchOnMount: refreshKey != null ? "always" : undefined,
-    enabled: Boolean(safeAddress),
-  });
-  const {
-    data: rewardsResponse,
-    isLoading: moarRewardsLoading,
-    isFetching: moarRewardsFetching,
-  } = useMoarRewards(safeAddress ?? undefined, {
-    enabled: Boolean(safeAddress),
-  });
-  const { data: poolsResponse } = useMoarPools();
-
-  const {
-    protocolPositions: echelonProtocolPositions,
-    totalValue: echelonTotalValue,
-    rewardsValueUsd: echelonRewardsValueUsd,
-    isLoading: echelonLoading,
-    isFetching: echelonFetching,
-  } = useEchelonProtocolCardModel(safeAddress ?? undefined, {
-    enabled: Boolean(safeAddress),
-    refetchOnMount: refreshKey != null ? "always" : undefined,
-  });
-
-  const rewardsTotalUsd = rewardsResponse?.totalUsd ?? 0;
-
-  const aprByPoolId = useMemo(() => {
-    if (!poolsResponse?.data) return {} as Record<number, number>;
-    const map: Record<number, number> = {};
-    (poolsResponse.data as { poolId?: number; totalAPY?: number }[]).forEach((pool) => {
-      if (pool.poolId !== undefined) {
-        map[pool.poolId] = pool.totalAPY ?? 0;
+  // Drop entries for safes that disappeared from the list. Important: only
+  // produce a NEW state ref when something actually changed — otherwise this
+  // gratuitously triggers downstream useEffects (`aggregated`, completion
+  // signal) and can cascade through the Sidebar.
+  useEffect(() => {
+    setDataBySafe((prev) => {
+      const prevKeys = Object.keys(prev);
+      const nextSet = new Set(normalizedSafes);
+      const stillFits =
+        prevKeys.length === normalizedSafes.length &&
+        prevKeys.every((k) => nextSet.has(k));
+      if (stillFits) return prev;
+      const next: Record<string, SafePositionsData> = {};
+      for (const s of normalizedSafes) {
+        if (prev[s]) next[s] = prev[s];
       }
+      return next;
     });
-    return map;
-  }, [poolsResponse?.data]);
+  }, [normalizedSafes]);
 
-  const moarProtocolPositions = useMemo(
-    () => mapMoarPositionsToProtocolPositionsAiAgent(moarPositions, aprByPoolId),
-    [moarPositions, aprByPoolId]
-  );
+  // Aggregated values across all safes.
+  const aggregated = useMemo(() => {
+    const allPositions = normalizedSafes.flatMap((s) => dataBySafe[s]?.positions ?? []);
+    const sortedPositions = allPositions
+      .filter((p) => Number.isFinite(p.value) && p.value >= MIN_VISIBLE_USD)
+      .sort((a, b) => b.value - a.value);
+    const totalValue = normalizedSafes.reduce((sum, s) => sum + (dataBySafe[s]?.totalValue ?? 0), 0);
+    const totalRewardsUsdNum = normalizedSafes.reduce(
+      (sum, s) => sum + (dataBySafe[s]?.rewardsUsd ?? 0),
+      0
+    );
+    // Treat a safe with no row yet as still loading/fetching so multi-safe
+    // wallets do not briefly see an empty "settled" aggregate before children mount.
+    const isLoading = normalizedSafes.some((s) => {
+      const row = dataBySafe[s];
+      return row == null || row.isLoading;
+    });
+    const isFetching = normalizedSafes.some((s) => {
+      const row = dataBySafe[s];
+      return row == null || row.isFetching;
+    });
+    const hasAnyActivity = normalizedSafes.some((s) => dataBySafe[s]?.hasAnyActivity);
+    const hasError = normalizedSafes.some((s) => dataBySafe[s]?.hasError);
+    return {
+      positions: sortedPositions,
+      totalValue,
+      totalRewardsUsdNum,
+      isLoading,
+      isFetching,
+      hasAnyActivity,
+      hasError,
+    };
+  }, [normalizedSafes, dataBySafe]);
 
-  const tokenProtocolPositions = useMemo(
-    () => mapYieldAiSafeTokensToProtocolPositions(safeTokens),
-    [safeTokens]
-  );
+  // Bubble up the aggregated total value to Sidebar.
+  useEffect(() => {
+    onValueRef.current?.(aggregated.totalValue);
+  }, [aggregated.totalValue]);
 
-  const echelonAiPositions = useMemo(
-    () => mapEchelonProtocolPositionsToAiAgent(echelonProtocolPositions),
-    [echelonProtocolPositions]
-  );
+  // Fire onPositionsCheckComplete whenever we are in a "settled" state.
+  // Sidebar's removal handler is idempotent (returns the same array reference
+  // when the protocol name is already absent), so re-firing is a no-op render-
+  // wise. We must re-fire on every settled render because the parent can put
+  // the protocol back into the spinner list mid-life (e.g. when
+  // `shouldCheckAptosProtocols` flips from false→true after `aptosHasTxQuery`
+  // resolves for a derived Aptos wallet — Sidebar then re-seeds
+  // `checkingAptosProtocols` with all names, and without re-firing we'd be
+  // stuck until the 30s safety valve).
+  useEffect(() => {
+    if (normalizedSafes.length === 0) {
+      onCompleteRef.current?.();
+      return;
+    }
+    const allChildrenSettled = normalizedSafes.every((s) => {
+      const row = dataBySafe[s];
+      return row != null && !row.isFetching;
+    });
+    if (allChildrenSettled) {
+      onCompleteRef.current?.();
+    }
+  }, [normalizedSafes, dataBySafe]);
 
-  const mergedProtocolPositions = useMemo(
-    () =>
-      [...moarProtocolPositions, ...echelonAiPositions, ...tokenProtocolPositions].sort(
-        (a, b) => b.value - a.value
-      ),
-    [moarProtocolPositions, echelonAiPositions, tokenProtocolPositions]
-  );
-
-  const visibleProtocolPositions = useMemo(
-    () => mergedProtocolPositions.filter((p) => Number.isFinite(p.value) && p.value >= MIN_VISIBLE_USD),
-    [mergedProtocolPositions]
-  );
-
-  const positionsValue = useMemo(
-    () => moarPositions.reduce((sum, p) => sum + parseFloat(p.value || "0"), 0),
-    [moarPositions]
-  );
-  const tokensValue = useMemo(
-    () => safeTokens.reduce((sum, t) => sum + (t.value ? parseFloat(t.value) : 0), 0),
-    [safeTokens]
-  );
-
-  const combinedRewardsUsd = rewardsTotalUsd + echelonRewardsValueUsd;
-  const totalValue = positionsValue + tokensValue + rewardsTotalUsd + echelonTotalValue;
-
-  const totalRewardsUsd =
-    combinedRewardsUsd > 0
-      ? combinedRewardsUsd < 1
-        ? "<$1"
-        : formatCurrency(combinedRewardsUsd, 2)
-      : undefined;
-
-  const isLoading =
-    safesLoading ||
-    safeTokensLoading ||
-    moarPositionsLoading ||
-    moarRewardsLoading ||
-    echelonLoading;
-  const isFetching =
-    safesFetching ||
-    safeTokensFetching ||
-    moarPositionsFetching ||
-    moarRewardsFetching ||
-    echelonFetching;
-  const hasError = Boolean(moarPositionsError);
-
+  // refreshKey: invalidate the safes-list query so safes are reloaded.
   useEffect(() => {
     if (refreshKey != null && walletAddress) {
       queryClient.invalidateQueries({
@@ -170,93 +136,112 @@ export function PositionsList({
     }
   }, [refreshKey, walletAddress, queryClient]);
 
-  useEffect(() => {
-    if (refreshKey != null && safeAddress) {
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddress),
+  const handleSafeData = useMemo(
+    () => (data: SafePositionsData) => {
+      setDataBySafe((prev) => {
+        const existing = prev[data.safeAddress];
+        // Cheap stable equality check to avoid render/update loops.
+        if (
+          existing &&
+          existing.positionsSignature === data.positionsSignature &&
+          existing.totalValue === data.totalValue &&
+          existing.rewardsUsd === data.rewardsUsd &&
+          existing.isLoading === data.isLoading &&
+          existing.isFetching === data.isFetching &&
+          existing.hasError === data.hasError &&
+          existing.hasAnyActivity === data.hasAnyActivity
+        ) {
+          return prev;
+        }
+        return { ...prev, [data.safeAddress]: data };
       });
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.protocols.moar.userPositions(safeAddress),
-      });
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.protocols.moar.rewards(safeAddress),
-      });
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.protocols.echelon.userPositions(safeAddress),
-      });
-      queryClient.invalidateQueries({
-        queryKey: queryKeys.protocols.echelon.rewards(safeAddress),
-      });
-    }
-  }, [refreshKey, safeAddress ?? undefined, queryClient]);
-
-  useEffect(() => {
-    const handleRefresh: EventListener = (evt) => {
-      const event = evt as CustomEvent<{ protocol?: string }>;
-      if (event?.detail?.protocol === "echelon" && safeAddress) {
-        queryClient.invalidateQueries({
-          queryKey: queryKeys.protocols.echelon.userPositions(safeAddress),
-        });
-        queryClient.invalidateQueries({
-          queryKey: queryKeys.protocols.echelon.rewards(safeAddress),
-        });
-      }
-    };
-    window.addEventListener("refreshPositions", handleRefresh);
-    return () => window.removeEventListener("refreshPositions", handleRefresh);
-  }, [safeAddress ?? undefined, queryClient]);
-
-  useEffect(() => {
-    if (!isFetching) {
-      onCompleteRef.current?.();
-    }
-  }, [isFetching]);
-
-  useEffect(() => {
-    onValueRef.current?.(totalValue);
-  }, [totalValue]);
+    },
+    []
+  );
 
   const protocol = getProtocolByName("AI agent");
   if (!protocol) return null;
-  if (hasError) return null;
+  if (!walletAddress) return null;
+  if (normalizedSafes.length === 0) return null;
+  if (aggregated.hasError) {
+    // Still keep the data collectors mounted so a future refresh can recover.
+    return (
+      <>
+        {normalizedSafes.map((safe) => (
+          <SafePositionsCard
+            key={safe}
+            safeAddress={safe}
+            refreshKey={refreshKey}
+            onData={handleSafeData}
+          />
+        ))}
+      </>
+    );
+  }
 
-  // Do not show card when user has no safe
-  if (!safeAddress) return null;
+  // No activity across any safe — hide the card entirely.
+  if (!aggregated.isLoading && !aggregated.hasAnyActivity) {
+    return (
+      <>
+        {normalizedSafes.map((safe) => (
+          <SafePositionsCard
+            key={safe}
+            safeAddress={safe}
+            refreshKey={refreshKey}
+            onData={handleSafeData}
+          />
+        ))}
+      </>
+    );
+  }
 
-  const echelonHasActivity =
-    echelonProtocolPositions.length > 0 || echelonRewardsValueUsd > 0;
-
-  // No positions at all
   if (
-    !isLoading &&
-    moarPositions.length === 0 &&
-    safeTokens.length === 0 &&
-    rewardsTotalUsd === 0 &&
-    !echelonHasActivity
+    !aggregated.isLoading &&
+    aggregated.positions.length === 0 &&
+    aggregated.totalRewardsUsdNum === 0
   ) {
-    return null;
+    return (
+      <>
+        {normalizedSafes.map((safe) => (
+          <SafePositionsCard
+            key={safe}
+            safeAddress={safe}
+            refreshKey={refreshKey}
+            onData={handleSafeData}
+          />
+        ))}
+      </>
+    );
   }
 
-  // Hide card when everything is dust-level (but allow rewards badge to still show a card).
-  if (!isLoading && visibleProtocolPositions.length === 0 && combinedRewardsUsd === 0) {
-    return null;
-  }
+  const totalRewardsUsd =
+    aggregated.totalRewardsUsdNum > 0
+      ? aggregated.totalRewardsUsdNum < 1
+        ? "<$1"
+        : formatCurrency(aggregated.totalRewardsUsdNum, 2)
+      : undefined;
 
   const showInitialSkeleton =
-    isLoading &&
-    moarPositions.length === 0 &&
-    safeTokens.length === 0 &&
-    rewardsTotalUsd === 0 &&
-    !echelonHasActivity;
+    aggregated.isLoading && aggregated.positions.length === 0 && !aggregated.hasAnyActivity;
 
   return (
-    <ProtocolCard
-      protocol={protocol}
-      totalValue={totalValue}
-      totalRewardsUsd={totalRewardsUsd}
-      positions={visibleProtocolPositions}
-      isLoading={showInitialSkeleton}
-      showManageButton={showManageButton}
-    />
+    <>
+      {normalizedSafes.map((safe) => (
+        <SafePositionsCard
+          key={safe}
+          safeAddress={safe}
+          refreshKey={refreshKey}
+          onData={handleSafeData}
+        />
+      ))}
+      <ProtocolCard
+        protocol={protocol}
+        totalValue={aggregated.totalValue}
+        totalRewardsUsd={totalRewardsUsd}
+        positions={aggregated.positions}
+        isLoading={showInitialSkeleton}
+        showManageButton={showManageButton}
+      />
+    </>
   );
 }

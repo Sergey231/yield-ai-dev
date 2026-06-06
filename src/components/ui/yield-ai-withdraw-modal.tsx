@@ -1,24 +1,23 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
 import { Loader2 } from "lucide-react";
-import { Slider } from "@/components/ui/slider";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { Token } from "@/lib/types/token";
 import { APTOS_COIN_TYPE } from "@/lib/constants/yieldAiVault";
 import { buildVaultWithdrawPayload } from "@/lib/protocols/yield-ai/vaultDeposit";
 import { showTransactionSuccessToast } from "@/components/ui/transaction-toast";
+import { useAmountInput } from "@/hooks/useAmountInput";
+import { TokenAmountInput } from "@/shared/DepositAmountInput";
 
 /** FA metadata address from token (safe asset_type). APT is not supported for vault::withdraw. */
 function getMetadataAddress(token: Token): string | null {
@@ -27,6 +26,20 @@ function getMetadataAddress(token: Token): string | null {
   return token.address.includes("::")
     ? token.address.split("::")[0]
     : token.address;
+}
+
+/** Format a raw bigint amount (smallest units) to a decimal string without precision loss. */
+function formatTokenAmount(value: bigint, decimals: number): string {
+  if (decimals <= 0) return value.toString();
+  const negative = value < 0n;
+  const v = negative ? -value : value;
+  const s = v.toString();
+  const whole = s.length > decimals ? s.slice(0, -decimals) : "0";
+  const fracRaw =
+    s.length > decimals ? s.slice(-decimals) : s.padStart(decimals, "0");
+  const frac = fracRaw.replace(/0+$/, "");
+  const out = frac ? `${whole}.${frac}` : whole;
+  return negative ? `-${out}` : out;
 }
 
 interface YieldAIWithdrawModalProps {
@@ -48,40 +61,65 @@ export function YieldAIWithdrawModal({
   safeAddress,
 }: YieldAIWithdrawModalProps) {
   const { signAndSubmitTransaction } = useWallet();
-  const [percentage, setPercentage] = useState([100]);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const amountInputRef = useRef<HTMLInputElement>(null);
 
   const availableBalance = token ? BigInt(token.amount) : BigInt(0);
   const decimals = token?.decimals ?? 6;
-  const availableBalanceFormatted =
-    Number(availableBalance) / Math.pow(10, decimals);
-  const withdrawAmount =
-    availableBalance > BigInt(0)
-      ? (availableBalance * BigInt(percentage[0])) / BigInt(100)
-      : BigInt(0);
-  const withdrawAmountFormatted =
-    Number(withdrawAmount) / Math.pow(10, decimals);
-  const withdrawValueUSD = token?.price
-    ? withdrawAmountFormatted * parseFloat(token.price)
-    : 0;
+
+  const {
+    amount,
+    amountString,
+    setAmountFromString,
+    setHalf,
+    setMax,
+    isValid,
+  } = useAmountInput({ balance: availableBalance, decimals });
+
+  const priceUSD = token?.price ? parseFloat(token.price) : 0;
+  const withdrawValueUSD =
+    priceUSD > 0 && amountString
+      ? parseFloat(amountString || "0") * priceUSD
+      : 0;
 
   const metadataAddress = token ? getMetadataAddress(token) : null;
+  const isApt = token?.address === APTOS_COIN_TYPE;
   const canSubmitTx =
     !!safeAddress && !!metadataAddress && !!signAndSubmitTransaction;
 
-  const handlePercentageChange = (value: number[]) => {
-    setPercentage(value);
+  // Default to max when opening (withdraw all).
+  useEffect(() => {
+    if (isOpen) {
+      setMax();
+      setError("");
+    }
+  }, [isOpen, setMax]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setError("");
+      setAmountFromString("");
+    }
+  }, [isOpen, setAmountFromString]);
+
+  const handleAmountChange = (value: string) => {
+    setAmountFromString(value);
+    setError("");
+  };
+
+  const handleHalfClick = () => {
+    setHalf();
     setError("");
   };
 
   const handleMaxClick = () => {
-    setPercentage([100]);
+    setMax();
     setError("");
   };
 
   const handleConfirm = async () => {
-    if (withdrawAmount <= BigInt(0)) {
+    if (!isValid || amount <= BigInt(0)) {
       setError("No amount to withdraw");
       return;
     }
@@ -89,7 +127,7 @@ export function YieldAIWithdrawModal({
     try {
       setIsLoading(true);
       if (onConfirm) {
-        await onConfirm(withdrawAmount);
+        await onConfirm(amount);
         onClose();
         return;
       }
@@ -100,7 +138,7 @@ export function YieldAIWithdrawModal({
       const payload = buildVaultWithdrawPayload({
         safeAddress: safeAddress!,
         metadata: metadataAddress,
-        amountBaseUnits: withdrawAmount,
+        amountBaseUnits: amount,
       });
       const result = await signAndSubmitTransaction({
         data: {
@@ -128,35 +166,27 @@ export function YieldAIWithdrawModal({
   };
 
   const handleClose = () => {
-    setPercentage([100]);
     setError("");
+    setAmountFromString("");
     onClose();
   };
-
-  useEffect(() => {
-    if (!isOpen) {
-      setPercentage([100]);
-      setError("");
-    }
-  }, [isOpen]);
 
   if (!token) return null;
 
   const logoUrl = token.logoUrl;
-  const isApt = token.address === APTOS_COIN_TYPE;
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && handleClose()}>
-      <DialogContent className="sm:max-w-md w-[95vw] max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-lg sm:text-xl">
+      <DialogContent className="sm:max-w-md w-[95vw] max-h-[90vh] overflow-y-auto [&>button:last-child]:right-3 [&>button:last-child]:top-3 [&>button:last-child]:size-7 [&>button:last-child>svg]:size-3.5 sm:[&>button:last-child]:right-6 sm:[&>button:last-child]:top-6 sm:[&>button:last-child]:size-8 sm:[&>button:last-child>svg]:size-4">
+        <DialogHeader className="min-w-0 pr-11 sm:pr-12">
+          <div className="flex min-w-0 items-center gap-2">
             {logoUrl ? (
               <Image
                 src={logoUrl}
                 alt={token.symbol}
                 width={24}
                 height={24}
-                className="object-contain"
+                className="rounded-full object-contain"
                 unoptimized
               />
             ) : (
@@ -164,61 +194,37 @@ export function YieldAIWithdrawModal({
                 {token.symbol.slice(0, 1)}
               </span>
             )}
-            Withdraw {token.symbol}
-          </DialogTitle>
-          <DialogDescription className="text-sm">
-            Enter the amount you want to withdraw from your safe to your wallet
-          </DialogDescription>
+            <DialogTitle className="min-w-0 truncate text-base sm:text-lg">
+              Withdraw {token.symbol}
+            </DialogTitle>
+          </div>
         </DialogHeader>
 
         <div className="space-y-4">
-          <div className="space-y-2">
-            <Label className="text-sm font-medium">Withdraw Percentage</Label>
-            <div className="space-y-4">
-              <Slider
-                value={percentage}
-                onValueChange={handlePercentageChange}
-                max={100}
-                min={0}
-                step={1}
-                disabled={isLoading}
-                className="w-full"
-              />
-              <div className="flex justify-between items-center">
-                <span className="text-sm text-muted-foreground">0%</span>
-                <span className="text-lg font-semibold">{percentage[0]}%</span>
-                <span className="text-sm text-muted-foreground">100%</span>
-              </div>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={handleMaxClick}
-                disabled={isLoading}
-                className="w-full h-10 sm:h-9"
-              >
-                MAX (100%)
-              </Button>
-            </div>
-            {error && <p className="text-sm text-red-500">{error}</p>}
-            {isApt && !onConfirm && (
-              <p className="text-sm text-muted-foreground">
-                APT withdraw via this flow is not supported. Use FA assets (e.g. USDC).
-              </p>
-            )}
-          </div>
+          <TokenAmountInput
+            tokenLogoUrl={logoUrl || "/file.svg"}
+            tokenSymbol={token.symbol}
+            amountString={amountString}
+            onAmountChange={handleAmountChange}
+            priceUSD={Number.isFinite(priceUSD) ? priceUSD : 0}
+            availableText={`${formatTokenAmount(availableBalance, decimals)} ${token.symbol}`}
+            inputRef={amountInputRef}
+            onHalf={handleHalfClick}
+            onMax={handleMaxClick}
+            isOverBalance={amount > availableBalance}
+          />
 
           <div className="space-y-2 text-sm">
             <div className="flex justify-between">
               <span className="text-muted-foreground">Available Balance:</span>
               <span>
-                {availableBalanceFormatted.toFixed(6)} {token.symbol}
+                {formatTokenAmount(availableBalance, decimals)} {token.symbol}
               </span>
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Withdraw Amount:</span>
               <span>
-                {withdrawAmountFormatted.toFixed(6)} {token.symbol}
+                {formatTokenAmount(amount, decimals)} {token.symbol}
               </span>
             </div>
             {withdrawValueUSD > 0 && (
@@ -228,6 +234,13 @@ export function YieldAIWithdrawModal({
               </div>
             )}
           </div>
+
+          {isApt && !onConfirm && (
+            <p className="text-sm text-muted-foreground">
+              APT withdraw via this flow is not supported. Use FA assets (e.g. USDC).
+            </p>
+          )}
+          {error && <p className="text-sm text-red-500">{error}</p>}
         </div>
 
         <DialogFooter className="gap-2 flex-col sm:flex-row">
@@ -243,7 +256,8 @@ export function YieldAIWithdrawModal({
             onClick={handleConfirm}
             disabled={
               isLoading ||
-              withdrawAmount <= BigInt(0) ||
+              !isValid ||
+              amount <= BigInt(0) ||
               (isApt && !onConfirm) ||
               (!onConfirm && !canSubmitTx)
             }

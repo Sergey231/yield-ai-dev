@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { STRATEGY_REGISTRY_ENTRYPOINTS, strategyIdArg, type AiAgentStrategyId } from '@/lib/protocols/yield-ai/strategyRegistry';
+import { AI_AGENT_STRATEGIES, STRATEGY_REGISTRY_ENTRYPOINTS, strategyIdArg, type AiAgentStrategyId } from '@/lib/protocols/yield-ai/strategyRegistry';
 import { toCanonicalAddress } from '@/lib/utils/addressNormalization';
 
 const USDC_DECIMALS = 6;
@@ -27,26 +27,41 @@ const SAFE_CREATED_REFETCH_DELAY_MS = 400;
 
 async function refetchYieldAiSafesUntilPresent(
   queryClient: QueryClient,
-  owner: string
+  owner: string,
+  beforeSafes: string[] = []
 ): Promise<string[] | null> {
   const key = queryKeys.protocols.yieldAi.safes(owner);
+  const before = new Set(beforeSafes.map((safe) => toCanonicalAddress(safe)));
   for (let attempt = 0; attempt < SAFE_CREATED_REFETCH_MAX_ATTEMPTS; attempt++) {
     await queryClient.refetchQueries({ queryKey: key });
     const safes = queryClient.getQueryData<string[]>(key);
-    if (safes && safes.length > 0) return safes;
+    if (safes && safes.length > 0) {
+      const normalizedSafes = safes.map((safe) => toCanonicalAddress(safe));
+      if (before.size === 0 || normalizedSafes.some((safe) => !before.has(safe))) {
+        return normalizedSafes;
+      }
+    }
     if (attempt < SAFE_CREATED_REFETCH_MAX_ATTEMPTS - 1) {
       await new Promise((r) => setTimeout(r, SAFE_CREATED_REFETCH_DELAY_MS));
     }
   }
-  return null;
+  const latestSafes = queryClient.getQueryData<string[]>(key);
+  return latestSafes?.map((safe) => toCanonicalAddress(safe)) ?? null;
 }
 
 export interface YieldAiSafeSettingsFormProps {
   className?: string;
   onCreated?: (txHash?: string) => void;
+  fixedStrategy?: AiAgentStrategyId;
+  createButtonLabel?: string;
 }
 
-export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSettingsFormProps) {
+export function YieldAiSafeSettingsForm({
+  className,
+  onCreated,
+  fixedStrategy,
+  createButtonLabel = 'Create AI agent wallet',
+}: YieldAiSafeSettingsFormProps) {
   const { address } = useWalletData();
   const { signAndSubmitTransaction } = useWallet();
   const queryClient = useQueryClient();
@@ -57,7 +72,20 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
   const [swapMaxPerTxUSDC, setSwapMaxPerTxUSDC] = useState(DEFAULT_SAFE_MAX_PER_TX_USDC);
   const [swapMaxDailyUSDC, setSwapMaxDailyUSDC] = useState(DEFAULT_SAFE_MAX_DAILY_USDC);
   const [isCreatingSafe, setIsCreatingSafe] = useState(false);
+  const [creationStep, setCreationStep] = useState<'idle' | 'init' | 'attach' | 'done'>('idle');
   const [strategyOnCreate, setStrategyOnCreate] = useState<AiAgentStrategyId>('stablecoin_compound');
+  const selectedStrategyOnCreate = fixedStrategy ?? strategyOnCreate;
+  // `stablecoin_compound` is the implicit default (no tag attached); any other
+  // strategy is explicitly attached on-chain after the safe is created.
+  const willAttachStrategy = selectedStrategyOnCreate !== 'stablecoin_compound';
+  const attachLabel = AI_AGENT_STRATEGIES[selectedStrategyOnCreate]?.label ?? selectedStrategyOnCreate;
+
+  // Hidden entry point: the Hyperion LP strategy option only appears when the
+  // page is opened with `?strategy=hyperion` (kept out of the default UI for now).
+  const [showHyperionOption] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return new URLSearchParams(window.location.search).get('strategy') === 'hyperion';
+  });
 
   const parsedLimits = useMemo(() => {
     const maxPerTx = parseFloat(safeMaxPerTxUSDC);
@@ -145,6 +173,7 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
 
     try {
       setIsCreatingSafe(true);
+      setCreationStep('init');
       const safesKey = address ? queryKeys.protocols.yieldAi.safes(address) : null;
       const beforeSafes = safesKey ? (queryClient.getQueryData<string[]>(safesKey) ?? []) : [];
 
@@ -185,9 +214,21 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
       }
 
       if (address) {
-        const afterSafes = await refetchYieldAiSafesUntilPresent(queryClient, address);
+        const normalizedBeforeSafes = beforeSafes.map((safe) => toCanonicalAddress(safe));
+        const afterSafes = await refetchYieldAiSafesUntilPresent(queryClient, address, normalizedBeforeSafes);
         const createdSafe =
-          afterSafes?.find((s) => !beforeSafes.includes(s)) ?? afterSafes?.[0] ?? null;
+          afterSafes?.find((safe) => !normalizedBeforeSafes.includes(safe)) ??
+          (normalizedBeforeSafes.length === 0 ? afterSafes?.[0] : null) ??
+          null;
+
+        if (!createdSafe && willAttachStrategy) {
+          toast({
+            title: 'Safe created',
+            description: `The new safe is not indexed yet, so the ${attachLabel} strategy tag was not attached. Refresh and try again shortly.`,
+            variant: 'destructive',
+          });
+          return;
+        }
 
         // Make the newly created safe the selected one (best-effort).
         if (createdSafe) {
@@ -199,21 +240,36 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
         }
 
         // Optional: attach on-chain AI agent strategy tag right after creating the safe.
-        // Default stablecoin_compound is treated as implicit, so we only attach when user selected DN.
-        // No prior tag exists on a fresh safe, so no detach is needed.
-        if (createdSafe && strategyOnCreate === 'decibel_delta_neutral') {
+        // Default stablecoin_compound is treated as implicit, so we only attach when a
+        // non-default strategy was selected. No prior tag exists on a fresh safe, so no
+        // detach is needed.
+        if (createdSafe && willAttachStrategy) {
           try {
+            setCreationStep('attach');
             await signAndSubmitTransaction({
               data: {
                 function: STRATEGY_REGISTRY_ENTRYPOINTS.attachStrategy as `${string}::${string}::${string}`,
                 typeArguments: [],
-                functionArguments: [toCanonicalAddress(createdSafe), strategyIdArg('decibel_delta_neutral')],
+                functionArguments: [toCanonicalAddress(createdSafe), strategyIdArg(selectedStrategyOnCreate)],
               },
               options: { maxGasAmount: 70_000 },
               transactionSubmitter: gasStationSubmitter as any,
             });
+            // Force refetch (not just invalidate) so the batch strategies hook
+            // immediately reflects the new tag and the parent card can switch
+            // to "Deposit" without a manual page refresh.
+            await queryClient.refetchQueries({
+              queryKey: queryKeys.protocols.yieldAi.safeActiveStrategy(createdSafe),
+            });
+            setCreationStep('done');
           } catch (e) {
             console.warn('[Yield AI] attach strategy after safe create failed', e);
+            toast({
+              title: 'Strategy tag failed',
+              description: `Safe was created, but the ${attachLabel} strategy tag was not attached.`,
+              variant: 'destructive',
+            });
+            return;
           }
         }
       }
@@ -228,23 +284,39 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
       });
     } finally {
       setIsCreatingSafe(false);
+      setCreationStep('idle');
     }
   };
 
+  const buttonLabel = (() => {
+    if (!isCreatingSafe) return createButtonLabel;
+    if (willAttachStrategy) {
+      if (creationStep === 'init') return 'Step 1/2: creating safe…';
+      if (creationStep === 'attach') return 'Step 2/2: attaching strategy…';
+      if (creationStep === 'done') return 'Done';
+    }
+    return 'Creating...';
+  })();
+
   return (
     <div className={cn('space-y-3', className)}>
-      <div className="space-y-1">
-        <Label className="text-[11px] text-muted-foreground">AI agent type</Label>
-        <Select value={strategyOnCreate} onValueChange={(v) => setStrategyOnCreate(v as AiAgentStrategyId)}>
-          <SelectTrigger className="h-9 text-sm">
-            <SelectValue placeholder="Select strategy" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="stablecoin_compound">Stablecoin compound (USD1 + Echelon)</SelectItem>
-            <SelectItem value="decibel_delta_neutral">Decibel delta-neutral</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
+      {!fixedStrategy ? (
+        <div className="space-y-1">
+          <Label className="text-[11px] text-muted-foreground">AI agent type</Label>
+          <Select value={strategyOnCreate} onValueChange={(v) => setStrategyOnCreate(v as AiAgentStrategyId)}>
+            <SelectTrigger className="h-9 text-sm">
+              <SelectValue placeholder="Select strategy" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="stablecoin_compound">Stablecoin compound (USD1 + Echelon)</SelectItem>
+              <SelectItem value="decibel_delta_neutral">Decibel delta-neutral</SelectItem>
+              {showHyperionOption ? (
+                <SelectItem value="hyperion_lp">Hyperion CLMM LP</SelectItem>
+              ) : null}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-2 gap-2">
         <div className="space-y-1">
@@ -303,14 +375,19 @@ export function YieldAiSafeSettingsForm({ className, onCreated }: YieldAiSafeSet
         <div>
           The AI agent can only deploy funds into protocols. Withdrawals to your wallet can only be made by you.
         </div>
+        {willAttachStrategy ? (
+          <div className="pt-1 text-foreground/80">
+            You will sign <span className="font-medium">2 transactions</span>: create safe, then attach the
+            {' '}{attachLabel} strategy. Both are gas-free.
+          </div>
+        ) : null}
       </div>
 
       <div className="flex justify-end">
         <Button size="sm" onClick={handleCreateSafe} disabled={isCreatingSafe || !address || !signAndSubmitTransaction}>
-          {isCreatingSafe ? 'Creating…' : 'Create AI agent wallet'}
+          {buttonLabel}
         </Button>
       </div>
     </div>
   );
 }
-

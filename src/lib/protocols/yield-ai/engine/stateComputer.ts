@@ -1,7 +1,6 @@
 import { Aptos, AptosConfig, Network } from "@aptos-labs/ts-sdk";
 import { toCanonicalAddress } from "@/lib/utils/addressNormalization";
 import { ComputedState, StrategyRunContext } from "./types";
-import { fetchMoarAptRewardsAboveThreshold } from "@/lib/protocols/moar/moarRewardsForWorker";
 
 /** Aptos SDK view function id shape: `0xaddr::module::function` */
 type ViewFunctionId = `${string}::${string}::${string}`;
@@ -14,13 +13,6 @@ function toBigIntSafe(v: any): bigint {
   } catch {
     return 0n;
   }
-}
-
-function envNumber(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw == null) return fallback;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : fallback;
 }
 
 export function buildAptos(rpcUrl: string) {
@@ -113,13 +105,11 @@ async function getEchelonClaimable(options: {
 
 export type ComputedAdapters = {
   echelonAdapterAddress: string;
-  moarAdapterAddress: string;
 };
 
 export async function computeStateForSafe(ctx: StrategyRunContext): Promise<{
   state: ComputedState;
   adapters: ComputedAdapters;
-  moarAptClaimLines: Awaited<ReturnType<typeof fetchMoarAptRewardsAboveThreshold>>;
 }> {
   const aptos = buildAptos(ctx.config.global.rpcUrl);
 
@@ -137,33 +127,15 @@ export async function computeStateForSafe(ctx: StrategyRunContext): Promise<{
   // Adapters
   const globalPkg = ctx.config.global.package;
   const echelonProtocol = ctx.config.global.protocols.echelon;
-  const moarProtocol = ctx.config.global.protocols.moar;
-  if (!echelonProtocol || !moarProtocol) {
-    throw new Error("Missing required protocols in config: echelon/moar");
+  if (!echelonProtocol) {
+    throw new Error("Missing required protocol in config: echelon");
   }
 
   const echelonView = echelonProtocol.adapterAddressView.includes("::")
     ? `${globalPkg}::${echelonProtocol.adapterAddressView}`
     : echelonProtocol.adapterAddressView;
-  const moarView = moarProtocol.adapterAddressView.includes("::")
-    ? `${globalPkg}::${moarProtocol.adapterAddressView}`
-    : moarProtocol.adapterAddressView;
 
-  const [echelonAdapterAddress, moarAdapterAddress] = await Promise.all([
-    resolveAdapterAddress(aptos, echelonView),
-    resolveAdapterAddress(aptos, moarView),
-  ]);
-
-  // Moar claimable APT (sum) and claim lines (used by claim action)
-  const minClaim = BigInt(Number(ctx.mergedDefaults.minClaimBaseUnits ?? envNumber("YIELD_AI_MIN_CLAIM_BASE_UNITS", 0)));
-  const moarAptClaimLines = await fetchMoarAptRewardsAboveThreshold(ctx.safeAddress, minClaim);
-  const moarClaimableApt = moarAptClaimLines.reduce((acc, l) => {
-    try {
-      return acc + BigInt(l.claimable_amount);
-    } catch {
-      return acc;
-    }
-  }, 0n);
+  const echelonAdapterAddress = await resolveAdapterAddress(aptos, echelonView);
 
   // Echelon claimable per reward asset, derived from claim actions
   const echelonClaimable: Record<string, bigint> = {};
@@ -196,9 +168,8 @@ export async function computeStateForSafe(ctx: StrategyRunContext): Promise<{
   }
 
   return {
-    state: { safeBalance, excessBalance, moarClaimableApt, echelonClaimable },
-    adapters: { echelonAdapterAddress, moarAdapterAddress },
-    moarAptClaimLines,
+    state: { safeBalance, excessBalance, echelonClaimable },
+    adapters: { echelonAdapterAddress },
   };
 }
 

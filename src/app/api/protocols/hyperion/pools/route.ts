@@ -58,13 +58,12 @@ export async function GET() {
     });
   } catch (error) {
     console.error("❌ Hyperion pools error:", error);
-    // Возвращаем пустой массив при ошибках
     return NextResponse.json(
       {
-        success: true,
-        data: []
+        success: false,
+        error: "Failed to fetch Hyperion pools"
       },
-      { status: 200 }
+      { status: 502 }
     );
   }
-} 
+}

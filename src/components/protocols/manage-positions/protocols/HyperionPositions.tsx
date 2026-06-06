@@ -23,6 +23,7 @@ import { useWithdraw } from "@/lib/hooks/useWithdraw";
 import { ProtocolKey } from "@/lib/transactions/types";
 import { queryKeys } from "@/lib/query/queryKeys";
 import { useHyperionPositions, useHyperionVaultData } from "@/lib/query/hooks/protocols/hyperion";
+import { BinChart } from "@/components/protocols/meteora/BinChart";
 
 interface HyperionPositionProps {
   position: any;
@@ -463,6 +464,23 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
         </div>
       </div>
 
+      {position.chart && (
+        <div className="mt-3">
+          <BinChart
+            chain="aptos"
+            tokenXMint={position.chart.chartTokenAddress}
+            tokenXSymbol={position.chart.chartTokenSymbol}
+            tokenYSymbol={position.chart.quoteTokenSymbol}
+            lowerBinPrice={position.chart.lowerPrice}
+            upperBinPrice={position.chart.upperPrice}
+            activeBinPrice={position.chart.currentPrice}
+            lowerLabel="Min Price"
+            upperLabel="Max Price"
+            activeLabel="Current Price"
+          />
+        </div>
+      )}
+
       {/* Модальное окно подтверждения */}
       <ConfirmRemoveModal
         isOpen={showRemoveModal}
@@ -870,14 +888,10 @@ export function HyperionPositions() {
           totalValue: totalRewards,
           protocols: {
             echelon: { value: 0, count: 0 },
-            auro: { value: 0, count: 0 },
             hyperion: {
               count: positionsWithRewards.length,
               value: totalRewards
-            },
-            meso: { value: 0, count: 0 },
-            earnium: { value: 0, count: 0 },
-            moar: { value: 0, count: 0 }
+            }
           }
         }}
         positions={positions}
@@ -926,4 +940,4 @@ export function HyperionPositions() {
       )}
     </div>
   );
-} 
+}

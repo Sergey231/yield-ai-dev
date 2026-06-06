@@ -32,18 +32,12 @@ export function hexToSolanaBase58(hex: string): string {
   return bs58.encode(bytes);
 }
 
-// Helper: Fetch attestation from Circle Iris API with polling
+// Helper: Fetch attestation via server-side proxy (avoids CORS issues for browser clients)
 export async function fetchAttestation(
   sourceDomain: number,
   signature: string,
   onProgress?: (attempt: number, maxAttempts: number) => void
 ): Promise<AttestationData> {
-  const irisApiUrl = process.env.NEXT_PUBLIC_CIRCLE_CCTP_ATTESTATION_URL;
-  
-  if (!irisApiUrl) {
-    throw new Error('NEXT_PUBLIC_CIRCLE_CCTP_ATTESTATION_URL environment variable is not set');
-  }
-
   const maxAttempts = 15;
   const initialDelay = 10000; // 10 seconds
   const maxDelay = 60000; // 60 seconds
@@ -59,7 +53,7 @@ export async function fetchAttestation(
     }
 
     try {
-      const url = `${irisApiUrl}/${sourceDomain}/${signature.trim()}`;
+      const url = `/api/cctp/attestation?domain=${sourceDomain}&signature=${encodeURIComponent(signature.trim())}`;
       console.log(`[CCTP Mint] Fetching attestation, attempt ${attempt}/${maxAttempts}:`, url);
 
       const response = await fetch(url, {

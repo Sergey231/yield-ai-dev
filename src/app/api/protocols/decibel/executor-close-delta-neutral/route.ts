@@ -13,8 +13,15 @@ import {
   DELTA_NEUTRAL_GET_POSITION_VIEW,
   parseDeltaNeutralPositionView,
 } from "@/lib/protocols/yield-ai/deltaNeutralViews";
-import { fetchIndexerFaBalanceForMetadataAtOwner } from "@/lib/protocols/yield-ai/indexerFaBalance";
+import { fetchFaBalanceIndexerOrOnChain } from "@/lib/protocols/yield-ai/indexerFaBalance";
 import { submitSwapFaToFaWithFallbackLimits } from "@/lib/protocols/yield-ai/swapFaToFa";
+import {
+  fetchVaultFaSwapLimits,
+  isVaultDailyLimitAbort,
+  type VaultFaSwapLimits,
+} from "@/lib/protocols/yield-ai/vaultFaSwapLimits";
+import { getApprovedBuilderFeeBps } from "@/lib/protocols/decibel/getApprovedBuilderFee";
+import { decibelSpotFeeTierForMetadata } from "@/lib/protocols/decibel/deltaNeutralSpotAssets";
 
 type DelegationDto = {
   delegated_account?: string;
@@ -29,7 +36,9 @@ const APTOS_API_KEY = process.env.APTOS_API_KEY;
 
 const DEFAULT_SWAP_SLIPPAGE_BPS = 50;
 const DEFAULT_SWAP_DEADLINE_SECS = 120;
-const XBTC_USDC_FEE_TIER = 1;
+function feeTierForSpotMetadata(spotMetadata: string): number {
+  return decibelSpotFeeTierForMetadata(spotMetadata);
+}
 
 function parseAllowlist(): string[] {
   const raw = process.env.DECIBEL_EXECUTOR_ALLOWLIST || "";
@@ -184,6 +193,10 @@ export async function POST(request: NextRequest) {
     const ownerRaw = typeof body.owner === "string" ? body.owner.trim() : "";
     const safeRaw = typeof body.safeAddress === "string" ? body.safeAddress.trim() : "";
     const assetRaw = typeof body.asset === "string" ? body.asset.trim().toUpperCase() : "BTC";
+    // Recovery mode: skip Decibel close (no active short to close), still swap residual spot
+    // and write record_close to clear the on-chain DN slot. Server re-validates that no real
+    // short exists before honouring this — never trust the client flag alone.
+    const force = body.force === true;
 
     if (!subaccountRaw || !ownerRaw || !safeRaw) {
       return NextResponse.json(
@@ -199,8 +212,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: "Invalid address" }, { status: 400 });
     }
 
-    if (assetRaw !== "BTC") {
-      return NextResponse.json({ success: false, error: "asset must be BTC" }, { status: 400 });
+    if (assetRaw !== "BTC" && assetRaw !== "APT") {
+      return NextResponse.json({ success: false, error: "asset must be BTC or APT" }, { status: 400 });
     }
 
     const allowlist = parseAllowlist();
@@ -303,93 +316,240 @@ export async function POST(request: NextRequest) {
       return normalizeAddress(toCanonicalAddress(m)) === normalizeAddress(marketAddr);
     });
     const shortSize = Number(posRow?.size ?? 0);
-    if (!Number.isFinite(shortSize) || shortSize >= 0) {
+    const noActiveShort = !Number.isFinite(shortSize) || shortSize >= 0;
+    if (noActiveShort && !force) {
       return NextResponse.json(
         {
           success: false,
           error:
             "No active Decibel short found for this market. On-chain delta-neutral is open — resolve manually or sync state.",
+          code: "NO_ACTIVE_SHORT",
+        },
+        { status: 409 }
+      );
+    }
+    if (!noActiveShort && force) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Active Decibel short still exists for this market. Use the regular Close (no force flag).",
         },
         { status: 409 }
       );
     }
 
-    const prices = (await fetchDecibel(
-      `/api/v1/prices?market=${encodeURIComponent(marketAddr)}`
-    )) as Array<{ mark_px?: number; mid_px?: number }>;
-    const firstPrice = Array.isArray(prices) ? prices[0] : null;
-    const markPx = Number(firstPrice?.mark_px ?? firstPrice?.mid_px ?? NaN);
-    if (!Number.isFinite(markPx) || markPx <= 0) {
-      return NextResponse.json({ success: false, error: "Failed to resolve mark price" }, { status: 502 });
-    }
+    let closeTxHash: string | null = null;
+    let closeTxVersion: bigint | null = null;
 
-    // Do not call configure_user_settings here: Decibel aborts ECANNOT_MODIFY_SETTINGS_WHILE_HOLDING_POSITION (0x4)
-    // when changing market settings while a position is open. Settings were applied at open.
+    if (!noActiveShort) {
+      const prices = (await fetchDecibel(
+        `/api/v1/prices?market=${encodeURIComponent(marketAddr)}`
+      )) as Array<{ mark_px?: number; mid_px?: number }>;
+      const firstPrice = Array.isArray(prices) ? prices[0] : null;
+      const markPx = Number(firstPrice?.mark_px ?? firstPrice?.mid_px ?? NaN);
+      if (!Number.isFinite(markPx) || markPx <= 0) {
+        return NextResponse.json({ success: false, error: "Failed to resolve mark price" }, { status: 502 });
+      }
 
-    const closePayload = buildCloseAtMarketPayload({
-      subaccountAddr: canonicalSubaccount,
-      marketAddr,
-      size: Math.abs(shortSize),
-      isLong: false,
-      markPx,
-      marketConfig,
-      slippageBps: DEFAULT_SWAP_SLIPPAGE_BPS,
-      isTestnet,
-    });
-    const closeTxHash = await submitExecutorEntryFunction({
-      network,
-      fn: closePayload.function,
-      functionArguments: closePayload.functionArguments as (string | number | boolean | bigint | null | number[])[],
-      maxGasAmount: 35_000,
-    });
+      // Do not call configure_user_settings here: Decibel aborts ECANNOT_MODIFY_SETTINGS_WHILE_HOLDING_POSITION (0x4)
+      // when changing market settings while a position is open. Settings were applied at open.
 
-    const closeTxVersion = await getTxVersionByHash({ aptos: decibelAptos, hash: closeTxHash });
-    if (closeTxVersion == null || closeTxVersion <= BigInt(0)) {
-      return NextResponse.json(
-        { success: false, error: "Failed to read Decibel close transaction version" },
-        { status: 502 }
+      // Builder fee on close: same gating as open. If user has approved, include the builder
+      // pair so we earn the fee on the close trade too. If not, log and skip.
+      const builderAddrEnv = process.env.DECIBEL_BUILDER_ADDRESS?.trim() || null;
+      const builderFeeEnvRaw = process.env.DECIBEL_BUILDER_FEE_BPS?.trim();
+      const builderFeeEnv =
+        builderFeeEnvRaw != null && builderFeeEnvRaw !== "" ? Number(builderFeeEnvRaw) : 10;
+      let closeBuilderAddr: string | null = null;
+      let closeBuilderFeeBps: number | null = null;
+      if (
+        builderAddrEnv &&
+        Number.isFinite(builderFeeEnv) &&
+        builderFeeEnv > 0 &&
+        builderFeeEnv <= 10_000
+      ) {
+        const approvedBps = await getApprovedBuilderFeeBps({
+          aptos: decibelAptos,
+          subaccount: canonicalSubaccount,
+          builder: builderAddrEnv,
+          isTestnet,
+        });
+        if (approvedBps != null && approvedBps >= builderFeeEnv) {
+          closeBuilderAddr = toCanonicalAddress(builderAddrEnv);
+          closeBuilderFeeBps = builderFeeEnv;
+        } else {
+          console.warn(
+            "[Decibel] executor-close-delta-neutral: builder fee skipped — no approval",
+            { subaccount: canonicalSubaccount, requestedBps: builderFeeEnv, approvedBps }
+          );
+        }
+      }
+
+      const closePayload = buildCloseAtMarketPayload({
+        subaccountAddr: canonicalSubaccount,
+        marketAddr,
+        size: Math.abs(shortSize),
+        isLong: false,
+        markPx,
+        marketConfig,
+        slippageBps: DEFAULT_SWAP_SLIPPAGE_BPS,
+        isTestnet,
+        builderAddr: closeBuilderAddr,
+        builderFeeBps: closeBuilderFeeBps,
+      });
+      closeTxHash = await submitExecutorEntryFunction({
+        network,
+        fn: closePayload.function,
+        functionArguments: closePayload.functionArguments as (string | number | boolean | bigint | null | number[])[],
+        maxGasAmount: 35_000,
+      });
+
+      closeTxVersion = await getTxVersionByHash({ aptos: decibelAptos, hash: closeTxHash });
+      if (closeTxVersion == null || closeTxVersion <= BigInt(0)) {
+        return NextResponse.json(
+          { success: false, error: "Failed to read Decibel close transaction version" },
+          { status: 502 }
+        );
+      }
+
+      await pollShortClosed({ subaccount: canonicalSubaccount, marketAddr });
+    } else {
+      console.warn(
+        "[Decibel] executor-close-delta-neutral: force-recovery mode — skipping Decibel close (no active short)",
+        { safe: canonicalSafe, subaccount: canonicalSubaccount, marketAddr }
       );
     }
 
-    await pollShortClosed({ subaccount: canonicalSubaccount, marketAddr });
-
-    const spotBalanceBaseUnits = await fetchIndexerFaBalanceForMetadataAtOwner(
-      canonicalSafe,
-      spotMetadata,
-      APTOS_API_KEY
-    );
+    const balanceLookup = await fetchFaBalanceIndexerOrOnChain({
+      aptos: aptosMainnet,
+      owner: canonicalSafe,
+      metadata: spotMetadata,
+      aptosApiKey: APTOS_API_KEY,
+    });
+    const spotBalanceBaseUnits = balanceLookup.amount;
     let swapTxHash: string | null = null;
     let swapSkippedReason: string | null = null;
     if (spotBalanceBaseUnits <= BigInt(0)) {
       swapSkippedReason =
-        "Indexer reported 0 spot FA balance for this safe/metadata (swap skipped). If you still hold xBTC, indexer format or lag; retry or swap manually.";
+        "Both indexer and on-chain primary store report 0 spot FA balance for this safe/metadata. Swap skipped — verify the canonical safe address.";
       console.warn("[Decibel] executor-close-delta-neutral:", swapSkippedReason, {
         safe: canonicalSafe,
         spotMetadata,
+        indexer: balanceLookup.indexer.toString(),
+        onchain: balanceLookup.onchain.toString(),
       });
+    } else if (balanceLookup.source === "onchain") {
+      console.info(
+        "[Decibel] executor-close-delta-neutral: indexer lagged; using on-chain primary store balance",
+        {
+          indexer: balanceLookup.indexer.toString(),
+          onchain: balanceLookup.onchain.toString(),
+        }
+      );
     }
     let usedSqrtPriceLimit: string | null = null;
     if (spotBalanceBaseUnits > BigInt(0)) {
+      // Pre-check the AI agent's daily FA-swap budget on the safe so we can
+      // surface a clear "daily limit exhausted" message instead of letting
+      // the executor tx revert with `Move abort ::vault: 0x8`. We can't size
+      // the swap in USDC at this point without a quote, so the cheap check
+      // here is: "is the remaining budget non-zero?". The contract still
+      // does the final notional check, and if it aborts with 0x8 we
+      // re-fetch the limits and return a structured error below.
+      let preCheckLimits: VaultFaSwapLimits | null = null;
+      try {
+        preCheckLimits = await fetchVaultFaSwapLimits({
+          safeAddress: canonicalSafe,
+          aptosApiKey: APTOS_API_KEY,
+        });
+      } catch (e) {
+        console.warn("[Decibel] executor-close-delta-neutral: vault swap-limit pre-check failed", e);
+      }
+      if (preCheckLimits?.exists && preCheckLimits.remainingUsdc === BigInt(0)) {
+        return NextResponse.json(
+          {
+            success: false,
+            code: "DAILY_LIMIT_EXHAUSTED",
+            error:
+              "Daily swap limit for this AI agent safe is exhausted. The counter resets at UTC midnight.",
+            data: {
+              safeAddress: canonicalSafe,
+              maxDailyUsdc: preCheckLimits.maxDailyUsdc.toString(),
+              maxPerTxUsdc: preCheckLimits.maxPerTxUsdc.toString(),
+              spentTodayUsdc: preCheckLimits.spentTodayUsdc.toString(),
+              remainingUsdc: preCheckLimits.remainingUsdc.toString(),
+              secondsUntilRollover: preCheckLimits.secondsUntilRollover,
+            },
+          },
+          { status: 422 }
+        );
+      }
+
       const deadline = BigInt(Math.floor(Date.now() / 1000) + DEFAULT_SWAP_DEADLINE_SECS);
-      const swapRes = await submitSwapFaToFaWithFallbackLimits({
-        network,
-        safe: canonicalSafe,
-        feeTier: XBTC_USDC_FEE_TIER,
-        amountIn: spotBalanceBaseUnits,
-        fromMetadata: spotMetadata,
-        toMetadata: USDC_FA_METADATA_MAINNET,
-        deadline,
-        direction: "zeroForOne",
-      });
-      swapTxHash = swapRes.swapTxHash;
-      usedSqrtPriceLimit = swapRes.usedSqrtPriceLimit.toString();
+      try {
+        const swapRes = await submitSwapFaToFaWithFallbackLimits({
+          network,
+          safe: canonicalSafe,
+          feeTier: feeTierForSpotMetadata(spotMetadata),
+          amountIn: spotBalanceBaseUnits,
+          fromMetadata: spotMetadata,
+          toMetadata: USDC_FA_METADATA_MAINNET,
+          deadline,
+          direction: "zeroForOne",
+        });
+        swapTxHash = swapRes.swapTxHash;
+        usedSqrtPriceLimit = swapRes.usedSqrtPriceLimit.toString();
+      } catch (swapErr) {
+        if (isVaultDailyLimitAbort(swapErr)) {
+          // The swap notional exceeded what was left in the daily budget.
+          // Re-read the post-state so the client can show how much is left.
+          let postLimits: VaultFaSwapLimits | null = null;
+          try {
+            postLimits = await fetchVaultFaSwapLimits({
+              safeAddress: canonicalSafe,
+              aptosApiKey: APTOS_API_KEY,
+            });
+          } catch {
+            // ignore — we'll still return a useful structured error
+          }
+          return NextResponse.json(
+            {
+              success: false,
+              code: "DAILY_LIMIT_EXCEEDED",
+              error:
+                "The close swap would exceed the AI agent safe's remaining daily limit. Wait for the UTC reset or close once the limit is bigger.",
+              data: {
+                safeAddress: canonicalSafe,
+                maxDailyUsdc: postLimits?.maxDailyUsdc.toString() ?? null,
+                maxPerTxUsdc: postLimits?.maxPerTxUsdc.toString() ?? null,
+                spentTodayUsdc: postLimits?.spentTodayUsdc.toString() ?? null,
+                remainingUsdc: postLimits?.remainingUsdc.toString() ?? null,
+                secondsUntilRollover: postLimits?.secondsUntilRollover ?? null,
+                spotSwapAmountInBaseUnits: spotBalanceBaseUnits.toString(),
+              },
+            },
+            { status: 422 }
+          );
+        }
+        throw swapErr;
+      }
+    }
+
+    // record_close anchor tx version: Decibel close tx version when present; otherwise (force
+    // recovery) fall back to the safe-swap tx version, or 0 if the safe also had no spot to
+    // swap. Move-side does not validate the value — it's stored as `closeDecibelTxVersion`.
+    let recordCloseAnchor: bigint = closeTxVersion ?? BigInt(0);
+    if (recordCloseAnchor === BigInt(0) && swapTxHash) {
+      const v = await getTxVersionByHash({ aptos: aptosMainnet, hash: swapTxHash });
+      if (v != null && v > BigInt(0)) recordCloseAnchor = v;
     }
 
     const recordCloseFn = `${YIELD_AI_PACKAGE_ADDRESS}::delta_neutral::record_close`;
     const recordCloseTxHash = await submitExecutorEntryFunction({
       network,
       fn: recordCloseFn,
-      functionArguments: [canonicalSafe, closeTxVersion],
+      functionArguments: [canonicalSafe, recordCloseAnchor],
       maxGasAmount: 50_000,
     });
 
@@ -403,12 +563,14 @@ export async function POST(request: NextRequest) {
         subaccount: canonicalSubaccount,
         marketAddr,
         closeTxHash,
-        closeTxVersion: closeTxVersion.toString(),
+        closeTxVersion: closeTxVersion?.toString() ?? null,
         spotSwapAmountInBaseUnits: spotBalanceBaseUnits.toString(),
         swapTxHash,
         swapSkippedReason,
         usedSqrtPriceLimit,
         recordCloseTxHash,
+        recordCloseAnchorTxVersion: recordCloseAnchor.toString(),
+        forceRecovery: noActiveShort,
         decibelPackage: pkg,
       },
     });

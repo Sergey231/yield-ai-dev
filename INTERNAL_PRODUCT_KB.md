@@ -38,7 +38,6 @@
 - **Protocol interface**: `BaseProtocol` tx builders (`buildDeposit` + optional withdraw/claim); protocol registry driven by `protocolsList.json`.
 - **Gasless**: Aptos Gas Station submitter (client-only init) + `withFeePayer` builds; failures include missing sponsorship rules (“Rule not found”).
 - **Yield AI vault**: on-chain views enumerate safes; endpoints `/api/protocols/yield-ai/safes` + `/safe-contents`; cron `/api/protocols/yield-ai/cron/run` (secret + in-memory lock) uses `YIELD_AI_EXECUTOR_PRIVATE_KEY`.
-- **Privacy bridge**: server `/api/privacy-bridge/burn` requires `SOLANA_PAYER_WALLET_PRIVATE_KEY`; Solana RPC URL/key handling appends `api-key` param when needed.
 
 # Yield AI Strategy Engine (config-driven)
 
@@ -101,5 +100,4 @@ Notes:
 - **Secrets**: server executor key (`YIELD_AI_EXECUTOR_PRIVATE_KEY`) and Solana fee payer key (`SOLANA_PAYER_WALLET_PRIVATE_KEY`) are high-impact compromise points.
 - **Gasless fragility**: Gas Station env + per-function sponsorship rules required; missing rules break sponsored UX or force user gas.
 - **Automation concurrency**: cron lock is in-process; multi-instance deploys can double-run without distributed locking; misconfig can spike tx volume.
-- **Privacy limits**: correlation via timing/amount/provider logs remains possible even with temp wallets + pooling.
 

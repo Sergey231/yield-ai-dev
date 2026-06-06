@@ -53,3 +53,26 @@ export function buildDelegateTradingPayload(
     ],
   };
 }
+
+export function buildRevokeDelegationPayload(params: {
+  subaccountAddr: string;
+  delegatedAccount: string;
+  isTestnet?: boolean;
+}): {
+  function: string;
+  typeArguments: string[];
+  functionArguments: unknown[];
+} {
+  const pkg = params.isTestnet ? PACKAGE_TESTNET : PACKAGE_MAINNET;
+  const canonicalSubaccount = assertAptosAddress(params.subaccountAddr, 'subaccountAddr');
+  const canonicalDelegatedAccount = assertAptosAddress(params.delegatedAccount, 'delegatedAccount');
+
+  return {
+    function: `${pkg}::dex_accounts_entry::revoke_delegation`,
+    typeArguments: [],
+    functionArguments: [
+      canonicalSubaccount,
+      canonicalDelegatedAccount,
+    ],
+  };
+}

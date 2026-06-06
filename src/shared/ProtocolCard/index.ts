@@ -6,3 +6,12 @@ export { ProtocolCardPosition } from "./ProtocolCardPosition/ProtocolCardPositio
 export type { ProtocolCardPositionProps } from "./ProtocolCardPosition/ProtocolCardPosition";
 export type { ProtocolPosition } from "./types";
 export { PositionBadge } from "./types";
+export { LendingProtocolCard } from "./LendingProtocolCard/LendingProtocolCard";
+export type {
+  LendingProtocolCardProps,
+  LendingProtocolCardSection,
+  LendingProtocolCardTile,
+  LendingProtocolCardRow,
+  LendingTileTone,
+  LendingPositionType,
+} from "./LendingProtocolCard/LendingProtocolCard";

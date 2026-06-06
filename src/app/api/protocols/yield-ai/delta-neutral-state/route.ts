@@ -4,12 +4,50 @@ import { normalizeAddress, toCanonicalAddress } from "@/lib/utils/addressNormali
 import {
   DELTA_NEUTRAL_GET_POSITION_VIEW,
   parseDeltaNeutralPositionView,
+  type DeltaNeutralCloseSwapStatus,
   type DeltaNeutralSpotHedgeInference,
   type DeltaNeutralStateResponse,
 } from "@/lib/protocols/yield-ai/deltaNeutralViews";
 import { fetchIndexerFaBalanceForMetadataAtOwner } from "@/lib/protocols/yield-ai/indexerFaBalance";
+import { resolveCloseSwapUsdcOut } from "@/lib/protocols/yield-ai/closeSwapResolver";
 
 const APTOS_API_KEY = process.env.APTOS_API_KEY;
+const DECIBEL_API_KEY = process.env.DECIBEL_API_KEY;
+const DECIBEL_API_BASE_URL =
+  process.env.DECIBEL_API_BASE_URL || "https://api.testnet.aptoslabs.com/decibel";
+
+async function fetchDecibelMarketSzDecimals(perpMarket: string): Promise<number | null> {
+  if (!DECIBEL_API_KEY) return null;
+  try {
+    const baseUrl = DECIBEL_API_BASE_URL.replace(/\/$/, "");
+    const res = await fetch(`${baseUrl}/api/v1/markets`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${DECIBEL_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+    });
+    if (!res.ok) return null;
+    const raw = await res.json();
+    const list: Array<{ market_addr?: string; sz_decimals?: number }> = Array.isArray(raw)
+      ? raw
+      : Array.isArray(raw?.items)
+        ? raw.items
+        : Array.isArray(raw?.markets)
+          ? raw.markets
+          : Array.isArray(raw?.data)
+            ? raw.data
+            : [];
+    const want = normalizeAddress(toCanonicalAddress(perpMarket));
+    const match = list.find(
+      (m) => m.market_addr && normalizeAddress(toCanonicalAddress(m.market_addr)) === want
+    );
+    const sz = match?.sz_decimals;
+    return typeof sz === "number" && Number.isFinite(sz) ? sz : null;
+  } catch {
+    return null;
+  }
+}
 
 const aptos = new Aptos(
   new AptosConfig({
@@ -104,12 +142,45 @@ export async function GET(request: NextRequest) {
         ? null
         : (Number(spotBalanceBaseUnits) / 1e8).toLocaleString(undefined, { maximumFractionDigits: 8 });
 
+    const szDecimals = position.recordExists && position.perpMarket
+      ? await fetchDecibelMarketSzDecimals(position.perpMarket)
+      : null;
+
+    let closeSwapStatus: DeltaNeutralCloseSwapStatus = "skipped";
+    let closeSwapUsdcOutBaseUnits: string | null = null;
+    let closeSwapTxVersion: string | null = null;
+    let closeSwapNote = "Position is open or no close-version recorded.";
+    if (
+      position.recordExists &&
+      !position.isOpen &&
+      hasSpotMeta &&
+      position.closeDecibelTxVersion !== "0"
+    ) {
+      const resolution = await resolveCloseSwapUsdcOut({
+        safeAddress: safe,
+        spotAssetMetadata: position.spotAssetMetadata,
+        closeDecibelTxVersion: position.closeDecibelTxVersion,
+        aptosApiKey: APTOS_API_KEY,
+      });
+      closeSwapStatus = resolution.status;
+      closeSwapNote = resolution.note;
+      if (resolution.status === "resolved") {
+        closeSwapUsdcOutBaseUnits = resolution.usdcOutBaseUnits;
+        closeSwapTxVersion = resolution.swapTxVersion;
+      }
+    }
+
     const data: DeltaNeutralStateResponse = {
       ...position,
       spotBalanceBaseUnits: spotBalanceBaseUnits.toString(),
       spotBalanceHumanApprox: spotHuman,
       spotHedgeInference,
       spotHedgeInferenceNote,
+      szDecimals,
+      closeSwapStatus,
+      closeSwapUsdcOutBaseUnits,
+      closeSwapTxVersion,
+      closeSwapNote,
     };
 
     return NextResponse.json({ success: true, data });

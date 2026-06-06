@@ -13,15 +13,21 @@ import {
 import { getDecibelExecutorAccount, submitExecutorEntryFunction } from "@/lib/protocols/decibel/executorSubmit";
 import {
   USDC_FA_METADATA_MAINNET,
-  XBTC_FA_METADATA_MAINNET,
   YIELD_AI_PACKAGE_ADDRESS,
 } from "@/lib/constants/yieldAiVault";
 import { hedgeUsdcThreshold } from "@/lib/protocols/decibel/hedgePrefill";
+import {
+  DECIBEL_APT_SPOT_ASSET,
+  getConfiguredDecibelBtcSpotAsset,
+  type DecibelSpotAssetConfig,
+} from "@/lib/protocols/decibel/deltaNeutralSpotAssets";
 import { submitSwapFaToFaWithFallbackLimits } from "@/lib/protocols/yield-ai/swapFaToFa";
-import { HyperionSwapService } from "@/lib/services/protocols/hyperion/swap";
+import { getHyperionAmountIn } from "@/lib/protocols/yield-ai/engine/hyperionQuote";
+import { getApprovedBuilderFeeBps } from "@/lib/protocols/decibel/getApprovedBuilderFee";
 import {
   DELTA_NEUTRAL_IS_OPEN_VIEW,
 } from "@/lib/protocols/yield-ai/deltaNeutralViews";
+import { fetchOnChainPrimaryFaBalance } from "@/lib/protocols/yield-ai/indexerFaBalance";
 import { Aptos, AptosConfig, Network } from "@aptos-labs/ts-sdk";
 
 type DelegationDto = {
@@ -38,18 +44,37 @@ const APTOS_API_KEY = process.env.APTOS_API_KEY;
 const DEFAULT_SWAP_SLIPPAGE_BPS = 50;
 const DEFAULT_SWAP_DEADLINE_SECS = 120;
 
-const XBTC_USDC_FEE_TIER = 1; // 0.05%
-const XBTC_DECIMALS = 8;
-
 /**
  * Quote-driven hedge sizing parameters.
- * - INPUT_BUFFER_BPS: extra USDC on top of the exact-out quote to absorb fee + tick movement.
- * - OUT_MIN_SLIPPAGE_BPS: max acceptable shortfall below the target xBTC out (the filled short).
- * - FIXED_USDC_BUFFER_BASE: small absolute USDC padding (in 6-dec base units).
+ * - INPUT_BUFFER_BPS: extra USDC on top of the Hyperion exact-out quote, to cover pool-fee
+ *   inclusion + small tick drift between quote and execution. Tuned down from 50 → 20 bps:
+ *   exact-in swaps over-deliver output proportionally to input slack, so a generous buffer
+ *   directly translated to spot over-hedge (observed ~0.4% on $12 with 50 bps).
+ * - OUT_MIN_SLIPPAGE_BPS: max acceptable shortfall below the target spot out (the filled short).
+ *   Acts as the safety floor when price moves against us between quote and execution.
  */
-const INPUT_BUFFER_BPS = BigInt(50); // 0.50%
+const INPUT_BUFFER_BPS = BigInt(20); // 0.20%
 const OUT_MIN_SLIPPAGE_BPS = BigInt(100); // 1.00%
-const FIXED_USDC_BUFFER_BASE = BigInt(10_000); // 0.01 USDC
+const MAX_SPOT_HEDGE_UNDERFUND_BPS = BigInt(100); // 1.00%
+const MAX_SPOT_HEDGE_UNDERFUND_BASE_UNITS = BigInt(250_000); // 0.25 USDC
+
+function usdcBaseUnitsToHuman(baseUnits: bigint): number {
+  return Number(baseUnits) / 1_000_000;
+}
+
+function maxSpotHedgeUnderfundBaseUnits(requiredUsdc: bigint): bigint {
+  const pctCap = (requiredUsdc * MAX_SPOT_HEDGE_UNDERFUND_BPS) / BigInt(10_000);
+  return pctCap < MAX_SPOT_HEDGE_UNDERFUND_BASE_UNITS ? pctCap : MAX_SPOT_HEDGE_UNDERFUND_BASE_UNITS;
+}
+
+function isSpotHedgeFundingAcceptable(availableUsdc: bigint, requiredUsdc: bigint): boolean {
+  if (availableUsdc >= requiredUsdc) return true;
+  return requiredUsdc - availableUsdc <= maxSpotHedgeUnderfundBaseUnits(requiredUsdc);
+}
+
+function spotHedgeSwapInput(availableUsdc: bigint, requiredUsdc: bigint): bigint {
+  return availableUsdc >= requiredUsdc ? requiredUsdc : availableUsdc;
+}
 
 function parseAllowlist(): string[] {
   const raw = process.env.DECIBEL_EXECUTOR_ALLOWLIST || "";
@@ -129,7 +154,7 @@ async function fetchDecibel(path: string) {
 }
 
 function resolveMarketForAsset(
-  asset: "BTC",
+  asset: "BTC" | "APT",
   markets: Array<DecibelMarketConfig & { market_addr?: string; market_name?: string }>
 ): (DecibelMarketConfig & { market_addr: string; market_name: string }) | null {
   const extractBaseSymbol = (name: string): string => {
@@ -164,19 +189,14 @@ function normalizeMarketsPayload(data: unknown): Array<DecibelMarketConfig & { m
   return candidates as Array<DecibelMarketConfig & { market_addr?: string; market_name?: string }>;
 }
 
-function spotMetadataForAsset(asset: "BTC"): string {
-  return asset === "BTC" ? XBTC_FA_METADATA_MAINNET : XBTC_FA_METADATA_MAINNET;
+function spotAssetConfigForAsset(asset: "BTC" | "APT"): DecibelSpotAssetConfig {
+  return asset === "BTC" ? getConfiguredDecibelBtcSpotAsset() : DECIBEL_APT_SPOT_ASSET;
 }
 
 function utf8BytesArray(s: string): number[] {
   if (!s) return [];
   const bytes = new TextEncoder().encode(s);
   return Array.from(bytes);
-}
-
-function defaultFeeTier(asset: "BTC"): number {
-  // Based on existing mainnet examples for BTC pools.
-  return asset === "BTC" ? XBTC_USDC_FEE_TIER : XBTC_USDC_FEE_TIER;
 }
 
 function usdcAmountInFromSizeUsd(sizeUsd: number): bigint {
@@ -288,8 +308,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: "Invalid address" }, { status: 400 });
     }
 
-    if (assetRaw !== "BTC") {
-      return NextResponse.json({ success: false, error: "asset must be BTC" }, { status: 400 });
+    if (assetRaw !== "BTC" && assetRaw !== "APT") {
+      return NextResponse.json({ success: false, error: "asset must be BTC or APT" }, { status: 400 });
     }
 
     if (!Number.isFinite(sizeUsd) || sizeUsd <= 0) {
@@ -371,7 +391,8 @@ export async function POST(request: NextRequest) {
     // 2) Resolve market + mark price.
     const marketsRaw = await fetchDecibel("/api/v1/markets");
     const markets = normalizeMarketsPayload(marketsRaw);
-    const selectedMarket = resolveMarketForAsset("BTC", markets);
+    const asset = assetRaw as "BTC" | "APT";
+    const selectedMarket = resolveMarketForAsset(asset, markets);
     if (!selectedMarket) {
       return NextResponse.json({ success: false, error: `Market not found for asset ${assetRaw}` }, { status: 404 });
     }
@@ -386,6 +407,96 @@ export async function POST(request: NextRequest) {
     }
 
     const { aptos, network, isTestnet } = getAptosClientFromDecibelBaseUrl();
+    const assetSpotConfig = spotAssetConfigForAsset(asset);
+    const preflightShortSize = BigInt(decibelOpenOrderSizeChainUnits(sizeUsd, markPx, selectedMarket));
+    const preflightShortHumanBase = decibelChainUnitsToHumanBase(
+      preflightShortSize,
+      selectedMarket.sz_decimals ?? 9
+    );
+    const preflightSpotOutBaseUnits =
+      Number.isFinite(preflightShortHumanBase) && preflightShortHumanBase > 0
+        ? BigInt(Math.max(1, Math.ceil(preflightShortHumanBase * 10 ** assetSpotConfig.decimals)))
+        : BigInt(0);
+
+    if (preflightSpotOutBaseUnits <= BigInt(0)) {
+      return NextResponse.json(
+        { success: false, error: "Failed to size spot hedge before opening Decibel short" },
+        { status: 502 }
+      );
+    }
+
+    let preflightQuoteUsdcIn: bigint;
+    try {
+      preflightQuoteUsdcIn = await getHyperionAmountIn({
+        amountOutBaseUnits: preflightSpotOutBaseUnits,
+        fromMetadata: USDC_FA_METADATA_MAINNET,
+        toMetadata: toCanonicalAddress(assetSpotConfig.metadata),
+      });
+    } catch (err) {
+      console.warn(
+        "[Decibel] executor-open-delta-neutral: Hyperion preflight exact-out quote failed; refusing before Decibel short",
+        err
+      );
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Unable to quote the spot hedge before opening the Decibel short. Try again in a few seconds.",
+          code: "SPOT_HEDGE_PREFLIGHT_QUOTE_FAILED",
+        },
+        { status: 502 }
+      );
+    }
+
+    const preflightRequiredUsdc =
+      (preflightQuoteUsdcIn * (BigInt(10_000) + INPUT_BUFFER_BPS)) / BigInt(10_000);
+    const safeUsdcBalance = await fetchOnChainPrimaryFaBalance(
+      aptos,
+      canonicalSafe,
+      USDC_FA_METADATA_MAINNET
+    );
+
+    if (safeUsdcBalance <= BigInt(0)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "This safe has 0 USDC. Deposit USDC to the AI agent safe before opening a delta-neutral position.",
+          code: "SAFE_USDC_EMPTY",
+          data: {
+            safeAddress: canonicalSafe,
+            availableUsdcBaseUnits: safeUsdcBalance.toString(),
+            requiredUsdcBaseUnits: preflightRequiredUsdc.toString(),
+            availableUsdc: usdcBaseUnitsToHuman(safeUsdcBalance),
+            requiredUsdc: usdcBaseUnitsToHuman(preflightRequiredUsdc),
+          },
+        },
+        { status: 422 }
+      );
+    }
+
+    if (!isSpotHedgeFundingAcceptable(safeUsdcBalance, preflightRequiredUsdc)) {
+      const missing = preflightRequiredUsdc - safeUsdcBalance;
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Safe USDC is too low for the spot hedge. Required ${usdcBaseUnitsToHuman(preflightRequiredUsdc).toFixed(6)} USDC, available ${usdcBaseUnitsToHuman(safeUsdcBalance).toFixed(6)} USDC.`,
+          code: "SAFE_USDC_INSUFFICIENT_FOR_SPOT_HEDGE",
+          data: {
+            safeAddress: canonicalSafe,
+            availableUsdcBaseUnits: safeUsdcBalance.toString(),
+            requiredUsdcBaseUnits: preflightRequiredUsdc.toString(),
+            missingUsdcBaseUnits: missing.toString(),
+            availableUsdc: usdcBaseUnitsToHuman(safeUsdcBalance),
+            requiredUsdc: usdcBaseUnitsToHuman(preflightRequiredUsdc),
+            missingUsdc: usdcBaseUnitsToHuman(missing),
+            toleratedMissingUsdc: usdcBaseUnitsToHuman(maxSpotHedgeUnderfundBaseUnits(preflightRequiredUsdc)),
+            targetSpotOutBaseUnits: preflightSpotOutBaseUnits.toString(),
+            expectedShortSizeBaseUnits: preflightShortSize.toString(),
+            expectedShortHumanBase: preflightShortHumanBase,
+          },
+        },
+        { status: 422 }
+      );
+    }
 
     // 2a) Pre-flight: refuse if this safe already has a delta-neutral record open on-chain.
     // Prevents creating a duplicate record (which would abort later in `record_open`).
@@ -473,6 +584,38 @@ export async function POST(request: NextRequest) {
       maxGasAmount: 20_000,
     });
 
+    // Builder fee: read env config, then verify on-chain that the user has granted approval
+    // (>= our requested feeBps) for this subaccount + builder pair. If approval is missing or
+    // below the cap, fall back to no fee — order still goes through.
+    const builderAddrEnv = process.env.DECIBEL_BUILDER_ADDRESS?.trim() || null;
+    const builderFeeEnvRaw = process.env.DECIBEL_BUILDER_FEE_BPS?.trim();
+    const builderFeeEnv =
+      builderFeeEnvRaw != null && builderFeeEnvRaw !== "" ? Number(builderFeeEnvRaw) : 10;
+    let orderBuilderAddr: string | null = null;
+    let orderBuilderFeeBps: number | null = null;
+    if (
+      builderAddrEnv &&
+      Number.isFinite(builderFeeEnv) &&
+      builderFeeEnv > 0 &&
+      builderFeeEnv <= 10_000
+    ) {
+      const approvedBps = await getApprovedBuilderFeeBps({
+        aptos,
+        subaccount: canonicalSubaccount,
+        builder: builderAddrEnv,
+        isTestnet,
+      });
+      if (approvedBps != null && approvedBps >= builderFeeEnv) {
+        orderBuilderAddr = toCanonicalAddress(builderAddrEnv);
+        orderBuilderFeeBps = builderFeeEnv;
+      } else {
+        console.warn(
+          "[Decibel] executor-open-delta-neutral: builder fee skipped — user has not approved (or approved below requested cap)",
+          { subaccount: canonicalSubaccount, requestedBps: builderFeeEnv, approvedBps }
+        );
+      }
+    }
+
     const openPayload = buildOpenMarketOrderPayload({
       subaccountAddr: canonicalSubaccount,
       marketAddr: selectedMarket.market_addr,
@@ -482,6 +625,8 @@ export async function POST(request: NextRequest) {
       isLong: false,
       slippageBps: DEFAULT_SWAP_SLIPPAGE_BPS,
       isTestnet,
+      builderAddr: orderBuilderAddr,
+      builderFeeBps: orderBuilderFeeBps,
     });
     const openTxHash = await submitExecutorEntryFunction({
       network,
@@ -505,39 +650,31 @@ export async function POST(request: NextRequest) {
     const szDecimals = selectedMarket.sz_decimals ?? 9;
     const filledShortHumanBase = decibelChainUnitsToHumanBase(filledShortSize, szDecimals);
     const shortNotionalUsd = filledShortHumanBase * markPx;
-    const spotMetadata = toCanonicalAddress(spotMetadataForAsset("BTC"));
+    const spotAsset = spotAssetConfigForAsset(asset);
+    const spotMetadata = toCanonicalAddress(spotAsset.metadata);
     const deadline = BigInt(Math.floor(Date.now() / 1000) + DEFAULT_SWAP_DEADLINE_SECS);
 
-    // Target xBTC out in FA base units (decimals = 8). Snap-up to avoid losing dust.
-    const desiredXbtcOutBaseUnits =
+    const spotDecimals = spotAsset.decimals;
+    // Target spot out in FA base units. Snap-up to avoid losing dust.
+    const desiredSpotOutBaseUnits =
       Number.isFinite(filledShortHumanBase) && filledShortHumanBase > 0
-        ? BigInt(Math.max(1, Math.ceil(filledShortHumanBase * 10 ** XBTC_DECIMALS)))
+        ? BigInt(Math.max(1, Math.ceil(filledShortHumanBase * 10 ** spotDecimals)))
         : BigInt(0);
 
-    // (B) Ask Hyperion for an exact-out quote: how much USDC we need for the filled short xBTC.
+    // (B) Ask Hyperion for an exact-out quote: how much USDC we need for the filled short spot asset.
+    // Uses the REST endpoint directly — SDK's GraphQL `Swap.estFromAmount` is currently broken
+    // (`field 'getSwapInfo' not found in type: 'apiQuery'`).
     let quoteUsdcInBaseUnits: bigint | null = null;
-    if (desiredXbtcOutBaseUnits > BigInt(0)) {
+    if (desiredSpotOutBaseUnits > BigInt(0)) {
       try {
-        const hyperion = HyperionSwapService.getInstance();
-        const est = await hyperion.estFromAmount({
-          amount: Number(desiredXbtcOutBaseUnits),
-          from: USDC_FA_METADATA_MAINNET,
-          to: XBTC_FA_METADATA_MAINNET,
-          safeMode: true,
+        quoteUsdcInBaseUnits = await getHyperionAmountIn({
+          amountOutBaseUnits: desiredSpotOutBaseUnits,
+          fromMetadata: USDC_FA_METADATA_MAINNET,
+          toMetadata: spotMetadata,
         });
-        const raw =
-          (est as any)?.amountIn ??
-          (est as any)?.amount_in ??
-          (est as any)?.amount ??
-          null;
-        if (typeof raw === "string" && /^\d+$/.test(raw)) {
-          quoteUsdcInBaseUnits = BigInt(raw);
-        } else if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
-          quoteUsdcInBaseUnits = BigInt(Math.ceil(raw));
-        }
       } catch (err) {
         console.warn(
-          "[Decibel] executor-open-delta-neutral: Hyperion estFromAmount failed; falling back to mark-px sizing",
+          "[Decibel] executor-open-delta-neutral: Hyperion REST exact-out quote failed; falling back to mark-px sizing",
           err
         );
       }
@@ -546,13 +683,13 @@ export async function POST(request: NextRequest) {
     let usdcAmountIn: bigint;
     let amountOutMin: bigint;
     if (quoteUsdcInBaseUnits != null && quoteUsdcInBaseUnits > BigInt(0)) {
-      // Input = exact-out quote + 0.5% + $0.01 as safety margin for fee/tick drift.
-      usdcAmountIn =
-        (quoteUsdcInBaseUnits * (BigInt(10_000) + INPUT_BUFFER_BPS)) / BigInt(10_000) +
-        FIXED_USDC_BUFFER_BASE;
-      // Require at least (filledShort * (1 - 1%)) xBTC on output — blocks undersized hedges.
+      // Input = exact-out quote + 0.20% as safety margin for pool fee + tick drift.
+      const quotedBufferedUsdcIn =
+        (quoteUsdcInBaseUnits * (BigInt(10_000) + INPUT_BUFFER_BPS)) / BigInt(10_000);
+      usdcAmountIn = spotHedgeSwapInput(safeUsdcBalance, quotedBufferedUsdcIn);
+      // Require at least (filledShort * (1 - 1%)) on output — blocks undersized hedges.
       amountOutMin =
-        (desiredXbtcOutBaseUnits * (BigInt(10_000) - OUT_MIN_SLIPPAGE_BPS)) / BigInt(10_000);
+        (desiredSpotOutBaseUnits * (BigInt(10_000) - OUT_MIN_SLIPPAGE_BPS)) / BigInt(10_000);
     } else {
       // Fallback: previous mark-px-driven sizing with `hedgeUsdcThreshold` (50bps + $0.01).
       usdcAmountIn = usdcAmountInFromSizeUsd(
@@ -561,11 +698,11 @@ export async function POST(request: NextRequest) {
       amountOutMin = BigInt(0);
     }
 
-    // (A) Submit the USDC -> xBTC swap through the shared helper with oneForZero direction.
+    // (A) Submit the USDC -> spot swap through the shared helper with oneForZero direction.
     const { swapTxHash, usedSqrtPriceLimit } = await submitSwapFaToFaWithFallbackLimits({
       network,
       safe: canonicalSafe,
-      feeTier: defaultFeeTier("BTC"),
+      feeTier: spotAsset.feeTier,
       amountIn: usdcAmountIn,
       amountOutMin,
       fromMetadata: USDC_FA_METADATA_MAINNET,
@@ -601,6 +738,8 @@ export async function POST(request: NextRequest) {
         safeAddress: canonicalSafe,
         subaccount: canonicalSubaccount,
         asset: assetRaw,
+        spotAsset: spotAsset.id,
+        spotAssetLabel: spotAsset.label,
         sizeUsd,
         marketAddr: selectedMarket.market_addr,
         marketName: selectedMarket.market_name,
@@ -612,7 +751,7 @@ export async function POST(request: NextRequest) {
         spotMetadata,
         usdcAmountIn: usdcAmountIn.toString(),
         amountOutMin: amountOutMin.toString(),
-        desiredXbtcOutBaseUnits: desiredXbtcOutBaseUnits.toString(),
+        desiredSpotOutBaseUnits: desiredSpotOutBaseUnits.toString(),
         quoteUsdcInBaseUnits: quoteUsdcInBaseUnits?.toString() ?? null,
         usedSqrtPriceLimit: usedSqrtPriceLimit.toString(),
         filledShortSize: filledShortSize.toString(),

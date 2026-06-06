@@ -42,6 +42,14 @@ export type SolanaToAptosBridgeTmpOptions = {
   onStatusUpdate?: (status: string) => void;
 };
 
+/** Wallet-mode options. Pass a bare function for the plain status-callback form. */
+export type SolanaToAptosBridgeWalletOptions = {
+  onStatusUpdate: (status: string) => void;
+  /** Called after confirmation with the new burn's MessageSent event account (base58),
+   *  so the caller can queue it for a later manual rent reclaim. */
+  onEventAccount?: (eventAccount: string) => void;
+};
+
 /**
  * Executes Solana -> Aptos bridge transfer
  * Uses CCTP depositForBurn on Solana
@@ -54,7 +62,10 @@ export async function executeSolanaToAptosBridge(
   signTransaction: (tx: Transaction) => Promise<Transaction>,
   solanaConnection: any,
   aptosAddress: string,
-  onStatusUpdateOrOptions: ((status: string) => void) | SolanaToAptosBridgeTmpOptions
+  onStatusUpdateOrOptions:
+    | ((status: string) => void)
+    | SolanaToAptosBridgeTmpOptions
+    | SolanaToAptosBridgeWalletOptions
 ): Promise<string> {
   // Priority fee to reduce "block height exceeded" confirmations under congestion.
   // microLamports per compute unit; small value is usually enough to nudge inclusion.
@@ -62,8 +73,12 @@ export async function executeSolanaToAptosBridge(
   const COMPUTE_UNIT_LIMIT = 200_000;
 
   // TMP MODE: burn from tmp wallet using keypairs only (no wallet adapter)
-  if (typeof onStatusUpdateOrOptions !== "function" && onStatusUpdateOrOptions?.mode === "tmp") {
-    const { tmpKeypair, feePayerKeypair, onStatusUpdate } = onStatusUpdateOrOptions;
+  if (
+    typeof onStatusUpdateOrOptions !== "function" &&
+    (onStatusUpdateOrOptions as SolanaToAptosBridgeTmpOptions)?.mode === "tmp"
+  ) {
+    const { tmpKeypair, feePayerKeypair, onStatusUpdate } =
+      onStatusUpdateOrOptions as SolanaToAptosBridgeTmpOptions;
     const log = (s: string) => onStatusUpdate?.(s);
 
     log("Preparing burn transaction on Solana (tmp wallet mode)...");
@@ -131,7 +146,11 @@ export async function executeSolanaToAptosBridge(
   }
 
   // WALLET MODE (текущая логика моста)
-  const onStatusUpdate = onStatusUpdateOrOptions as (status: string) => void;
+  const walletOpts: SolanaToAptosBridgeWalletOptions =
+    typeof onStatusUpdateOrOptions === "function"
+      ? { onStatusUpdate: onStatusUpdateOrOptions }
+      : (onStatusUpdateOrOptions as SolanaToAptosBridgeWalletOptions);
+  const onStatusUpdate = walletOpts.onStatusUpdate;
 
   try {
     onStatusUpdate('Preparing burn transaction on Solana...');
@@ -397,7 +416,10 @@ export async function executeSolanaToAptosBridge(
 
       console.log('[SolanaToAptosBridge] ✅ Transaction confirmed successfully');
       onStatusUpdate(`✅ Burn completed! Transaction: ${signature.slice(0, 8)}...${signature.slice(-8)}`);
-      
+
+      // Report the new MessageSent event account so the caller can queue it for a manual reclaim.
+      walletOpts.onEventAccount?.(messageSendEventData.toBase58());
+
       return signature;
     } catch (confirmError: any) {
       // Check if transaction exists and get its status

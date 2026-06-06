@@ -80,7 +80,7 @@ export function useDecibelOnboardingStatus(
       const isDelegated = delegationStatus?.isDelegatedToExecutor ?? false;
       steps.push({
         id: 'delegation',
-        label: 'Bot delegation',
+        label: 'Decibel setup',
         status: isLoadingDelegation
           ? 'loading'
           : delegationError
@@ -120,7 +120,7 @@ export function useDecibelOnboardingStatus(
         label: `Safe balance (≥$${MIN_TRADING_BALANCE} USDC)`,
         status: hasMinSafeBalance ? 'completed' : 'required',
         action: hasMinSafeBalance ? undefined : 'deposit_safe',
-        actionLabel: hasMinSafeBalance ? undefined : 'Deposit USDC to Safe',
+        actionLabel: hasMinSafeBalance ? undefined : 'Deposit USDC to AI agent',
       });
     }
 

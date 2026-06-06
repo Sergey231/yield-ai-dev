@@ -17,18 +17,21 @@ import { MoarPositions } from "./protocols/MoarPositions";
 import { AptreePositions } from "./protocols/AptreePositions";
 import { JupiterPositions } from "./protocols/JupiterPositions";
 import { KaminoPositions } from "./protocols/KaminoPositions";
+import { MeteoraPositions } from "./protocols/MeteoraPositions";
+import { RaydiumPositions } from "./protocols/RaydiumPositions";
+import { OrcaPositions } from "./protocols/OrcaPositions";
+import { TramplinPositions } from "./protocols/TramplinPositions";
 import { ThalaPositions } from "./protocols/ThalaPositions";
 import { EchoPositions } from "./protocols/EchoPositions";
 import { DecibelPositions } from "./protocols/DecibelPositions";
 import { YieldAIPositions } from "./protocols/YieldAIPositions";
-import { RefreshCw, Info, ExternalLink, Gift } from "lucide-react";
+import { RefreshCw, Info, ExternalLink, Gift, X } from "lucide-react";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { useState } from "react";
 import { useToast } from "@/components/ui/use-toast";
 import { ProtocolSocialLinks } from "@/components/ui/protocol-social-links";
 import { AirdropInfoTooltip } from "@/components/ui/airdrop-info-tooltip";
 import { useSolanaPortfolio } from "@/hooks/useSolanaPortfolio";
-import { ProtocolClosureNotice } from "@/components/ui/protocol-closure-notice";
 
 interface ManagePositionsProps {
   protocol: Protocol;
@@ -37,7 +40,7 @@ interface ManagePositionsProps {
 
 export function ManagePositions({ protocol, onClose }: ManagePositionsProps) {
   const { account } = useWallet();
-  const { address: solanaAddress, protocolsAddress: solanaProtocolsAddress } = useSolanaPortfolio();
+  const { protocolsAddress: solanaProtocolsAddress } = useSolanaPortfolio();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const { toast } = useToast();
 
@@ -45,7 +48,11 @@ export function ManagePositions({ protocol, onClose }: ManagePositionsProps) {
     const protocolNameLower = protocol.name.toLowerCase();
     const isJupiter = protocolNameLower.includes('jupiter');
     const isKamino = protocolNameLower.includes('kamino');
-    const isSolanaProtocol = isJupiter || isKamino;
+    const isMeteora = protocolNameLower.includes('meteora');
+    const isRaydium = protocolNameLower.includes('raydium');
+    const isOrca = protocolNameLower.includes('orca');
+    const isTramplin = protocolNameLower.includes('tramplin');
+    const isSolanaProtocol = isJupiter || isKamino || isMeteora || isRaydium || isOrca || isTramplin;
     if (!account?.address && !isSolanaProtocol) return;
     if (isSolanaProtocol && !solanaProtocolsAddress) return;
     
@@ -109,6 +116,18 @@ export function ManagePositions({ protocol, onClose }: ManagePositionsProps) {
         endpoint = 'userPositions';
       } else if (protocol.name.toLowerCase().includes('kamino')) {
         apiPath = 'kamino';
+        endpoint = 'userPositions';
+      } else if (protocol.name.toLowerCase().includes('meteora')) {
+        apiPath = 'meteora';
+        endpoint = 'userPositions';
+      } else if (protocol.name.toLowerCase().includes('raydium')) {
+        apiPath = 'raydium';
+        endpoint = 'userPositions';
+      } else if (protocol.name.toLowerCase().includes('orca')) {
+        apiPath = 'orca';
+        endpoint = 'userPositions';
+      } else if (protocol.name.toLowerCase().includes('tramplin')) {
+        apiPath = 'tramplin';
         endpoint = 'userPositions';
       }
       
@@ -187,6 +206,14 @@ export function ManagePositions({ protocol, onClose }: ManagePositionsProps) {
         return <JupiterPositions />;
       case 'kamino':
         return <KaminoPositions />;
+      case 'meteora':
+        return <MeteoraPositions />;
+      case 'raydium':
+        return <RaydiumPositions />;
+      case 'orca':
+        return <OrcaPositions />;
+      case 'tramplin':
+        return <TramplinPositions />;
       case 'thala':
         return <ThalaPositions />;
       case 'echo protocol':
@@ -207,33 +234,42 @@ export function ManagePositions({ protocol, onClose }: ManagePositionsProps) {
   };
 
   return (
-    <Card className="w-full mb-6">
-      <CardHeader className="pt-6 pb-2">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-center gap-2 flex-wrap">
-            {protocol.logoUrl && (
-              <Image src={protocol.logoUrl} alt={protocol.name} width={32} height={32} className="object-contain" unoptimized />
-            )}
-            <CardTitle className="text-lg sm:text-xl font-bold flex items-center gap-2">
-              {protocol.name} positions
-              {protocol.airdropInfo && (
+    <Card className="mb-6 w-full min-w-0 max-w-full">
+      <CardHeader className="flex flex-col gap-0 space-y-0 px-3 pb-2 pt-3 sm:pt-6">
+        <div className="flex w-full min-w-0 flex-row items-center justify-between gap-2 sm:gap-4">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2">
+            {protocol.logoUrl != null && protocol.logoUrl !== "" ? (
+              <Image
+                src={protocol.logoUrl}
+                alt={protocol.name}
+                width={32}
+                height={32}
+                className="h-6 w-6 shrink-0 object-contain sm:h-8 sm:w-8"
+                unoptimized
+              />
+            ) : null}
+            {/* Мобилка: только название протокола */}
+            <span className="min-w-0 truncate text-base font-bold leading-tight sm:hidden">{protocol.name}</span>
+            <CardTitle className="hidden min-w-0 flex-1 flex-nowrap items-center gap-1.5 text-base font-bold leading-tight sm:flex sm:gap-2 sm:text-xl">
+              <span className="min-w-0 truncate">{protocol.name} positions</span>
+              {protocol.airdropInfo != null ? (
                 <AirdropInfoTooltip airdropInfo={protocol.airdropInfo} size="sm">
-                  <div className="flex items-center justify-center w-5 h-5 rounded-full bg-muted hover:bg-muted/80 transition-colors cursor-help">
-                    <Gift className="h-3 w-3 text-muted-foreground" />
+                  <div className="flex h-6 w-6 shrink-0 cursor-help items-center justify-center rounded-full bg-muted transition-colors hover:bg-muted/80 sm:h-8 sm:w-8">
+                    <Gift className="h-2.5 w-2.5 text-muted-foreground sm:h-3.5 sm:w-3.5" />
                   </div>
                 </AirdropInfoTooltip>
-              )}
+              ) : null}
             </CardTitle>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex shrink-0 flex-row items-center justify-end gap-0.5 sm:gap-1">
             <Popover>
               <PopoverTrigger asChild>
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="h-8 w-8 p-0 text-gray-400 text-xs hover:text-foreground"
+                  className="h-8 w-8 shrink-0 p-0 text-muted-foreground hover:text-foreground sm:h-8 sm:w-8"
                 >
-                  <Info className="h-4 w-4" />
+                  <Info className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                 </Button>
               </PopoverTrigger>
               <PopoverContent
@@ -274,11 +310,11 @@ export function ManagePositions({ protocol, onClose }: ManagePositionsProps) {
                   <Button
                     variant="ghost"
                     size="sm"
-                    className="h-8 w-8 p-0 text-gray-400 text-xs hover:text-foreground"
+                    className="text-muted-foreground hover:text-foreground h-8 w-8 shrink-0 p-0 sm:h-8 sm:w-8 sm:p-0"
                     onClick={handleRefresh}
                     disabled={isRefreshing}
                   >
-                    <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+                    <RefreshCw className={`h-3.5 w-3.5 sm:h-4 sm:w-4 ${isRefreshing ? "animate-spin" : ""}`} />
                     <span className="sr-only">Refresh positions</span>
                   </Button>
                 </TooltipTrigger>
@@ -287,13 +323,20 @@ export function ManagePositions({ protocol, onClose }: ManagePositionsProps) {
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
-            <Button variant="ghost" size="sm" onClick={onClose}>
-              Close
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground hover:text-foreground h-8 w-8 shrink-0 p-0 sm:h-8 sm:w-auto sm:px-3 sm:text-sm"
+              onClick={onClose}
+              aria-label="Close"
+            >
+              <X className="h-3.5 w-3.5 sm:hidden" aria-hidden strokeWidth={2} />
+              <span className="hidden text-xs font-medium sm:inline">Close</span>
             </Button>
           </div>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="px-3">
         {renderProtocolContent()}
       </CardContent>
     </Card>

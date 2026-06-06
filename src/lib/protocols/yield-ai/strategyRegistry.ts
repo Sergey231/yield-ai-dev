@@ -22,7 +22,10 @@ export const STRATEGY_REGISTRY_ENTRYPOINTS = {
   setStrategyExtraU64: `${YIELD_AI_PACKAGE_ADDRESS}::strategy_registry::set_strategy_extra_u64` as const,
 } as const;
 
-export type AiAgentStrategyId = "stablecoin_compound" | "decibel_delta_neutral";
+export type AiAgentStrategyId =
+  | "stablecoin_compound"
+  | "decibel_delta_neutral"
+  | "hyperion_lp";
 
 export const AI_AGENT_STRATEGIES: Record<
   AiAgentStrategyId,
@@ -37,6 +40,13 @@ export const AI_AGENT_STRATEGIES: Record<
     id: "decibel_delta_neutral",
     label: "Decibel delta-neutral",
     description: "Manual delta-neutral strategy on Decibel (no auto-compound cron actions).",
+  },
+  hyperion_lp: {
+    id: "hyperion_lp",
+    label: "Hyperion CLMM LP",
+    // Pool-agnostic: a safe may hold several concentrated-liquidity LP positions
+    // across the whitelisted USDC-leg pools. Pool is chosen at open time.
+    description: "Concentrated-liquidity LP on Hyperion (USDC-leg pools, executor-managed).",
   },
 };
 
@@ -99,8 +109,17 @@ export function resolveActiveAiAgentStrategy(params: {
     .map((b) => bytesToUtf8String(b))
     .filter((x): x is string => Boolean(x && x.length > 0));
 
+  const hasHyperion = decoded.includes("hyperion_lp");
   const hasDn = decoded.includes("decibel_delta_neutral");
   const hasStable = decoded.includes("stablecoin_compound");
+
+  if (hasHyperion) {
+    return {
+      activeStrategyId: "hyperion_lp",
+      activeStrategyIds: decoded,
+      isDefaulted: false,
+    };
+  }
 
   if (hasDn) {
     return {

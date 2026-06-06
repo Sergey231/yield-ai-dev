@@ -64,12 +64,9 @@ export type SafeAssignment = {
 };
 
 export type ActionType =
-  | "claimMoarReward"
   | "claimEchelonReward"
   | "swapFaToFa"
-  | "depositEchelonFa"
-  | "withdrawMoarFull"
-  | "depositMoar";
+  | "depositEchelonFa";
 
 export type Action = {
   id: string;
@@ -99,7 +96,6 @@ export type Condition =
 export type ComputedState = {
   safeBalance: Record<string, bigint>;
   excessBalance: Record<string, bigint>;
-  moarClaimableApt: bigint;
   echelonClaimable: Record<string, bigint>;
 };
 

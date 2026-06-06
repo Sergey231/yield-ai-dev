@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createChart, CandlestickSeries, ColorType, LineStyle, type UTCTimestamp } from 'lightweight-charts';
 
 /** Decibel candlestick item: t (open time ms), o, h, l, c, v, i */
@@ -49,6 +49,18 @@ export function DecibelChart({
   const chartRef = useRef<ReturnType<typeof createChart> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Stable cache keys for array props. Without this, each parent render passes
+  // a new `[]` / `[entry]` reference and the effect below re-runs, destroying
+  // the chart instance and showing "Loading…" on every render — the flicker.
+  const limitOrdersKey = useMemo(
+    () => JSON.stringify(limitOrders.map((o) => [o.price, Boolean(o.reduceOnly)])),
+    [limitOrders]
+  );
+  const entryPricesKey = useMemo(
+    () => JSON.stringify(entryPrices),
+    [entryPrices]
+  );
 
   useEffect(() => {
     if (!marketAddr || !containerRef.current) return;
@@ -154,8 +166,13 @@ export function DecibelChart({
         chartRef.current = null;
       }
     };
-    // Re-run when market, interval, or overlay data (orders/entries) change
-  }, [marketAddr, interval, limitOrders, entryPrices]);
+    // Re-run when market, interval, range, or overlay-data CONTENT changes.
+    // We intentionally depend on the stringified keys, not the array refs, so
+    // a parent that re-renders with a new `[]` reference each time doesn't
+    // tear down the chart. The arrays are read via closure at effect-start —
+    // their current values are captured when the keys change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [marketAddr, interval, startTimeProp, endTimeProp, limitOrdersKey, entryPricesKey]);
 
   return (
     <div className={`relative ${className ?? 'w-full h-[300px]'}`}>
