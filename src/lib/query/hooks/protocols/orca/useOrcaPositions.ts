@@ -37,6 +37,10 @@ export interface OrcaPosition {
   liquidity?: string;
   poolLiquidity?: string;
   feeRate?: number;
+  /** Pool fee APR from Orca API yieldOverTvl (7d preferred, annualized). */
+  aprPct?: number;
+  /** 24h fee yield annualized — for tooltips. */
+  apr24hPct?: number;
   valueUsd: number;
   principalUsd?: number;
   feesUsd?: number;

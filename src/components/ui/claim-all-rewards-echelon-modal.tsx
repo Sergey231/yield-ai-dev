@@ -9,6 +9,8 @@ import { ToastAction } from "@/components/ui/toast";
 import { CheckCircle, AlertCircle } from "lucide-react";
 import tokenList from "@/lib/data/tokenList.json";
 import { queryKeys } from "@/lib/query/queryKeys";
+import { submitAptosTransaction } from "@/lib/mobile/submitAptosTransaction";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 interface EchelonReward {
   token: string;
@@ -36,6 +38,8 @@ interface ClaimAllRewardsEchelonModalProps {
 
 export function ClaimAllRewardsEchelonModal({ isOpen, onClose, rewards, tokenPrices = {} }: ClaimAllRewardsEchelonModalProps) {
   const { signAndSubmitTransaction, account } = useWallet();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
+  const effectiveAptosAddress = account?.address?.toString() ?? injectedAptosAddress ?? null;
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [isClaiming, setIsClaiming] = useState(false);
@@ -108,7 +112,7 @@ export function ClaimAllRewardsEchelonModal({ isOpen, onClose, rewards, tokenPri
   }, 0);
 
   const handleClaimAll = async () => {
-    if (!signAndSubmitTransaction || !account?.address || totalRewards === 0) return;
+    if ((!signAndSubmitTransaction && !effectiveAptosAddress) || !effectiveAptosAddress || totalRewards === 0) return;
 
     setIsClaiming(true);
     setCurrentIndex(0);
@@ -127,14 +131,22 @@ export function ClaimAllRewardsEchelonModal({ isOpen, onClose, rewards, tokenPri
       try {
         const REWARDS_POOL_ADDRESS = "0xfdb653ffa48e91f39396ce87c656406f9b5e7a6686475446d92e79b098f0f4b5";
         
-        const txResponse = await signAndSubmitTransaction({
-          data: {
-            function: `${REWARDS_POOL_ADDRESS}::rewards_pool::claim_all_rewards` as `${string}::${string}::${string}`,
-            typeArguments: [],
-            functionArguments: []
+        const txResponse = await submitAptosTransaction({
+          transaction: {
+            data: {
+              function: `${REWARDS_POOL_ADDRESS}::rewards_pool::claim_all_rewards` as `${string}::${string}::${string}`,
+              typeArguments: [],
+              functionArguments: []
+            },
+            options: { maxGasAmount: 20000 },
           },
-          options: { maxGasAmount: 20000 },
+          signAndSubmitTransaction: signAndSubmitTransaction as any,
+          connected: !!account,
+          address: effectiveAptosAddress,
         });
+        if (!txResponse.hash) {
+          throw new Error("Transaction was submitted without hash");
+        }
 
         setCurrentHash(txResponse.hash);
 
@@ -198,7 +210,7 @@ export function ClaimAllRewardsEchelonModal({ isOpen, onClose, rewards, tokenPri
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            userAddress: account.address.toString(),
+            userAddress: effectiveAptosAddress,
             rewardName: reward.rewardName || reward.token,
             farmingId: reward.farmingId
           })
@@ -211,14 +223,22 @@ export function ClaimAllRewardsEchelonModal({ isOpen, onClose, rewards, tokenPri
         }
 
         // Отправляем транзакцию
-        const txResponse = await signAndSubmitTransaction({
-          data: {
-            function: data.data.transactionPayload.function as `${string}::${string}::${string}`,
-            typeArguments: data.data.transactionPayload.type_arguments,
-            functionArguments: data.data.transactionPayload.arguments
+        const txResponse = await submitAptosTransaction({
+          transaction: {
+            data: {
+              function: data.data.transactionPayload.function as `${string}::${string}::${string}`,
+              typeArguments: data.data.transactionPayload.type_arguments,
+              functionArguments: data.data.transactionPayload.arguments
+            },
+            options: { maxGasAmount: 20000 },
           },
-          options: { maxGasAmount: 20000 },
+          signAndSubmitTransaction: signAndSubmitTransaction as any,
+          connected: !!account,
+          address: effectiveAptosAddress,
         });
+        if (!txResponse.hash) {
+          throw new Error("Transaction was submitted without hash");
+        }
 
         setCurrentHash(txResponse.hash);
 

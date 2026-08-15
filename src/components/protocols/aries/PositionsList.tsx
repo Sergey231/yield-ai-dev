@@ -8,6 +8,7 @@ import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import Image from "next/image";
 import tokenList from "@/lib/data/tokenList.json";
 import { ManagePositionsButton } from "../ManagePositionsButton";
+import { ProtocolClosureNotice } from "@/components/ui/protocol-closure-notice";
 import { useCollapsible } from "@/contexts/CollapsibleContext";
 import { formatNumber } from "@/lib/utils/numberFormat";
 import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
@@ -107,7 +108,8 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
   useEffect(() => {
     async function loadPositions() {
       if (!walletAddress) {
-        setPositions((prev) => prev);
+        setPositions([]);
+        setTotalValue(0);
         onPositionsCheckComplete?.();
         return;
       }
@@ -115,6 +117,8 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
       try {
         setLoading(true);
         setError(null);
+        setPositions([]);
+        setTotalValue(0);
         const response = await fetch(`/api/protocols/aries/userPositions?address=${walletAddress}`);
         
         if (!response.ok) {
@@ -122,7 +126,6 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
         }
         
         const data = await response.json() as AriesResponse;
-        // console.log('Aries API response:', data); // Добавляем для отладки
         
         if (data.profiles?.profiles) {
           const profiles = Object.values(data.profiles.profiles);
@@ -181,7 +184,6 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
       } catch (err) {
         // console.error('Error loading Aries positions:', err);
         setError('Failed to load positions');
-        // keep previous positions on error
       } finally {
         setLoading(false);
         onPositionsCheckComplete?.();
@@ -221,6 +223,7 @@ export function PositionsList({ address, onPositionsValueChange, refreshKey, onP
               </div>
             )}
             <CardTitle className="text-lg">Aries</CardTitle>
+            <ProtocolClosureNotice protocolKey="aries" stopPropagation />
           </div>
           <div className="flex items-center gap-2">
             <div className="text-lg">{formatUsd(totalValue, 2)}</div>

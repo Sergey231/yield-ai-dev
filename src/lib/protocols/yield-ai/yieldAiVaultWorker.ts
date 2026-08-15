@@ -1,5 +1,5 @@
 import { Aptos, AptosConfig, Network } from "@aptos-labs/ts-sdk";
-import { toCanonicalAddress } from "@/lib/utils/addressNormalization";
+import { normalizeAddress, toCanonicalAddress } from "@/lib/utils/addressNormalization";
 import { YIELD_AI_VAULT_VIEWS } from "@/lib/constants/yieldAiVault";
 import { loadStrategyConfigFromDisk, buildRunContext } from "./engine/configLoader";
 import { computeStateForSafe } from "./engine/stateComputer";
@@ -8,6 +8,13 @@ import {
   STRATEGY_REGISTRY_VIEWS,
   bytesToUtf8String,
 } from "@/lib/protocols/yield-ai/strategyRegistry";
+import { resolveSafeOwners } from "@/lib/protocols/yield-ai/hyperionLpCron";
+import {
+  NOTIFY_EMOJI,
+  formatTelegramNotification,
+  notifyWalletTelegram,
+  shortAddr,
+} from "@/lib/notifications/telegramWalletNotify";
 
 export type YieldAiVaultCronRunResult = {
   runId: string;
@@ -169,6 +176,7 @@ export async function runYieldAiVaultCronPass(options: {
   };
   const errors: Array<{ safeAddress: string; actionId: string; error: string }> = [];
   const skippedSafes: Array<{ safeAddress: string; reason: string }> = [];
+  const pendingNotifies: Array<{ safeAddress: string; message: string }> = [];
 
   let processedSafes = 0;
   let txCount = 0;
@@ -353,6 +361,12 @@ export async function runYieldAiVaultCronPass(options: {
             txCountClaim += r.txCount;
             if (!dryRun) claimedSafes += 1;
             if (!dryRun) txHashes.claim.push(...r.txHashes);
+            if (!dryRun) {
+              pendingNotifies.push({
+                safeAddress: discovered.safeAddress,
+                message: formatStablecoinClaimMessage(discovered.safeAddress, r.actionId),
+              });
+            }
           } else if (r.actionId.toLowerCase().includes("swap")) {
             txCountSwap += r.txCount;
             if (!dryRun) swappedSafes += 1;
@@ -375,6 +389,15 @@ export async function runYieldAiVaultCronPass(options: {
         error: e instanceof Error ? e.message : String(e),
       });
       continue;
+    }
+  }
+
+  if (pendingNotifies.length > 0) {
+    try {
+      await notifyStablecoinClaims(pendingNotifies);
+    } catch (err) {
+      // Notifications must never affect the cron's own result — log and move on.
+      console.warn("[Yield AI] notify pass failed; continuing", err);
     }
   }
 
@@ -420,5 +443,37 @@ export async function runYieldAiVaultCronPass(options: {
     skippedSafes,
     dryRun,
   } satisfies YieldAiVaultCronRunResult;
+}
+
+/**
+ * Best-effort Telegram alert for a stablecoin-compound claim action landing on-chain. No $ amount
+ * yet — `ActionResult` (engine/types.ts) only carries `{actionId, executed, txCount, txHashes}`,
+ * no claimed-value field; adding one means measuring a balance delta around the claim (like DN-LP
+ * autoclaim does), deferred for now (generic message is enough for a first alert).
+ */
+function formatStablecoinClaimMessage(safeAddress: string, actionId: string): string {
+  return formatTelegramNotification(NOTIFY_EMOJI.claim, "Stablecoin compound — claimed", [
+    `Action \`${actionId}\` executed.`,
+    `Safe ${shortAddr(safeAddress)}`,
+  ]);
+}
+
+async function notifyStablecoinClaims(
+  pending: Array<{ safeAddress: string; message: string }>
+): Promise<void> {
+  const owners = await resolveSafeOwners([...new Set(pending.map((n) => n.safeAddress))]);
+  await Promise.all(
+    pending.map(async (n) => {
+      const owner = owners.get(normalizeAddress(toCanonicalAddress(n.safeAddress)));
+      if (!owner) return;
+      const res = await notifyWalletTelegram({ address: owner, message: n.message }).catch((err) => ({
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      if (!res.ok) {
+        console.warn(`[Yield AI] notify failed safe=${n.safeAddress}: ${res.error ?? "unknown"}`);
+      }
+    })
+  );
 }
 

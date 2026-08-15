@@ -113,7 +113,9 @@ Threshold values used in action conditions. Per-safe overrides can change any of
 | Field | Type | Description |
 |-------|------|-------------|
 | `minClaimBaseUnits` | `number` | Minimum claimable amount (in base units) to trigger a claim action. |
+| `minElonClaimBaseUnits` | `number` | ELON-specific minimum claimable amount (8-decimal base units) to trigger an Echelon ELON claim. |
 | `minSwapRewardBaseUnits` | `number` | Minimum reward balance (in base units) to trigger a swap. |
+| `minElonSwapRewardBaseUnits` | `number` | ELON-specific minimum safe balance (8-decimal base units) to trigger the ELON -> USDC swap. |
 | `minUsdcSwapToUsd1` | `number` | Minimum USDC balance (base units, 6 decimals) to swap into USD1. |
 | `minUsd1DepositToEchelon` | `number` | Minimum USD1 excess to deposit into Echelon. |
 | `usd1ReserveInSafe` | `number` | USD1 amount to keep in the safe (not deposited). `excessBalance = balance - reserve`. |
@@ -157,6 +159,8 @@ Each action represents a single on-chain operation. Actions form a DAG (directed
 | `claimMoarReward` | `vault::execute_claim_apt` | Claim APT reward from Moar farming. |
 | `claimEchelonReward` | `vault::execute_claim_echelon<T>` | Claim a single reward token from Echelon farming. Requires `rewardCoinType` (type arg) and `rewardMetadata`. |
 | `swapFaToFa` | `vault::execute_swap_fa_to_fa` | Swap FA → FA via on-chain swap integration (USDC-hub allowlist). |
+| `swapFaToFaThala` | `vault::execute_swap_fa_to_fa_thala` | Swap FA → USDC via a dedicated Thala CLMM pool, chunked by price impact. |
+| `swapFaToFaHyperionBatch` | `vault::execute_swap_fa_to_fa_hyperion_batch` | Swap FA → USDC through a fixed, allowlisted two-pool Hyperion route (e.g. thAPT → APT → USDC). |
 | `depositEchelonFa` | `vault::execute_deposit_echelon_fa` | Deposit FA into Echelon lending market. |
 | `withdrawMoarFull` | `vault::execute_withdraw_full` | Full withdraw from Moar pool. |
 | `depositMoar` | `vault::execute_deposit` | Deposit to Moar pool. |
@@ -190,6 +194,32 @@ For v1:
 - `fee_tier` and `sqrt_price_limit` are selected from a hardcoded lookup table keyed by `(fromMetadata, toMetadata)`.
 - `amount_out_min` is computed from a quote source (Hyperion SDK quote) and `slippageBps` (capped by `riskLimits.maxSlippageBps`).
 - If a pair is not present in the hardcoded table, the worker should skip the action rather than guessing.
+
+#### `swapFaToFaHyperionBatch`
+
+Swaps a reward FA to USDC through a fixed multi-pool Hyperion route. `swap_batch` executes a
+supplied path and does not discover routes on-chain, so the route is allowlisted in the contract
+(`protocol::set_hyperion_batch_route`); the worker only varies `amount_in` / `amount_out_min`.
+
+| Field | Description |
+|-------|-------------|
+| `entryFunction` | `vault::execute_swap_fa_to_fa_hyperion_batch`. |
+| `fromAsset` | Asset key from `global.assets` (input token, e.g. `ThalaAPT`). Full safe balance is swapped. |
+| `toAsset` | Asset key for the output token — must be `USDC` (the contract asserts the configured USDC metadata). |
+| `lpPath` | Ordered `vector<address>` of pool objects for the route. Optional — defaults to the allowlisted thAPT → APT → USDC path. Must have exactly 2 entries (MVP). |
+
+Parameter resolution:
+
+- There is no `fee_tier`, `sqrt_price_limit`, or `deadline` — `swap_batch` takes none. Economic
+  protection is entirely `amount_out_min`.
+- `amount_out_min` is quoted on-chain immediately before submit via
+  `router_v3::get_batch_amount_out(lp_path, amount_in, from_token, to_token)`, then
+  `amount_out_min = quote * (10000 - slippageBps) / 10000` with `slippageBps` capped by
+  `riskLimits.maxSlippageBps`.
+- Pre-flight per safe: `vault::fa_swap_config_exists(safe)` must be true and the safe's
+  `VaultFaSwapConfig` limits must be non-zero, otherwise the action is skipped. The route itself is
+  global, so no per-safe enablement is required in the MVP.
+- The realized USDC delta on the safe is logged against the quote for monitoring.
 
 ## Conditions
 

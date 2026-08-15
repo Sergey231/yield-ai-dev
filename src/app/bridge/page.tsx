@@ -38,6 +38,8 @@ import { ReclaimBanner } from '@/components/bridge/ReclaimBanner';
 import { useAptosClient } from '@/contexts/AptosClientContext';
 import { GasStationService } from '@/lib/services/gasStation';
 import { performMintOnSolana } from '@/lib/cctp-mint-core';
+import { isYieldAiNativeAppNow, postToNative, signAndSubmitAptosTransaction, submitSolanaTransactionViaNative } from '@/lib/mobile/nativeBridge';
+import { useNativeWalletStore } from '@/lib/stores/nativeWalletStore';
 
 // USDC token addresses
 const USDC_SOLANA = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // USDC on Solana
@@ -77,6 +79,11 @@ function BridgePageContent() {
   const { publicKey: solanaPublicKey, connected: solanaConnected, disconnect: disconnectSolana, wallet: solanaWallet, wallets, select, connect: connectSolana, signTransaction: signSolanaTransaction, signMessage: signSolanaMessage } = useSolanaWallet();
   const { connection: solanaConnection } = useConnection();
   const { account: aptosAccount, connected: aptosConnected, wallet: aptosWallet, wallets: aptosWallets, connect: connectAptos, disconnect: disconnectAptos } = useAptosWallet();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
+  const injectedSolanaAddress = useNativeWalletStore((s) => s.solanaAddress);
+  const setInjectedDisconnected = useNativeWalletStore((s) => s.setDisconnected);
+  const trimmedInjectedAptosAddress = (injectedAptosAddress ?? "").trim();
+  const trimmedInjectedSolanaAddress = (injectedSolanaAddress ?? "").trim();
 
   // Get Solana address - prefer adapter state over hook state for reliability
   // The hook state can desync from the actual adapter state
@@ -90,8 +97,8 @@ function BridgePageContent() {
   // Ultimate fallback: scan ALL wallet adapters for a connected one
   // This handles the case where the hook's `wallet` is null/stale after disconnect/reconnect on another page
   const anyAdapterConnected = wallets.some(w => w.adapter.connected && w.adapter.publicKey);
-  const effectiveSolanaConnectedFinal = effectiveSolanaConnected || anyAdapterConnected;
-  const solanaAddressFinal = solanaAddress || wallets.find(w => w.adapter.connected && w.adapter.publicKey)?.adapter.publicKey?.toBase58() || null;
+  const effectiveSolanaConnectedFinal = Boolean(trimmedInjectedSolanaAddress) || effectiveSolanaConnected || anyAdapterConnected;
+  const solanaAddressFinal = trimmedInjectedSolanaAddress || solanaAddress || wallets.find(w => w.adapter.connected && w.adapter.publicKey)?.adapter.publicKey?.toBase58() || null;
 
   // Re-check both wallets before mint (state may be lost during attestation wait)
   // Note: effectiveSolanaConnected is computed later, so we track both hook state and adapter state
@@ -202,6 +209,14 @@ function BridgePageContent() {
   const [isWalletConnectDialogOpen, setIsWalletConnectDialogOpen] = useState(false);
   const [walletConnectInitialChainTab, setWalletConnectInitialChainTab] = useState<"aptos" | "solana">("aptos");
   const [isAptosConnecting, setIsAptosConnecting] = useState(false);
+  const requestNativeWalletConnect = useCallback((chain: "aptos" | "solana") => {
+    const walletId = chain === "aptos" ? "petra" : "phantom";
+    const posted = postToNative("connect_wallet", { chain, walletId });
+    if (!posted) {
+      setWalletConnectInitialChainTab(chain);
+      setIsWalletConnectDialogOpen(true);
+    }
+  }, []);
   
   // Restoring/Reconnecting states - show loading while wallets are being restored/reconnected
   const [isSolanaRestoring, setIsSolanaRestoring] = useState(false);
@@ -214,11 +229,11 @@ function BridgePageContent() {
     if (typeof window === 'undefined') return;
     
     // Already connected - no need to restore
-    if (solanaConnected || effectiveSolanaConnected) {
+    if (solanaConnected || effectiveSolanaConnected || trimmedInjectedSolanaAddress) {
       setIsSolanaRestoring(false);
       return;
     }
-    if (aptosConnected) {
+    if (aptosConnected || trimmedInjectedAptosAddress) {
       setIsAptosRestoring(false);
     }
     
@@ -267,40 +282,40 @@ function BridgePageContent() {
       }
     }
     
-    if (hasNativeAptos && !aptosConnected) {
+    if (hasNativeAptos && !aptosConnected && !trimmedInjectedAptosAddress) {
       setIsAptosRestoring(true);
     } else {
       setIsAptosRestoring(false);
     }
-  }, [solanaConnected, effectiveSolanaConnected, aptosConnected]);
+  }, [solanaConnected, effectiveSolanaConnected, aptosConnected, trimmedInjectedAptosAddress, trimmedInjectedSolanaAddress]);
   
   // Clear restoring state when connected
   useEffect(() => {
-    if (solanaConnected || effectiveSolanaConnected) {
+    if (solanaConnected || effectiveSolanaConnected || trimmedInjectedSolanaAddress) {
       setIsSolanaRestoring(false);
       setIsSolanaReconnecting(false);
     }
-  }, [solanaConnected, effectiveSolanaConnected]);
+  }, [solanaConnected, effectiveSolanaConnected, trimmedInjectedSolanaAddress]);
   
   useEffect(() => {
-    if (aptosConnected) {
+    if (aptosConnected || trimmedInjectedAptosAddress) {
       setIsAptosRestoring(false);
       setIsAptosReconnecting(false);
     }
-  }, [aptosConnected]);
+  }, [aptosConnected, trimmedInjectedAptosAddress]);
   
   // Clear restoring after timeout - increased to 10s for Phantom which needs multiple retries
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (!solanaConnected && !effectiveSolanaConnected) {
+      if (!solanaConnected && !effectiveSolanaConnected && !trimmedInjectedSolanaAddress) {
         setIsSolanaRestoring(false);
       }
-      if (!aptosConnected) {
+      if (!aptosConnected && !trimmedInjectedAptosAddress) {
         setIsAptosRestoring(false);
       }
     }, 10000);
     return () => clearTimeout(timer);
-  }, [solanaConnected, effectiveSolanaConnected, aptosConnected]);
+  }, [solanaConnected, effectiveSolanaConnected, aptosConnected, trimmedInjectedAptosAddress, trimmedInjectedSolanaAddress]);
 
   // Additional check: clear restoring early if adapter is not attempting to connect
   // This helps when there's no saved wallet or wallet extension is not installed
@@ -344,6 +359,8 @@ function BridgePageContent() {
     address: string;
     name: string;
   } | null>(null);
+  const effectiveAptosAddress = trimmedInjectedAptosAddress || aptosAccount?.address?.toString() || aptosNativeFallback?.address || null;
+  const effectiveAptosConnected = Boolean(effectiveAptosAddress) || aptosConnected;
 
   // Balance expansion state
   const [isSolanaBalanceExpanded, setIsSolanaBalanceExpanded] = useState(false);
@@ -828,6 +845,7 @@ function BridgePageContent() {
   // Check if current Aptos wallet is derived (depends on Solana being connected)
   const isCurrentAptosDerived = aptosWallet?.name?.endsWith(' (Solana)') ?? false;
   const showAptosAsConnected = Boolean(
+    trimmedInjectedAptosAddress ||
     // Adapter connected - but only count derived as connected if Solana is still connected
     (aptosConnected && aptosAccount && (!isCurrentAptosDerived || effectiveSolanaConnectedFinal)) ||
     (aptosWallet && storedAptosName === aptosWallet.name && aptosNativeSelected) ||
@@ -836,7 +854,7 @@ function BridgePageContent() {
   // Don't show "Connecting..." when we have fallback - fallback means we have a cached address to display
   const aptosConnecting = Boolean(
     !aptosNativeFallback &&  // Don't show connecting when we have fallback address
-    (aptosWallet && storedAptosName === aptosWallet.name && aptosNativeSelected && !aptosConnected)
+    (aptosWallet && storedAptosName === aptosWallet.name && aptosNativeSelected && !aptosConnected && !trimmedInjectedAptosAddress)
   );
   
   // Debug log for showAptosAsConnected
@@ -845,6 +863,7 @@ function BridgePageContent() {
       showAptosAsConnected,
       aptosConnecting,
       condition1_adapterConnectedAndNotDerivedWithoutSolana: Boolean(aptosConnected && aptosAccount && (!isCurrentAptosDerived || effectiveSolanaConnected)),
+      condition0_injectedNativeAptos: Boolean(trimmedInjectedAptosAddress),
       condition2_walletMatch: Boolean(aptosWallet && storedAptosName === aptosWallet.name && aptosNativeSelected),
       condition3_fallbackIsNative: fallbackIsNative,
       aptosConnected,
@@ -856,7 +875,7 @@ function BridgePageContent() {
       effectiveSolanaConnected,
       aptosNativeFallback: aptosNativeFallback ? { name: aptosNativeFallback.name, address: aptosNativeFallback.address.slice(0, 10) + '...' } : null,
     });
-  }, [showAptosAsConnected, aptosConnecting, aptosConnected, aptosAccount, aptosWallet, storedAptosName, aptosNativeSelected, fallbackIsNative, aptosNativeFallback, isCurrentAptosDerived, effectiveSolanaConnected]);
+  }, [showAptosAsConnected, aptosConnecting, aptosConnected, aptosAccount, aptosWallet, storedAptosName, aptosNativeSelected, fallbackIsNative, aptosNativeFallback, isCurrentAptosDerived, effectiveSolanaConnected, trimmedInjectedAptosAddress]);
   
   // Track previous aptosConnected state to detect reconnection (false -> true transition)
   const prevAptosConnectedRef = useRef(aptosConnected);
@@ -880,7 +899,7 @@ function BridgePageContent() {
   const DOMAIN_APTOS = 9;
 
   // Check if both wallets are connected (use effective state that includes adapter state)
-  const bothWalletsConnected = Boolean(effectiveSolanaConnectedFinal && aptosConnected && aptosAccount);
+  const bothWalletsConnected = Boolean(effectiveSolanaConnectedFinal && effectiveAptosConnected && effectiveAptosAddress);
 
   // Diagnostic: log on every render when there's a potential desync
   if (anyAdapterConnected && !effectiveSolanaConnected) {
@@ -897,9 +916,9 @@ function BridgePageContent() {
   // Determine missing wallet for alert
   const missingWallet = useMemo(() => {
     if (!effectiveSolanaConnectedFinal) return 'Solana';
-    if (!aptosConnected || !aptosAccount) return 'Aptos';
+    if (!effectiveAptosConnected || !effectiveAptosAddress) return 'Aptos';
     return null;
-  }, [effectiveSolanaConnectedFinal, aptosConnected, aptosAccount]);
+  }, [effectiveSolanaConnectedFinal, effectiveAptosConnected, effectiveAptosAddress]);
 
   // Check if bridge button should be disabled
   const bridgeButtonDisabled = useMemo(() => {
@@ -998,7 +1017,7 @@ function BridgePageContent() {
   };
 
   const copyAptosAddress = async () => {
-    const address = aptosAccount?.address?.toString() || aptosNativeFallback?.address;
+    const address = effectiveAptosAddress;
     if (!address) return;
     try {
       await navigator.clipboard.writeText(address);
@@ -1024,6 +1043,16 @@ function BridgePageContent() {
   }, [aptosWallet?.name]);
 
   const handleDisconnectSolana = async () => {
+    if (isYieldAiNativeAppNow() && trimmedInjectedSolanaAddress) {
+      postToNative("disconnect_wallet", { chain: "solana" });
+      setInjectedDisconnected("solana");
+      toast({
+        title: "Success",
+        description: "Solana wallet disconnected",
+      });
+      return;
+    }
+
     // Determine current Aptos wallet type BEFORE any disconnect actions
     const rawAptosStorage = typeof window !== "undefined" ? window.localStorage.getItem("AptosWalletName") : null;
     const currentAptosWalletName = aptosWallet?.name;
@@ -1173,6 +1202,18 @@ function BridgePageContent() {
   };
 
   const handleDisconnectAptos = async () => {
+    if (isYieldAiNativeAppNow() && trimmedInjectedAptosAddress) {
+      postToNative("disconnect_wallet", { chain: "aptos" });
+      setInjectedDisconnected("aptos");
+      setStoredAptosName(null);
+      setAptosNativeFallback(null);
+      toast({
+        title: "Success",
+        description: "Aptos wallet disconnected",
+      });
+      return;
+    }
+
     skipAutoConnectDerivedRef.current = true;
     if (typeof window !== "undefined") sessionStorage.setItem("skip_auto_connect_derived_aptos", "1");
     
@@ -1354,7 +1395,7 @@ function BridgePageContent() {
 
   // Reusable function to load/refresh Aptos portfolio
   const refreshAptos = useCallback(async () => {
-    if (!aptosAccount?.address) {
+    if (!effectiveAptosAddress) {
       setAptosTokens([]);
       setAptosTotalValue(0);
       return;
@@ -1363,7 +1404,7 @@ function BridgePageContent() {
     try {
       setIsAptosLoading(true);
       const portfolioService = new AptosPortfolioService();
-      const portfolio = await portfolioService.getPortfolio(aptosAccount.address.toString());
+      const portfolio = await portfolioService.getPortfolio(effectiveAptosAddress);
       setAptosTokens(portfolio.tokens);
       
       // Calculate total value from tokens
@@ -1378,7 +1419,7 @@ function BridgePageContent() {
     } finally {
       setIsAptosLoading(false);
     }
-  }, [aptosAccount?.address]);
+  }, [effectiveAptosAddress]);
 
   // Load Aptos portfolio when wallet is connected
   useEffect(() => {
@@ -1467,7 +1508,15 @@ function BridgePageContent() {
 
       if (isSolanaToAptos) {
         // Solana -> Aptos: Use SolanaToAptosBridge
-        if (!resolvedPublicKey || !resolvedSignTx || !solanaConnection || !aptosAccount) {
+        const nativeSolanaFlowActive = isYieldAiNativeAppNow() && !!trimmedInjectedSolanaAddress;
+        const resolvedAptosAddress = effectiveAptosAddress;
+        let bridgeSolanaPublicKey = resolvedPublicKey;
+        if (!bridgeSolanaPublicKey && trimmedInjectedSolanaAddress) {
+          const { PublicKey } = await import('@solana/web3.js');
+          bridgeSolanaPublicKey = new PublicKey(trimmedInjectedSolanaAddress);
+        }
+
+        if (!bridgeSolanaPublicKey || (!resolvedSignTx && !nativeSolanaFlowActive) || !solanaConnection || !resolvedAptosAddress) {
           throw new Error('Please connect both Solana and Aptos wallets');
         }
 
@@ -1475,22 +1524,25 @@ function BridgePageContent() {
         updateLastAction('Starting Solana -> Aptos bridge...', 'pending');
         console.log('[Bridge] Solana -> Aptos transfer initiated');
 
-        const solanaWalletAddr = resolvedPublicKey.toBase58();
+        const solanaWalletAddr = bridgeSolanaPublicKey.toBase58();
         const capturedEventAccount = { value: null as string | null };
 
         // Execute burn on Solana
         const burnTxSignature = await executeSolanaToAptosBridge(
           transferAmount,
-          resolvedPublicKey,
-          resolvedSignTx,
+          bridgeSolanaPublicKey,
+          resolvedSignTx ?? (async () => {
+            throw new Error('Solana wallet does not support signTransaction');
+          }),
           solanaConnection,
-          aptosAccount.address.toString(),
+          resolvedAptosAddress,
           {
             onStatusUpdate: (status) => {
               setTransferStatus(status);
               updateLastAction(status, 'pending');
             },
             onEventAccount: (ea) => { capturedEventAccount.value = ea; },
+            signAndSubmitTransaction: nativeSolanaFlowActive ? submitSolanaTransactionViaNative : undefined,
           }
         );
 
@@ -1521,7 +1573,7 @@ function BridgePageContent() {
         // Refresh Solana balance after burn (tokens were spent) — with delay for indexer
         setTimeout(() => refreshSolana(), 3000);
         setTimeout(() => refreshSolana(), 10000);
-        setLastSolanaToAptosParams({ signature: burnTxSignature, finalRecipient: aptosAccount.address.toString() });
+        setLastSolanaToAptosParams({ signature: burnTxSignature, finalRecipient: resolvedAptosAddress });
         setLastAptosToSolanaParams(null);
 
         // Wait for Solana confirmation
@@ -1610,7 +1662,7 @@ function BridgePageContent() {
               const requestBody = {
                 signature: burnTxSignature.trim(),
                 sourceDomain: '5', // Solana CCTP V1 domain
-                finalRecipient: aptosAccount.address.toString().trim(),
+                finalRecipient: resolvedAptosAddress.trim(),
               };
               
               console.log(`[Bridge] Calling mint API, attempt ${attempt}/${maxAttempts}`);
@@ -1651,7 +1703,7 @@ function BridgePageContent() {
                 console.log('[Bridge] USDC minted successfully on Aptos', data);
                 
                 // Add recipient wallet action
-                const recipientAddress = data.data?.transaction?.finalRecipient || aptosAccount.address.toString();
+                const recipientAddress = data.data?.transaction?.finalRecipient || resolvedAptosAddress;
                 if (recipientAddress) {
                   addAction(
                     'Recipient wallet',
@@ -1778,7 +1830,7 @@ function BridgePageContent() {
             addAction(
               `Recipient wallet`,
               'pending',
-              `https://explorer.aptoslabs.com/account/${aptosAccount.address.toString()}?network=mainnet`,
+              `https://explorer.aptoslabs.com/account/${resolvedAptosAddress}?network=mainnet`,
               'View recipient wallet on Aptos Explorer'
             );
             
@@ -1802,7 +1854,16 @@ function BridgePageContent() {
 
       } else if (isAptosToSolana) {
         // Aptos -> Solana: derived (Gas Station + Solana sign) или native (bytecode + Aptos sign, газ — кошелёк пользователя)
-        if (!aptosAccount || !aptosWallet || !resolvedPublicKey || !resolvedSignTx || !solanaConnection) {
+        const nativeAptosFlowActive = isYieldAiNativeAppNow() && !!trimmedInjectedAptosAddress;
+        const nativeSolanaFlowActive = isYieldAiNativeAppNow() && !!trimmedInjectedSolanaAddress;
+        const resolvedAptosAddress = effectiveAptosAddress;
+        let bridgeSolanaPublicKey = resolvedPublicKey;
+        if (!bridgeSolanaPublicKey && trimmedInjectedSolanaAddress) {
+          const { PublicKey } = await import('@solana/web3.js');
+          bridgeSolanaPublicKey = new PublicKey(trimmedInjectedSolanaAddress);
+        }
+
+        if (!resolvedAptosAddress || !bridgeSolanaPublicKey || (!resolvedSignTx && !nativeSolanaFlowActive) || !solanaConnection) {
           throw new Error('Please connect both Solana and Aptos wallets');
         }
         const destSolana = destinationAddress || solanaAddressFinal;
@@ -1814,7 +1875,7 @@ function BridgePageContent() {
         updateLastAction('Starting Aptos -> Solana bridge...', 'pending');
 
         let burnTxHash: string;
-        if (isDerivedWallet) {
+        if (isDerivedWallet && !nativeAptosFlowActive) {
           const effectiveWallet = solanaWallet || wallets.find(w => w.adapter.connected) || null;
           if (!effectiveWallet || !resolvedSignMsg) {
             throw new Error('Please connect Solana wallet (required for derived Aptos).');
@@ -1822,10 +1883,10 @@ function BridgePageContent() {
           console.log('[Bridge] Aptos -> Solana (derived wallet)');
           burnTxHash = await executeAptosToSolanaBridge({
             amount: transferAmount,
-            aptosAccount,
+            aptosAccount: aptosAccount!,
             aptosWallet: aptosWallet as any,
             aptosClient,
-            solanaPublicKey: resolvedPublicKey,
+            solanaPublicKey: bridgeSolanaPublicKey,
             solanaWallet: effectiveWallet,
             signMessage: resolvedSignMsg ?? undefined,
             transactionSubmitter: aptosTransactionSubmitter as any,
@@ -1836,20 +1897,21 @@ function BridgePageContent() {
             },
           });
         } else {
-          if (isDerivedAptosWalletReliable(aptosWallet)) {
+          if (!nativeAptosFlowActive && (!aptosWallet || isDerivedAptosWalletReliable(aptosWallet))) {
             throw new Error('Use a native Aptos wallet (e.g. Petra) or connect via Solana for derived wallet.');
           }
           console.log('[Bridge] Aptos -> Solana (native wallet, bytecode, user pays gas)');
           burnTxHash = await executeAptosNativeToSolanaBridge({
             amount: transferAmount,
-            aptosAccount,
-            aptosWallet: aptosWallet as any,
+            aptosAccount: aptosAccount ?? { address: resolvedAptosAddress },
+            aptosWallet: (aptosWallet ?? { name: 'Petra', isAptosNativeWallet: true, features: {} }) as any,
             aptosClient,
             destinationSolanaAddress: destSolana,
             onStatusUpdate: (s) => {
               setTransferStatus(s);
               updateLastAction(s, 'pending');
             },
+            signAndSubmitTransaction: nativeAptosFlowActive ? signAndSubmitAptosTransaction : undefined,
           });
         }
 
@@ -1905,7 +1967,9 @@ function BridgePageContent() {
         const initialAttestationDelay = 10000;
         const maxAttestationDelay = 60000;
         let attestationData: { messages: Array<{ message?: string; attestation?: string; eventNonce?: string }> } | null = null;
-        const attestationUrl = `${irisBase}/messages/${DOMAIN_APTOS}/${burnTxHash.trim()}`;
+        const trimmedBurnTxHash = burnTxHash.trim();
+        const attestationUrl = `${irisBase}/messages/${DOMAIN_APTOS}/${trimmedBurnTxHash}`;
+        const attestationProxyUrl = `/api/cctp/attestation?domain=${DOMAIN_APTOS}&signature=${encodeURIComponent(trimmedBurnTxHash)}`;
 
         setTransferStatus('Waiting for attestation from Circle...');
         addAction('Requesting attestation from Circle...', 'pending', attestationUrl, 'View attestation request');
@@ -1920,7 +1984,7 @@ function BridgePageContent() {
           setTransferStatus(`Waiting for attestation... (attempt ${att}/${maxAttestationAttempts})`);
           const attDelay = Math.min(initialAttestationDelay * Math.pow(2, att - 1), maxAttestationDelay);
           if (att > 1) await new Promise((r) => setTimeout(r, attDelay));
-          const ar = await fetch(attestationUrl, { method: 'GET', headers: { 'Content-Type': 'application/json' } });
+          const ar = await fetch(attestationProxyUrl, { method: 'GET', headers: { 'Content-Type': 'application/json' } });
           if (!ar.ok) {
             if (ar.status === 404) continue;
             throw new Error(`Circle API error: ${ar.status} ${ar.statusText}`);
@@ -1939,16 +2003,16 @@ function BridgePageContent() {
         addAction('Preparing mint transaction on Solana...', 'pending');
 
         // Re-check both wallets — context can be lost during long attestation wait
-        if (!aptosConnectedRef.current || !aptosAccountRef.current) {
+        if ((!aptosConnectedRef.current || !aptosAccountRef.current) && !nativeAptosFlowActive) {
           throw new Error(
             'Aptos wallet no longer detected. Please reconnect your Aptos wallet and retry the mint (use the attestation link above on the manual minting page), or try again with both wallets connected from the start.'
           );
         }
         // Re-resolve Solana adapter state (handles Phantom desync where hook state is stale)
         const mintAdapter = solanaWallet?.adapter || wallets.find(w => w.adapter.connected)?.adapter || null;
-        const mintPublicKey = solanaPublicKeyRef.current || mintAdapter?.publicKey || null;
+        const mintPublicKey = solanaPublicKeyRef.current || mintAdapter?.publicKey || bridgeSolanaPublicKey || null;
         const mintSignTx = signSolanaTransactionRef.current || (mintAdapter && (mintAdapter as any).signTransaction ? (mintAdapter as any).signTransaction.bind(mintAdapter) : null);
-        const mintConnected = solanaConnectedRef.current || mintAdapter?.connected || false;
+        const mintConnected = solanaConnectedRef.current || mintAdapter?.connected || nativeSolanaFlowActive || false;
 
         console.log('[Bridge] Mint phase - resolved Solana state:', {
           connected: mintConnected,
@@ -1957,14 +2021,14 @@ function BridgePageContent() {
           adapterName: mintAdapter?.name || 'none',
         });
 
-        if (!mintConnected || !mintPublicKey || !mintSignTx) {
+        if (!mintConnected || !mintPublicKey || (!mintSignTx && !nativeSolanaFlowActive)) {
           throw new Error(
             'Solana wallet no longer detected. Please reconnect your Solana wallet (the one that will receive USDC and sign the mint tx) and retry, or use the manual minting page with the attestation link above.'
           );
         }
 
         // Re-establish Solana connection before mint (adapter can report "not connected" after long attestation wait)
-        if (solanaWalletRef.current || mintAdapter) {
+        if (!nativeSolanaFlowActive && (solanaWalletRef.current || mintAdapter)) {
           try {
             await connectSolana();
             await new Promise((r) => setTimeout(r, 400));
@@ -1980,8 +2044,11 @@ function BridgePageContent() {
             destSolana,
             solanaConnection,
             mintPublicKey,
-            mintSignTx,
-            (s) => { setTransferStatus(s); updateLastAction(s, 'pending'); }
+            mintSignTx ?? (async () => {
+              throw new Error('Solana wallet does not support signTransaction');
+            }),
+            (s) => { setTransferStatus(s); updateLastAction(s, 'pending'); },
+            nativeSolanaFlowActive ? submitSolanaTransactionViaNative : undefined
           );
         } catch (mintErr: any) {
           console.error('[Bridge] Mint error:', mintErr);
@@ -2088,7 +2155,7 @@ function BridgePageContent() {
       : 'idle';
 
   const aptosAddressForView: string | null =
-    aptosAccount?.address?.toString() ?? aptosNativeFallback?.address ?? null;
+    effectiveAptosAddress;
 
   const resetBridge = () => {
     setActionLog([]);
@@ -2211,6 +2278,10 @@ function BridgePageContent() {
                     className="w-full"
                     disabled={isSolanaRestoring || isSolanaReconnecting}
                     onClick={() => {
+                      if (isYieldAiNativeAppNow()) {
+                        requestNativeWalletConnect("solana");
+                        return;
+                      }
                       setWalletConnectInitialChainTab("solana");
                       setIsWalletConnectDialogOpen(true);
                     }}
@@ -2231,16 +2302,16 @@ function BridgePageContent() {
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 min-w-0">
                       <span className="text-sm font-medium text-muted-foreground shrink-0">
-                        Aptos {aptosNativeSelected && !aptosConnected ? "(Native)" : isDerivedWallet ? "(Derived)" : "(Native)"}
+                        Aptos {trimmedInjectedAptosAddress ? "(Native)" : aptosNativeSelected && !aptosConnected ? "(Native)" : isDerivedWallet ? "(Derived)" : "(Native)"}
                       </span>
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
                           <Button variant="ghost" className="h-auto p-0 font-mono text-sm truncate" disabled={aptosConnecting}>
-                            {aptosConnecting ? "Connecting…" : (aptosAccount ? truncateAddress(aptosAccount.address.toString()) : (aptosNativeFallback ? truncateAddress(aptosNativeFallback.address) : "…"))}
+                            {aptosConnecting ? "Connecting…" : (effectiveAptosAddress ? truncateAddress(effectiveAptosAddress) : "…")}
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          <DropdownMenuItem onSelect={copyAptosAddress} className="gap-2" disabled={!aptosAccount && !aptosNativeFallback}>
+                          <DropdownMenuItem onSelect={copyAptosAddress} className="gap-2" disabled={!effectiveAptosAddress}>
                             <Copy className="h-4 w-4" /> Copy address
                           </DropdownMenuItem>
                           <DropdownMenuItem onSelect={handleDisconnectAptos} className="gap-2" disabled={aptosConnecting}>
@@ -2259,6 +2330,10 @@ function BridgePageContent() {
                     className="w-full"
                     disabled={isAptosConnecting || isAptosRestoring || isAptosReconnecting}
                     onClick={() => {
+                      if (isYieldAiNativeAppNow()) {
+                        requestNativeWalletConnect("aptos");
+                        return;
+                      }
                       setWalletConnectInitialChainTab("aptos");
                       setIsWalletConnectDialogOpen(true);
                     }}

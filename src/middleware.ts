@@ -1,43 +1,46 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import {
+  ADMIN_SESSION_COOKIE,
+  isAdminAuthConfigured,
+  verifySessionToken,
+} from '@/lib/admin/session';
 
 /**
- * Basic Auth gate for admin pages and admin APIs.
+ * Cookie session gate for admin pages and admin APIs.
  * Set ADMIN_BASIC_AUTH_USER / ADMIN_BASIC_AUTH_PASSWORD in env to enable.
- * If env vars are missing, admin routes return 503 (deny by default).
+ * Sign in at /admin/login (same credentials).
  */
-function checkAdminBasicAuth(request: NextRequest): NextResponse | null {
-  const expectedUser = process.env.ADMIN_BASIC_AUTH_USER;
-  const expectedPass = process.env.ADMIN_BASIC_AUTH_PASSWORD;
+function isAdminAuthPublicPath(pathname: string): boolean {
+  return pathname === '/admin/login' || pathname === '/api/admin/login';
+}
 
-  if (!expectedUser || !expectedPass) {
+async function checkAdminSession(request: NextRequest): Promise<NextResponse | null> {
+  const { pathname } = request.nextUrl;
+
+  if (isAdminAuthPublicPath(pathname)) return null;
+
+  if (!isAdminAuthConfigured()) {
     return new NextResponse('Admin auth not configured', { status: 503 });
   }
 
-  const header = request.headers.get('authorization') ?? '';
-  if (header.startsWith('Basic ')) {
-    try {
-      const decoded = atob(header.slice(6));
-      const sepIdx = decoded.indexOf(':');
-      const user = sepIdx >= 0 ? decoded.slice(0, sepIdx) : '';
-      const pass = sepIdx >= 0 ? decoded.slice(sepIdx + 1) : '';
-      if (user === expectedUser && pass === expectedPass) return null;
-    } catch {
-      // fall through to 401
-    }
+  const token = request.cookies.get(ADMIN_SESSION_COOKIE)?.value;
+  if (token && (await verifySessionToken(token))) return null;
+
+  if (pathname.startsWith('/api/admin')) {
+    return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
   }
 
-  return new NextResponse('Authentication required', {
-    status: 401,
-    headers: { 'WWW-Authenticate': 'Basic realm="Yield AI Admin"' },
-  });
+  const loginUrl = new URL('/admin/login', request.url);
+  loginUrl.searchParams.set('next', pathname);
+  return NextResponse.redirect(loginUrl);
 }
 
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   const { pathname, hostname } = request.nextUrl;
 
   if (pathname.startsWith('/admin') || pathname.startsWith('/api/admin')) {
-    const denied = checkAdminBasicAuth(request);
+    const denied = await checkAdminSession(request);
     if (denied) return denied;
   }
 

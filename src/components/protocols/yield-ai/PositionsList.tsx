@@ -1,17 +1,24 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
-import { ProtocolCard } from "@/shared/ProtocolCard";
+import { ProtocolCard, type ProtocolPositionGroup } from "@/shared/ProtocolCard";
 import { formatCurrency } from "@/lib/utils/numberFormat";
 import { queryKeys } from "@/lib/query/queryKeys";
 import { useYieldAiSafes } from "@/lib/query/hooks/protocols/yield-ai";
+import { useBatchSafeStrategies } from "@/lib/query/hooks/protocols/yield-ai/useBatchSafeStrategies";
+import { dispatchSelectYieldAiSafe } from "@/lib/query/hooks/protocols/yield-ai/useSelectedYieldAiSafe";
+import { AI_AGENT_STRATEGIES } from "@/lib/protocols/yield-ai/strategyRegistry";
+import { useProtocol } from "@/lib/contexts/ProtocolContext";
+import { useMobileManagement } from "@/contexts/MobileManagementContext";
 import { toCanonicalAddress } from "@/lib/utils/addressNormalization";
 import { SafePositionsCard, type SafePositionsData } from "./SafePositionsCard";
 
 const MIN_VISIBLE_USD = 0.0001;
+/** Plain wallet tokens (no badge) below this USD value collapse into one "Other" row per safe group. */
+const DUST_THRESHOLD_USD = 1;
 
 interface PositionsListProps {
   address?: string;
@@ -160,6 +167,68 @@ export function PositionsList({
   );
 
   const protocol = getProtocolByName("AI agent");
+
+  // Per-safe grouping for multi-safe wallets. With one safe the card keeps the
+  // familiar flat list; with several, each safe becomes a titled group
+  // (strategy label + address slice + subtotal) so identical position labels
+  // from different safes stay distinguishable.
+  const { strategiesMap } = useBatchSafeStrategies(normalizedSafes);
+  const { setSelectedProtocol } = useProtocol();
+  const { setActiveTab, scrollToTop } = useMobileManagement();
+
+  const handleGroupClick = useCallback(
+    (safe: string) => {
+      if (!walletAddress || !protocol) return;
+      // Preselect the safe in Manage Positions, then open it (same navigation
+      // as ManagePositionsButton for a native protocol).
+      dispatchSelectYieldAiSafe(walletAddress, safe);
+      if (setActiveTab) {
+        setActiveTab("ideas");
+        setTimeout(() => scrollToTop?.(), 300);
+      }
+      setSelectedProtocol(protocol);
+      if (typeof window !== "undefined") {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
+    },
+    [walletAddress, protocol, setSelectedProtocol, setActiveTab, scrollToTop]
+  );
+
+  const groups = useMemo<ProtocolPositionGroup[] | undefined>(() => {
+    if (normalizedSafes.length <= 1) return undefined;
+    const result: ProtocolPositionGroup[] = [];
+    for (const safe of normalizedSafes) {
+      const row = dataBySafe[safe];
+      if (!row) continue;
+      const visible = row.positions
+        .filter((p) => Number.isFinite(p.value) && p.value >= MIN_VISIBLE_USD)
+        .sort((a, b) => b.value - a.value);
+      const main = visible.filter((p) => p.badge != null || p.value >= DUST_THRESHOLD_USD);
+      const dustTokens = visible.filter((p) => p.badge == null && p.value < DUST_THRESHOLD_USD);
+      if (main.length === 0 && dustTokens.length === 0) continue;
+      const strategy = strategiesMap.get(safe);
+      const title = strategy?.activeStrategyId
+        ? AI_AGENT_STRATEGIES[strategy.activeStrategyId]?.label ?? "Unknown"
+        : AI_AGENT_STRATEGIES.stablecoin_compound.label;
+      result.push({
+        key: safe,
+        title,
+        subtitle: `${safe.slice(0, 6)}…${safe.slice(-4)}`,
+        subtotal: row.totalValue,
+        positions: main,
+        dust:
+          dustTokens.length > 0
+            ? {
+                count: dustTokens.length,
+                valueUsd: dustTokens.reduce((sum, p) => sum + p.value, 0),
+              }
+            : undefined,
+        onClick: showManageButton ? () => handleGroupClick(safe) : undefined,
+      });
+    }
+    return result.length > 0 ? result : undefined;
+  }, [normalizedSafes, dataBySafe, strategiesMap, showManageButton, handleGroupClick]);
+
   if (!protocol) return null;
   if (!walletAddress) return null;
   if (normalizedSafes.length === 0) return null;
@@ -239,6 +308,7 @@ export function PositionsList({
         totalValue={aggregated.totalValue}
         totalRewardsUsd={totalRewardsUsd}
         positions={aggregated.positions}
+        groups={groups}
         isLoading={showInitialSkeleton}
         showManageButton={showManageButton}
       />

@@ -11,10 +11,7 @@ import {
   decibelChainUnitsToHumanBase,
 } from "@/lib/protocols/decibel/closePosition";
 import { getDecibelExecutorAccount, submitExecutorEntryFunction } from "@/lib/protocols/decibel/executorSubmit";
-import {
-  USDC_FA_METADATA_MAINNET,
-  YIELD_AI_PACKAGE_ADDRESS,
-} from "@/lib/constants/yieldAiVault";
+import { USDC_FA_METADATA_MAINNET } from "@/lib/constants/yieldAiVault";
 import { hedgeUsdcThreshold } from "@/lib/protocols/decibel/hedgePrefill";
 import {
   DECIBEL_APT_SPOT_ASSET,
@@ -25,10 +22,23 @@ import { submitSwapFaToFaWithFallbackLimits } from "@/lib/protocols/yield-ai/swa
 import { getHyperionAmountIn } from "@/lib/protocols/yield-ai/engine/hyperionQuote";
 import { getApprovedBuilderFeeBps } from "@/lib/protocols/decibel/getApprovedBuilderFee";
 import {
-  DELTA_NEUTRAL_IS_OPEN_VIEW,
-} from "@/lib/protocols/yield-ai/deltaNeutralViews";
+  CYCLE_SPOT_USDC_KEY,
+  CYCLE_SUBACCOUNT_KEY,
+  DEPOSIT_MODE,
+  STRATEGY_JOURNAL_ENTRIES,
+  STRATEGY_JOURNAL_VIEWS,
+  fetchOpenCycles,
+  isJournalInitialized,
+  spotDnStrategyId,
+  strategyIdBytes,
+} from "@/lib/protocols/yield-ai/strategyJournal";
 import { fetchOnChainPrimaryFaBalance } from "@/lib/protocols/yield-ai/indexerFaBalance";
+import {
+  ManageAuthError,
+  assertOwnerManageAuth,
+} from "@/lib/protocols/yield-ai/manageAuthServer";
 import { Aptos, AptosConfig, Network } from "@aptos-labs/ts-sdk";
+import { openLpDeltaNeutral } from "@/lib/protocols/decibel/lpDeltaNeutralOpen";
 
 type DelegationDto = {
   delegated_account?: string;
@@ -78,6 +88,23 @@ function spotHedgeSwapInput(availableUsdc: bigint, requiredUsdc: bigint): bigint
 
 function parseAllowlist(): string[] {
   const raw = process.env.DECIBEL_EXECUTOR_ALLOWLIST || "";
+  return raw
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .map((v) => normalizeAddress(toCanonicalAddress(v)));
+}
+
+/**
+ * LP-hedge DN is in private beta: opening a NEW LP-DN position is restricted to this owner
+ * allowlist. Unlike `parseAllowlist()` (spot-DN, empty = open to everyone), this is FAIL CLOSED —
+ * an empty/unset list means NOBODY can open, since the feature defaults to off until a team
+ * explicitly configures access. Existing LP-DN cycles remain fully manageable (rehedge/close) for
+ * everyone regardless of this list — only NEW opens are gated. Addresses aren't secret; the same
+ * var is read client-side (NEXT_PUBLIC_) to hide the LP toggle for non-beta wallets.
+ */
+function parseLpDnAllowlist(): string[] {
+  const raw = process.env.NEXT_PUBLIC_LP_DN_ALLOWLIST || "";
   return raw
     .split(",")
     .map((v) => v.trim())
@@ -193,12 +220,6 @@ function spotAssetConfigForAsset(asset: "BTC" | "APT"): DecibelSpotAssetConfig {
   return asset === "BTC" ? getConfiguredDecibelBtcSpotAsset() : DECIBEL_APT_SPOT_ASSET;
 }
 
-function utf8BytesArray(s: string): number[] {
-  if (!s) return [];
-  const bytes = new TextEncoder().encode(s);
-  return Array.from(bytes);
-}
-
 function usdcAmountInFromSizeUsd(sizeUsd: number): bigint {
   // Use the same buffer policy as the UI hedge prefill.
   const human = hedgeUsdcThreshold(sizeUsd);
@@ -288,6 +309,59 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json().catch(() => ({}));
 
+    // LP-hedge variant (Hyperion APT/USDC LP long + Decibel APT short). Self-contained flow;
+    // the spot-hold path below is unchanged. Body: { mode:"lp", owner, safeAddress, subaccount,
+    // usdcAmountInBaseUnits (u64 string), rangePct?, slippageBps?, auth, dryRun? }.
+    if (typeof body.mode === "string" && body.mode.trim().toLowerCase() === "lp") {
+      const ownerRawLp = typeof body.owner === "string" ? body.owner.trim() : "";
+      const safeRawLp = typeof body.safeAddress === "string" ? body.safeAddress.trim() : "";
+      const subaccountRawLp = typeof body.subaccount === "string" ? body.subaccount.trim() : "";
+      if (!ownerRawLp || !safeRawLp || !subaccountRawLp) {
+        return NextResponse.json(
+          { success: false, error: "owner, safeAddress, and subaccount are required" },
+          { status: 400 }
+        );
+      }
+      let usdcAmountInBaseUnits: bigint;
+      try {
+        usdcAmountInBaseUnits = BigInt(String(body.usdcAmountInBaseUnits ?? "").trim());
+      } catch {
+        return NextResponse.json(
+          { success: false, error: "usdcAmountInBaseUnits must be a u64 string (USDC, 6 dp)" },
+          { status: 400 }
+        );
+      }
+      if (usdcAmountInBaseUnits <= 0n) {
+        return NextResponse.json({ success: false, error: "usdcAmountInBaseUnits must be > 0" }, { status: 400 });
+      }
+
+      const lpDnAllowlist = parseLpDnAllowlist();
+      if (!lpDnAllowlist.includes(normalizeAddress(toCanonicalAddress(ownerRawLp)))) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: "LP delta-neutral is in private beta. Contact the team for access.",
+            code: "LP_DN_BETA_RESTRICTED",
+          },
+          { status: 403 }
+        );
+      }
+
+      const lpResult = await openLpDeltaNeutral({
+        owner: ownerRawLp,
+        safeAddress: safeRawLp,
+        subaccount: subaccountRawLp,
+        usdcAmountInBaseUnits,
+        rangePct: body.rangePct,
+        slippageBps: body.slippageBps,
+        poolKey: body.poolKey === "wbtc_usdc" ? "wbtc_usdc" : "apt_usdc",
+        auth: body.auth,
+        dryRun: Boolean(body.dryRun),
+      });
+      const ok = !("success" in lpResult) || lpResult.success !== false;
+      return NextResponse.json(ok ? { success: true, data: lpResult } : lpResult, { status: ok ? 200 : 422 });
+    }
+
     const subaccountRaw = typeof body.subaccount === "string" ? body.subaccount.trim() : "";
     const ownerRaw = typeof body.owner === "string" ? body.owner.trim() : "";
     const safeRaw = typeof body.safeAddress === "string" ? body.safeAddress.trim() : "";
@@ -320,6 +394,20 @@ export async function POST(request: NextRequest) {
     if (allowlist.length > 0 && !allowlist.includes(normalizeAddress(canonicalOwner))) {
       return NextResponse.json(
         { success: false, error: "Owner is not allowlisted for executor trading" },
+        { status: 403 }
+      );
+    }
+
+    const { ownerAddress: verifiedOwner } = await assertOwnerManageAuth({
+      action: "decibel_dn_open",
+      // Must mirror the client exactly: same keys, order, and raw values.
+      fields: { safeAddress: safeRaw, subaccount: subaccountRaw, asset: assetRaw, sizeUsd },
+      auth: body.auth,
+      safeAddress: canonicalSafe,
+    });
+    if (normalizeAddress(verifiedOwner) !== normalizeAddress(canonicalOwner)) {
+      return NextResponse.json(
+        { success: false, error: "owner does not match the signed authorization" },
         { status: 403 }
       );
     }
@@ -498,36 +586,56 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 2a) Pre-flight: refuse if this safe already has a delta-neutral record open on-chain.
-    // Prevents creating a duplicate record (which would abort later in `record_open`).
-    try {
-      const isOpenView = (await aptos.view({
-        payload: {
-          function: DELTA_NEUTRAL_IS_OPEN_VIEW,
-          typeArguments: [],
-          functionArguments: [canonicalSafe],
+    // 2a) Pre-flight: the strategy_journal module must be initialized on-chain, otherwise
+    // open_cycle aborts (47). Fail before any leg is opened (no funds move yet here).
+    const journalReady = await isJournalInitialized(aptos);
+    if (!journalReady) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Strategy journal is not initialized on-chain; cannot record the delta-neutral cycle.",
+          code: "JOURNAL_NOT_INITIALIZED",
         },
-      })) as unknown;
-      const isOpen =
-        Array.isArray(isOpenView) && isOpenView.length > 0
-          ? isOpenView[0] === true || isOpenView[0] === "true"
-          : false;
-      if (isOpen) {
+        { status: 503 }
+      );
+    }
+
+    // 2a') Pre-flight: refuse if this safe already has an OPEN journal cycle on the SAME perp market.
+    // Multiple DN cycles per safe are allowed, but only on DIFFERENT markets — one Decibel subaccount
+    // nets positions per market, so two cycles on the same market could not be tracked independently.
+    try {
+      const wantedMarket = normalizeAddress(toCanonicalAddress(selectedMarket.market_addr));
+      const openCycles = await fetchOpenCycles(aptos, canonicalSafe);
+      const dup = openCycles.find(
+        (c) => c.isOpen && normalizeAddress(toCanonicalAddress(c.perpMarket)) === wantedMarket
+      );
+      if (dup) {
         return NextResponse.json(
           {
             success: false,
-            error:
-              "This safe already has an open delta-neutral position. Close it before opening a new one.",
-            code: "DELTA_NEUTRAL_ALREADY_OPEN",
+            error: `This safe already has an open delta-neutral cycle on ${selectedMarket.market_name}. Open on a different market, or close the existing one first.`,
+            code: "DELTA_NEUTRAL_CYCLE_ON_MARKET",
+            data: { cycleId: dup.cycleId, perpMarket: dup.perpMarket },
           },
           { status: 409 }
         );
       }
     } catch (err) {
-      // Non-fatal: if the view call itself fails we proceed and let `record_open` fail explicitly.
-      console.warn(
-        "[Decibel] executor-open-delta-neutral: delta_neutral::is_delta_neutral_open view failed; continuing",
+      // Fail CLOSED: this duplicate-cycle check is a money-safety guard (prevents stacking a second
+      // DN short on the same market). If we can't verify, REFUSE rather than open an un-trackable
+      // double position — the caller can retry. (Previously this proceeded on error, which let a
+      // transient view failure bypass the guard.)
+      console.error(
+        "[Decibel] executor-open-delta-neutral: open-cycle duplicate check failed; refusing the open",
         err
+      );
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Could not verify existing positions for this safe right now. Please retry in a few seconds.",
+          code: "DUPLICATE_CHECK_UNAVAILABLE",
+        },
+        { status: 503 }
       );
     }
 
@@ -712,24 +820,75 @@ export async function POST(request: NextRequest) {
       maxGasAmount: 80_000,
     });
 
-    // 5) Record open (tx3). Uses best-effort snapshots.
+    // 5) Record the cycle in strategy_journal (tx3). Replaces the legacy delta_neutral::record_open.
+    // Spot-hold DN → no LP leg (lp_position = 0x0), funded from USDC (deposit_mode = usdc_zap).
+    // base_exposure = bought spot in native FA units (the target out we just swapped for; 0 if none).
     const pkg = isTestnet ? PACKAGE_TESTNET : PACKAGE_MAINNET;
-    const recordOpenFn = `${YIELD_AI_PACKAGE_ADDRESS}::delta_neutral::record_open`;
-    const recordOpenTxHash = await submitExecutorEntryFunction({
+    const strategyId = spotDnStrategyId(asset);
+    const openCycleTxHash = await submitExecutorEntryFunction({
       network,
-      fn: recordOpenFn,
+      fn: STRATEGY_JOURNAL_ENTRIES.openCycle,
       functionArguments: [
         canonicalSafe,
-        canonicalSubaccount,
-        selectedMarket.market_addr,
-        spotMetadata,
-        filledShortSize,
-        usdcAmountIn, // usdc_swapped_in
-        decibelTxVersion ?? BigInt(0),
-        utf8BytesArray(""), // client_order_id_bytes
+        strategyIdBytes(strategyId), // strategy_id: vector<u8>
+        DEPOSIT_MODE.usdcZap, // deposit_mode: u8
+        "0x0", // lp_position: address (no LP leg)
+        selectedMarket.market_addr, // perp_market: address
+        spotMetadata, // spot_metadata: address
+        desiredSpotOutBaseUnits, // base_exposure: u64 (bought spot, native units)
+        filledShortSize, // perp_short_size: u64
+        usdcAmountIn, // usdc_notional_open: u64
       ],
       maxGasAmount: 60_000,
     });
+
+    // Read the just-assigned cycle id (dense from 1; get_cycle_count == next_cycle_id - 1).
+    let cycleId: string | null = null;
+    try {
+      const countRaw = await aptos.view({
+        payload: {
+          function: STRATEGY_JOURNAL_VIEWS.getCycleCount,
+          typeArguments: [],
+          functionArguments: [canonicalSafe],
+        },
+      });
+      const c = Array.isArray(countRaw) ? countRaw[0] : countRaw;
+      if (typeof c === "string" && /^\d+$/.test(c)) cycleId = c;
+      else if (typeof c === "number" && Number.isFinite(c)) cycleId = String(Math.trunc(c));
+    } catch (err) {
+      console.warn("[Decibel] executor-open-delta-neutral: get_cycle_count read failed; cycleId unknown", err);
+    }
+
+    // Pin the Decibel subaccount to the cycle so Decibel positions can be matched exactly to this
+    // safe later (cycle snapshot has no subaccount field). Best-effort — never fail the open on it.
+    if (cycleId) {
+      try {
+        await submitExecutorEntryFunction({
+          network,
+          fn: STRATEGY_JOURNAL_ENTRIES.setCycleString,
+          functionArguments: [
+            canonicalSafe,
+            cycleId,
+            strategyIdBytes(CYCLE_SUBACCOUNT_KEY),
+            strategyIdBytes(canonicalSubaccount),
+          ],
+          maxGasAmount: 30_000,
+        });
+      } catch (err) {
+        console.warn("[Decibel] executor-open-delta-neutral: set_cycle_string(subaccount) failed; non-fatal", err);
+      }
+      // Record cumulative spot USDC deployed (= this open's USDC) for add-aware PnL. Best-effort.
+      try {
+        await submitExecutorEntryFunction({
+          network,
+          fn: STRATEGY_JOURNAL_ENTRIES.setCycleExtraU64,
+          functionArguments: [canonicalSafe, cycleId, strategyIdBytes(CYCLE_SPOT_USDC_KEY), usdcAmountIn],
+          maxGasAmount: 30_000,
+        });
+      } catch (err) {
+        console.warn("[Decibel] executor-open-delta-neutral: set_cycle_extra_u64(spot_usdc) failed; non-fatal", err);
+      }
+    }
 
     return NextResponse.json({
       success: true,
@@ -747,7 +906,13 @@ export async function POST(request: NextRequest) {
         configureTxHash,
         openTxHash,
         swapTxHash,
-        recordOpenTxHash,
+        openCycleTxHash,
+        // Back-compat alias for callers still reading recordOpenTxHash.
+        recordOpenTxHash: openCycleTxHash,
+        cycleId,
+        strategyId,
+        depositMode: DEPOSIT_MODE.usdcZap,
+        baseExposure: desiredSpotOutBaseUnits.toString(),
         spotMetadata,
         usdcAmountIn: usdcAmountIn.toString(),
         amountOutMin: amountOutMin.toString(),
@@ -766,7 +931,7 @@ export async function POST(request: NextRequest) {
     console.error("[Decibel] executor-open-delta-neutral error:", error);
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : "Unknown error" },
-      { status: 500 }
+      { status: error instanceof ManageAuthError ? error.status : 500 }
     );
   }
 }

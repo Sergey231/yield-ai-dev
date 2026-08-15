@@ -53,7 +53,22 @@ async function aptosView<T = unknown>(body: {
   return (await res.json()) as T;
 }
 
-/** Read the pool's current tick (positive u32 for these pools). */
+const U32 = 4294967296; // 2^32
+
+/**
+ * Hyperion ticks are i32 but views return them as u32. Values ≥ 2^31 are
+ * negative ticks (e.g. APT/USDC ≈ -47800 → 4294919488). Convert to signed.
+ */
+export function i32FromU32(n: number): number {
+  return n >= 2147483648 ? n - U32 : n;
+}
+
+/** Convert a signed tick back to its u32 representation for on-chain args. */
+export function u32FromI32(n: number): number {
+  return n < 0 ? n + U32 : n;
+}
+
+/** Read the pool's current tick (signed i32; can be negative, e.g. APT/USDC). */
 export async function getPoolCurrentTick(poolAddress: string): Promise<number> {
   const out = await aptosView<[number | string, string]>({
     function: HYPERION_POOL_VIEWS.currentTickAndPrice,
@@ -64,7 +79,7 @@ export async function getPoolCurrentTick(poolAddress: string): Promise<number> {
   if (!Number.isFinite(n)) {
     throw new Error(`current_tick_and_price returned non-numeric tick: ${JSON.stringify(out)}`);
   }
-  return n;
+  return i32FromU32(n);
 }
 
 function snapDown(tick: number, spacing: number): number {
@@ -232,7 +247,7 @@ export async function planHyperionOpen(params: {
       })
     : computeCenteredRange({
         currentTick,
-        halfWidthTicks: Math.max(10, Math.trunc(Number(params.halfWidthTicks ?? 250))),
+        halfWidthTicks: Math.max(1, Math.trunc(Number(params.halfWidthTicks ?? 250))),
         spacing: pool.tickSpacing,
       });
 
@@ -323,8 +338,8 @@ export async function readSafeHyperionPositions(safeAddress: string): Promise<Hy
     const raw = viewRes?.[0];
     if (!raw) continue;
 
-    const tickLower = Number(raw.tick_lower);
-    const tickUpper = Number(raw.tick_upper);
+    const tickLower = i32FromU32(Number(raw.tick_lower));
+    const tickUpper = i32FromU32(Number(raw.tick_upper));
 
     const poolKey = matchPoolKey(raw.token_a, raw.token_b);
     let active = false;

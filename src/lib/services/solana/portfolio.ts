@@ -1,6 +1,8 @@
 import { Connection, PublicKey, clusterApiUrl } from "@solana/web3.js";
 import { Token } from "@/lib/types/token";
+import { TOKEN_REGISTRY } from "@/lib/tokens/registry";
 import { JupiterTokenMetadataService } from "./tokenMetadata";
+import { getExponentReceiptMintExclude } from "@/lib/services/exponent/exponentReceiptMintExclude";
 
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
@@ -26,6 +28,15 @@ const JUPITER_RECEIPT_MINT_EXCLUDE = new Set<string>([
 const KNOWN_TOKENS: Record<string, { symbol: string; name: string; logoUrl?: string }> = {
   [WRAPPED_SOL_MINT]: { symbol: "SOL", name: "Solana", logoUrl: "/token_ico/sol.png" },
 };
+
+for (const t of TOKEN_REGISTRY) {
+  if (t.chain !== "solana" || !t.addresses.mint || !t.tags.includes("xStocks")) continue;
+  KNOWN_TOKENS[t.addresses.mint] = {
+    symbol: t.symbol,
+    name: t.name,
+    logoUrl: t.logoUrl,
+  };
+}
 
 type JupiterPortfolioTokenInfo = {
   address?: string;
@@ -296,6 +307,8 @@ export class SolanaPortfolioService {
     const parsedTokenAccounts = loaded.accounts;
     const lamports = loaded.lamports;
 
+    const exponentReceiptExclude = await getExponentReceiptMintExclude(this.connection);
+
     const tokens: Token[] = [];
     /** wSOL mint balances from SPL token accounts (owner may also hold native SOL in lamports). */
     let wrappedSolRawFromAtas = 0n;
@@ -325,6 +338,10 @@ export class SolanaPortfolioService {
       }
 
       if (JUPITER_RECEIPT_MINT_EXCLUDE.has(mint)) {
+        continue;
+      }
+
+      if (exponentReceiptExclude.has(mint)) {
         continue;
       }
 
@@ -360,6 +377,7 @@ export class SolanaPortfolioService {
         amount: rawAmount,
         price: null,
         value: null,
+        logoUrl: KNOWN_TOKENS[mint]?.logoUrl,
       });
     }
 

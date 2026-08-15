@@ -1,10 +1,16 @@
 import Panora from "@panoraexchange/swap-sdk";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 
+export type PanoraQuoteMode = "exactIn" | "exactOut";
+
 export interface PanoraSwapQuoteRequest {
   fromToken: string;
   toToken: string;
-  amount: string;
+  /** Human-readable from amount (ExactIn). */
+  amount?: string;
+  /** Human-readable to amount (ExactOut). */
+  toTokenAmount?: string;
+  quoteMode?: PanoraQuoteMode;
   slippage: number;
   toWalletAddress?: string;
 }
@@ -15,9 +21,17 @@ export interface PanoraSwapQuoteResponse {
   error?: string;
 }
 
+interface CachedQuote {
+  data: any;
+  timestamp: number;
+}
+
 export class PanoraSwapService {
   private static instance: PanoraSwapService;
   private client: any;
+  private quoteCache: Map<string, CachedQuote> = new Map();
+  private readonly QUOTE_CACHE_TTL = 10 * 1000; // 10 seconds
+  private readonly MAX_RATE_LIMIT_RETRIES = 3;
 
   private constructor() {
     this.client = new Panora({
@@ -38,6 +52,64 @@ export class PanoraSwapService {
     return panoraProtocol?.panoraConfig;
   }
 
+  private resolveQuoteMode(request: PanoraSwapQuoteRequest): PanoraQuoteMode {
+    if (request.quoteMode) return request.quoteMode;
+    return request.toTokenAmount && !request.amount ? "exactOut" : "exactIn";
+  }
+
+  private getQuoteCacheKey(request: PanoraSwapQuoteRequest, slippage: number): string {
+    const wallet = request.toWalletAddress || "";
+    const mode = this.resolveQuoteMode(request);
+    const amt = mode === "exactOut" ? request.toTokenAmount : request.amount;
+    return `${request.fromToken}:${request.toToken}:${mode}:${amt}:${wallet}:${slippage}`;
+  }
+
+  private isQuoteCacheValid(timestamp: number): boolean {
+    return Date.now() - timestamp < this.QUOTE_CACHE_TTL;
+  }
+
+  private isRateLimitError(error: any): boolean {
+    const status =
+      error?.status ??
+      error?.statusCode ??
+      error?.response?.status ??
+      error?.cause?.status;
+
+    if (status === 429) return true;
+
+    const message = String(error?.message || error?.toString?.() || "").toLowerCase();
+    return message.includes("too many requests") || message.includes("rate limit");
+  }
+
+  private getRetryAfterMs(error: any, attempt: number): number {
+    const header =
+      error?.response?.headers?.["retry-after"] ??
+      error?.headers?.["retry-after"] ??
+      error?.retryAfter;
+
+    if (header != null) {
+      const seconds = parseInt(String(header), 10);
+      if (!Number.isNaN(seconds) && seconds > 0) {
+        return seconds * 1000;
+      }
+    }
+
+    const message = String(error?.message || "");
+    const match = message.match(/retry[- ]after[:\s]+(\d+)/i);
+    if (match) {
+      const seconds = parseInt(match[1], 10);
+      if (!Number.isNaN(seconds) && seconds > 0) {
+        return seconds * 1000;
+      }
+    }
+
+    return Math.pow(2, attempt) * 1000;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   public async getSwapQuote(request: PanoraSwapQuoteRequest): Promise<PanoraSwapQuoteResponse> {
     try {
       console.log('Getting quote with params:', request);
@@ -46,13 +118,21 @@ export class PanoraSwapService {
       
       // Ensure slippage is reasonable (minimum 0.5%, maximum 10%)
       const slippage = Math.max(0.5, Math.min(10, request.slippage));
+
+      const cacheKey = this.getQuoteCacheKey(request, slippage);
+      const cached = this.quoteCache.get(cacheKey);
+      if (cached && this.isQuoteCacheValid(cached.timestamp)) {
+        return {
+          success: true,
+          data: cached.data
+        };
+      }
       
-      // Convert to the format expected by the old API
-      const quoteRequest = {
+      const quoteMode = this.resolveQuoteMode(request);
+      const quoteRequest: Record<string, string> = {
         chainId: "1",
         fromTokenAddress: request.fromToken,
         toTokenAddress: request.toToken,
-        fromTokenAmount: request.amount,
         toWalletAddress: request.toWalletAddress || "0x0000000000000000000000000000000000000000000000000000000000000000",
         slippagePercentage: slippage.toString(),
         getTransactionData: "transactionPayload",
@@ -60,9 +140,46 @@ export class PanoraSwapService {
         integratorFeePercentage: panoraConfig?.integratorFeePercentage || "0"
       };
 
+      if (quoteMode === "exactOut") {
+        if (!request.toTokenAmount) {
+          return { success: false, error: "Missing toTokenAmount for ExactOut quote" };
+        }
+        quoteRequest.toTokenAmount = request.toTokenAmount;
+      } else {
+        if (!request.amount) {
+          return { success: false, error: "Missing fromTokenAmount for ExactIn quote" };
+        }
+        quoteRequest.fromTokenAmount = request.amount;
+      }
+
       console.log('Quote request:', quoteRequest);
 
-      const response = await this.client.SwapQuote(quoteRequest);
+      let response: any;
+      let lastError: any;
+
+      for (let attempt = 0; attempt <= this.MAX_RATE_LIMIT_RETRIES; attempt++) {
+        try {
+          response = await this.client.SwapQuote(quoteRequest);
+          lastError = undefined;
+          break;
+        } catch (error: any) {
+          lastError = error;
+          if (!this.isRateLimitError(error) || attempt === this.MAX_RATE_LIMIT_RETRIES) {
+            throw error;
+          }
+
+          const delayMs = this.getRetryAfterMs(error, attempt);
+          console.warn(
+            `Panora rate limited, retry ${attempt + 1}/${this.MAX_RATE_LIMIT_RETRIES} in ${delayMs}ms`
+          );
+          await this.sleep(delayMs);
+        }
+      }
+
+      if (lastError) {
+        throw lastError;
+      }
+
       console.log('Quote received:', response);
 
       // Validate quote response
@@ -75,10 +192,18 @@ export class PanoraSwapService {
 
       const quote = response.quotes[0];
       console.log('Quote details:', {
+        quoteMode,
+        fromTokenAmount: quote.fromTokenAmount,
+        maxFromTokenAmount: quote.maxFromTokenAmount,
         toTokenAmount: quote.toTokenAmount,
         minToTokenAmount: quote.minToTokenAmount,
         slippagePercentage: quote.slippagePercentage,
         priceImpact: quote.priceImpact
+      });
+
+      this.quoteCache.set(cacheKey, {
+        data: response,
+        timestamp: Date.now()
       });
 
       return {

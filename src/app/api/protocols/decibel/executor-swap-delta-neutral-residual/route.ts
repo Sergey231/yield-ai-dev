@@ -14,6 +14,10 @@ import {
   XBTC_FA_METADATA_MAINNET,
   decibelSpotFeeTierForMetadata,
 } from "@/lib/protocols/decibel/deltaNeutralSpotAssets";
+import {
+  ManageAuthError,
+  assertOwnerManageAuth,
+} from "@/lib/protocols/yield-ai/manageAuthServer";
 
 const DECIBEL_API_BASE_URL =
   process.env.DECIBEL_API_BASE_URL || "https://api.testnet.aptoslabs.com/decibel";
@@ -88,6 +92,25 @@ export async function POST(request: NextRequest) {
     if (allowlist.length > 0 && !allowlist.includes(normalizeAddress(canonicalOwner))) {
       return NextResponse.json(
         { success: false, error: "Owner is not allowlisted for executor trading" },
+        { status: 403 }
+      );
+    }
+
+    const { ownerAddress: verifiedOwner } = await assertOwnerManageAuth({
+      action: "decibel_dn_residual_swap",
+      // Must mirror the client exactly: same keys, order, and raw values
+      // (optional body fields are normalized to null on both sides).
+      fields: {
+        safeAddress: safeRaw,
+        subaccount: subRaw || null,
+        spotMetadata: explicitSpotRaw || null,
+      },
+      auth: body.auth,
+      safeAddress: canonicalSafe,
+    });
+    if (normalizeAddress(verifiedOwner) !== normalizeAddress(canonicalOwner)) {
+      return NextResponse.json(
+        { success: false, error: "owner does not match the signed authorization" },
         { status: 403 }
       );
     }
@@ -216,7 +239,7 @@ export async function POST(request: NextRequest) {
     console.error("[Decibel] executor-swap-delta-neutral-residual error:", error);
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : "Unknown error" },
-      { status: 500 }
+      { status: error instanceof ManageAuthError ? error.status : 500 }
     );
   }
 }

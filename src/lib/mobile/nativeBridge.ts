@@ -34,9 +34,13 @@ export type PetraEntryFunctionPayload = {
   arguments: unknown[];
 };
 
-const BRIDGE_REQUEST_TIMEOUT_MS = 60_000;
+const BRIDGE_REQUEST_TIMEOUT_MS = 130_000;
 
 let pendingSignAndSubmitRequest: PendingBridgeRequest | null = null;
+
+export function isNativeAptosSignPending(): boolean {
+  return pendingSignAndSubmitRequest !== null;
+}
 
 function makeRequestId() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -162,6 +166,16 @@ export async function signAndSubmitSolanaTransaction(transactionBase64: string) 
   return result.txId;
 }
 
+function normalizePetraArguments(args: unknown[]): unknown[] {
+  return args.map((arg) => {
+    if (typeof arg === "string" && /^\d+$/.test(arg)) {
+      const asNumber = Number(arg);
+      if (Number.isSafeInteger(asNumber)) return asNumber;
+    }
+    return arg;
+  });
+}
+
 export function aptosTransactionInputToPetraPayload(
   transactionInput: AptosTransactionInput,
 ): PetraEntryFunctionPayload {
@@ -169,7 +183,7 @@ export function aptosTransactionInputToPetraPayload(
     type: "entry_function_payload",
     function: transactionInput.data.function,
     type_arguments: transactionInput.data.typeArguments ?? [],
-    arguments: transactionInput.data.functionArguments,
+    arguments: normalizePetraArguments(transactionInput.data.functionArguments),
   };
 }
 

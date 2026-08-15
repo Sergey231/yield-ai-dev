@@ -22,6 +22,16 @@ import { useQueryClient } from "@tanstack/react-query";
 import { queryKeys } from "@/lib/query/queryKeys";
 import { useKaminoPositions } from "@/lib/query/hooks/protocols/kamino/useKaminoPositions";
 import { useKaminoRewards } from "@/lib/query/hooks/protocols/kamino/useKaminoRewards";
+import type { KaminoClaimTarget } from "@/lib/kamino/kaminoClaimTypes";
+import { buildKaminoClaimTargets } from "@/lib/kamino/buildKaminoClaimTargets";
+import {
+  computeKaminoRewardsUsd,
+  filterMeaningfulKaminoRewardRows,
+  formatKaminoRewardUsd,
+  hasVisibleKaminoRewards,
+} from "@/lib/kamino/kaminoRewardUsd";
+import { resolveKaminoViewerAddress } from "@/lib/kamino/kaminoTestAddress";
+import { KaminoClaimRewardsModal } from "@/components/ui/kamino-claim-rewards-modal";
 import { useSearchParams } from "next/navigation";
 import {
   isYieldAiNativeAppNow,
@@ -482,9 +492,6 @@ export function KaminoPositions() {
     Array<{ tokenMint: string; tokenSymbol?: string; tokenLogoUrl?: string; amount: string; usdValue?: number }>
   >([]);
   const [rewardsLoading, setRewardsLoading] = useState(false);
-  const rewardsMockEnabled =
-    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "1" ||
-    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "true";
   const lastFingerprintRef = useRef<string>("0:");
   const refreshTimeoutRef = useRef<number | null>(null);
 
@@ -511,18 +518,10 @@ export function KaminoPositions() {
     [trimmedInjectedSolanaAddress],
   );
   const canSubmitTx = !!activeSignTransaction || canUseNativeSubmit;
-  const positionsOwnerAddress = useMemo(() => {
-    if (rewardsMockEnabled) {
-      const raw = (
-        searchParams?.get("kaminoAddress") ||
-        searchParams?.get("address") ||
-        searchParams?.get("solanaAddress") ||
-        ""
-      ).trim();
-      if (raw && isLikelySolanaAddress(raw)) return raw;
-    }
-    return (solanaProtocolsAddress || "").trim();
-  }, [rewardsMockEnabled, searchParams, solanaProtocolsAddress]);
+  const positionsOwnerAddress = useMemo(
+    () => resolveKaminoViewerAddress(searchParams, solanaProtocolsAddress),
+    [searchParams, solanaProtocolsAddress]
+  );
 
   const kaminoPositionsQuery = useKaminoPositions(positionsOwnerAddress, { refetchOnMount: "always" });
   const kaminoRewardsQuery = useKaminoRewards(positionsOwnerAddress, { refetchOnMount: "always" });
@@ -531,6 +530,7 @@ export function KaminoPositions() {
   const [earnTarget, setEarnTarget] = useState<Extract<NormalizedKaminoRow, { kind: "earn" }> | null>(null);
   const [earnAmount, setEarnAmount] = useState("");
   const [earnSubmitting, setEarnSubmitting] = useState(false);
+  const [showClaimModal, setShowClaimModal] = useState(false);
 
   useEffect(() => {
     if (!positionsOwnerAddress) {
@@ -549,7 +549,7 @@ export function KaminoPositions() {
       setRewards([]);
       return;
     }
-    const list = Array.isArray(kaminoRewardsQuery.data) ? kaminoRewardsQuery.data : [];
+    const list = Array.isArray(kaminoRewardsQuery.data?.rewards) ? kaminoRewardsQuery.data.rewards : [];
     setRewards(list);
   }, [positionsOwnerAddress, kaminoRewardsQuery.data]);
 
@@ -600,7 +600,7 @@ export function KaminoPositions() {
         }
       }, delayMs);
     },
-    [positionsOwnerAddress, queryClient, refreshSolana, rewardsMockEnabled]
+    [positionsOwnerAddress, queryClient, refreshSolana]
   );
 
   useEffect(() => {
@@ -630,7 +630,7 @@ export function KaminoPositions() {
     };
     window.addEventListener("refreshPositions", handleRefresh);
     return () => window.removeEventListener("refreshPositions", handleRefresh);
-  }, [positionsOwnerAddress, queryClient, rewardsMockEnabled]);
+  }, [positionsOwnerAddress, queryClient]);
 
   const normalized = useMemo(() => positions.flatMap(normalizeKaminoPositionRows), [positions]);
 
@@ -676,6 +676,10 @@ export function KaminoPositions() {
         },
         underlyingMint: a.underlyingMint || b.underlyingMint,
         underlyingSymbol: a.underlyingSymbol || b.underlyingSymbol,
+        aprPct:
+          (a.aprPct ?? 0) > 0 || (b.aprPct ?? 0) > 0
+            ? Math.max(a.aprPct ?? 0, b.aprPct ?? 0)
+            : undefined,
       };
     };
 
@@ -699,10 +703,26 @@ export function KaminoPositions() {
 
   const sorted = useMemo(() => [...merged].sort((a, b) => b.valueUsd - a.valueUsd), [merged]);
   const totalValue = useMemo(() => sorted.reduce((sum, p) => sum + p.valueUsd, 0), [sorted]);
-  const totalRewardsUsd = useMemo(
-    () => rewards.reduce((sum, r) => sum + (typeof r.usdValue === "number" && Number.isFinite(r.usdValue) ? r.usdValue : 0), 0),
-    [rewards]
-  );
+  const totalRewardsUsd = useMemo(() => computeKaminoRewardsUsd(rewards), [rewards]);
+  const showRewards = useMemo(() => hasVisibleKaminoRewards(rewards), [rewards]);
+  const visibleRewards = useMemo(() => filterMeaningfulKaminoRewardRows(rewards), [rewards]);
+
+  const claimTargets = useMemo((): KaminoClaimTarget[] => {
+    const earnVaultAddresses = sorted
+      .filter((r): r is Extract<NormalizedKaminoRow, { kind: "earn" }> => r.kind === "earn" && !!r.vaultAddress)
+      .map((r) => r.vaultAddress!.trim())
+      .filter(Boolean);
+
+    return buildKaminoClaimTargets({
+      apiTargets: kaminoRewardsQuery.data?.claimTargets ?? [],
+      earnVaultAddresses,
+      totalRewardsUsd,
+    });
+  }, [kaminoRewardsQuery.data?.claimTargets, sorted, totalRewardsUsd]);
+
+  const openClaimModal = useCallback(() => {
+    setShowClaimModal(true);
+  }, []);
 
   const calculateHealthFactor = useCallback(() => {
     const lend = positions.find((p) => p.source === "kamino-lend");
@@ -749,7 +769,7 @@ export function KaminoPositions() {
           earnTarget.fallbackLogoUrl) ||
         undefined,
       availableAmount: available,
-      apy: 0,
+      apy: earnTarget.aprPct ?? 0,
       priceUsd: earnTarget.price ?? 0,
     };
   }, [earnTarget, solanaTokens]);
@@ -952,36 +972,47 @@ export function KaminoPositions() {
         titleShort: "Assets",
         icon: "wallet",
         value: formatCurrency(totalValue, 2),
-        subRows: [
-          {
-            label: "Rewards:",
-            value: totalRewardsUsd > 0 ? formatCurrency(totalRewardsUsd, 2) : "$0.00",
-          },
-        ],
       },
-      {
-        id: "health",
-        title: "Health Factor",
-        titleShort: "Health",
-        icon: "health",
-        tone:
-          health && Number.isFinite(health.healthFactor)
-            ? health.healthFactor >= 1.5
-              ? "success"
-              : health.healthFactor >= 1.2
-                ? "warning"
-                : "danger"
-            : "default",
-        value:
-          health && Number.isFinite(health.healthFactor) ? health.healthFactor.toFixed(2) : "—",
-        subRows:
-          health
-            ? [
-                { label: "Collateral:", labelShort: "Coll.", value: formatCurrency(health.accountMargin, 2) },
-                { label: "Liabilities:", labelShort: "Debt", value: formatCurrency(health.totalLiabilities, 2) },
-              ]
-            : undefined,
-      },
+      ...(showRewards
+        ? [
+            {
+              id: "rewards" as const,
+              title: "Rewards",
+              icon: "gift" as const,
+              value: formatKaminoRewardUsd(totalRewardsUsd),
+              action: { label: "Claim", onClick: openClaimModal, disabled: false },
+            },
+          ]
+        : []),
+      ...(health && Number.isFinite(health.healthFactor)
+        ? [
+            {
+              id: "health",
+              title: "Health Factor",
+              titleShort: "Health",
+              icon: "health" as const,
+              tone:
+                health.healthFactor >= 1.5
+                  ? ("success" as const)
+                  : health.healthFactor >= 1.2
+                    ? ("warning" as const)
+                    : ("danger" as const),
+              value: health.healthFactor.toFixed(2),
+              subRows: [
+                {
+                  label: "Collateral:",
+                  labelShort: "Coll.",
+                  value: formatCurrency(health.accountMargin, 2),
+                },
+                {
+                  label: "Liabilities:",
+                  labelShort: "Debt",
+                  value: formatCurrency(health.totalLiabilities, 2),
+                },
+              ],
+            },
+          ]
+        : []),
     ];
 
     const sectionsLocal: Array<LendingProtocolCardSection<KaminoLendingRow>> = [
@@ -992,17 +1023,21 @@ export function KaminoPositions() {
         rows: supplyRows,
         defaultOpen: true,
       },
-      {
-        id: "borrow",
-        title: `Your Borrows (${borrowRows.length})`,
-        titleShort: `Borrows (${borrowRows.length})`,
-        rows: borrowRows,
-        defaultOpen: true,
-      },
+      ...(borrowRows.length > 0
+        ? [
+            {
+              id: "borrow" as const,
+              title: `Your Borrows (${borrowRows.length})`,
+              titleShort: `Borrows (${borrowRows.length})`,
+              rows: borrowRows,
+              defaultOpen: true,
+            },
+          ]
+        : []),
     ];
 
     return { tiles: tilesLocal, sections: sectionsLocal };
-  }, [sorted, totalValue, totalRewardsUsd, calculateHealthFactor]);
+  }, [sorted, totalValue, totalRewardsUsd, showRewards, openClaimModal, calculateHealthFactor]);
 
   // Don't block the page while refreshing; only show a full-page loader on the initial empty load.
   // IMPORTANT: all hooks must be called before these early returns.
@@ -1042,6 +1077,7 @@ export function KaminoPositions() {
           onClose={closeEarnModal}
           onConfirm={(amountUi) => void runEarnTransaction("withdraw", amountUi)}
           isLoading={earnSubmitting}
+          protocol={{ name: "Kamino", logoUrl: "/protocol_ico/kamino.png" }}
           token={kaminoWithdrawModalToken}
         />
       ) : null}
@@ -1078,18 +1114,18 @@ export function KaminoPositions() {
       <div className="pt-4">
         {rewardsLoading && rewards.length === 0 ? (
           <div className="text-muted-foreground text-right">Loading rewards...</div>
-        ) : rewards.length > 0 ? (
+        ) : showRewards ? (
           <div className="text-right">
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <span className="inline-flex w-fit text-gray-500 mb-1 cursor-help">
-                    🎁 Rewards: {totalRewardsUsd > 0 ? formatCurrency(totalRewardsUsd, 2) : "-"}
+                  <span className="inline-flex w-fit text-gray-500 cursor-help">
+                    🎁 Rewards: {formatKaminoRewardUsd(totalRewardsUsd)}
                   </span>
                 </TooltipTrigger>
                 <TooltipContent className="max-w-xs">
                   <div className="space-y-1 text-xs max-h-48 overflow-auto">
-                    {rewards.map((r) => {
+                    {visibleRewards.map((r) => {
                       const sym = (r.tokenSymbol || "").trim();
                       const local = sym ? `/token_ico/${sym.toLowerCase()}.png` : "";
                       const icon = local || (r.tokenLogoUrl || "").trim();
@@ -1118,6 +1154,15 @@ export function KaminoPositions() {
           </div>
         ) : null}
       </div>
+
+      <KaminoClaimRewardsModal
+        isOpen={showClaimModal}
+        onClose={() => setShowClaimModal(false)}
+        rewards={rewards}
+        claimTargets={claimTargets}
+        signerAddress={effectiveSignerAddress || positionsOwnerAddress}
+        onClaimComplete={() => schedulePositionsRefresh(2500)}
+      />
 
       <div className="flex items-center justify-between pt-6 pb-6">
         <span className="text-xl">Total assets in Kamino:</span>

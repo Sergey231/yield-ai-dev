@@ -41,7 +41,8 @@ function getAptosClient(network: "mainnet" | "testnet"): Aptos {
 export async function submitExecutorEntryFunction(params: {
   network: "mainnet" | "testnet";
   fn: string;
-  functionArguments: (string | number | boolean | bigint | null | number[])[];
+  // `string[]` covers vector<address> args (e.g. a Hyperion batch `lp_path`).
+  functionArguments: (string | number | boolean | bigint | null | number[] | string[])[];
   maxGasAmount?: number;
 }): Promise<string> {
   const { network, fn, functionArguments, maxGasAmount = 20_000 } = params;

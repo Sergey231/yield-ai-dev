@@ -4,6 +4,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { queryKeys } from "@/lib/query/queryKeys";
 import { useYieldAiSafeTokens } from "@/lib/query/hooks/protocols/yield-ai";
+import { useHyperionLpPositions } from "@/lib/query/hooks/protocols/yield-ai/useHyperionLpPositions";
+import { YIELD_AI_HYPERION_POOLS } from "@/lib/constants/yieldAiVault";
+import { PositionBadge } from "@/shared/ProtocolCard/types";
 import { useEchelonProtocolCardModel } from "@/lib/query/hooks/protocols/echelon/useEchelonProtocolCardModel";
 import { mapYieldAiSafeTokensToProtocolPositions } from "./mapYieldAiSafeTokensToProtocolPositions";
 import { mapEchelonProtocolPositionsToAiAgent } from "./mapEchelonToProtocolPositionsAiAgent";
@@ -140,13 +143,47 @@ export function SafePositionsCard({ safeAddress, refreshKey, onData }: SafePosit
     [safeAddress]
   );
 
+  // Hyperion LP positions held inside the safe → compact rows (pair + $value +
+  // Active/Inactive badge). The positions route no-ops for non-Hyperion safes.
+  const { data: hyperionLpPositions = [] } = useHyperionLpPositions(safeAddress);
+  const hyperionLpPositionsList = useMemo<ProtocolPosition[]>(() => {
+    const logoBySymbol: Record<string, string | undefined> = {};
+    for (const t of safeTokens) if (t.symbol) logoBySymbol[t.symbol] = t.logoUrl ?? undefined;
+    return hyperionLpPositions
+      .filter((p) => !p.closed)
+      .map((p) => {
+        const cfg = Object.values(YIELD_AI_HYPERION_POOLS).find(
+          (c) =>
+            (normalizeAddress(c.tokenA) === normalizeAddress(p.tokenA) &&
+              normalizeAddress(c.tokenB) === normalizeAddress(p.tokenB)) ||
+            (normalizeAddress(c.tokenA) === normalizeAddress(p.tokenB) &&
+              normalizeAddress(c.tokenB) === normalizeAddress(p.tokenA))
+        );
+        const symbolA = cfg?.symbolA ?? "?";
+        const symbolB = cfg?.symbolB ?? "USDC";
+        return {
+          id: `hyperion-${p.position}`,
+          label: `${symbolA}/${symbolB}`,
+          value: p.valueUsd ?? 0,
+          logoUrl: logoBySymbol[symbolA],
+          logoUrl2: logoBySymbol[symbolB],
+          badge: p.active ? PositionBadge.Active : PositionBadge.Inactive,
+          subLabel: "Hyperion LP",
+        } satisfies ProtocolPosition;
+      });
+  }, [hyperionLpPositions, safeTokens]);
+  const hyperionLpValue = useMemo(
+    () => hyperionLpPositionsList.reduce((s, p) => s + (Number.isFinite(p.value) ? p.value : 0), 0),
+    [hyperionLpPositionsList]
+  );
+
   const tagged = useMemo(() => {
-    const all = [...echelonAiPositions, ...dnPositions, ...tokenProtocolPositions];
+    const all = [...echelonAiPositions, ...dnPositions, ...hyperionLpPositionsList, ...tokenProtocolPositions];
     return all.map((p) => ({
       ...p,
       id: `${safeAddress}::${p.id ?? p.label}`,
     }));
-  }, [echelonAiPositions, dnPositions, tokenProtocolPositions, safeAddress]);
+  }, [echelonAiPositions, dnPositions, hyperionLpPositionsList, tokenProtocolPositions, safeAddress]);
 
   const positionsSignature = useMemo(() => {
     return tagged
@@ -171,7 +208,7 @@ export function SafePositionsCard({ safeAddress, refreshKey, onData }: SafePosit
   );
 
   const combinedRewardsUsd = echelonRewardsValueUsd;
-  const totalValueRaw = tokensValue + echelonTotalValue;
+  const totalValueRaw = tokensValue + echelonTotalValue + hyperionLpValue;
   const totalValue = Number.isFinite(totalValueRaw) ? totalValueRaw : 0;
 
   const isLoading = safeTokensLoading || echelonLoading;
@@ -180,11 +217,16 @@ export function SafePositionsCard({ safeAddress, refreshKey, onData }: SafePosit
   const echelonHasActivity =
     echelonProtocolPositions.length > 0 || echelonRewardsValueUsd > 0;
   const hasAnyActivity =
-    safeTokens.length > 0 || combinedRewardsUsd > 0 || echelonHasActivity || dnPositions.length > 0;
+    safeTokens.length > 0 ||
+    combinedRewardsUsd > 0 ||
+    echelonHasActivity ||
+    dnPositions.length > 0 ||
+    hyperionLpPositionsList.length > 0;
 
   useEffect(() => {
     if (refreshKey != null) {
       queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddress) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.hyperionLpPositions(safeAddress) });
       queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.userPositions(safeAddress) });
       queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.rewards(safeAddress) });
     }
@@ -193,9 +235,14 @@ export function SafePositionsCard({ safeAddress, refreshKey, onData }: SafePosit
   useEffect(() => {
     const handleRefresh: EventListener = (evt) => {
       const event = evt as CustomEvent<{ protocol?: string }>;
-      if (event?.detail?.protocol === "echelon") {
+      const protocol = event?.detail?.protocol;
+      if (protocol === "echelon") {
         queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.userPositions(safeAddress) });
         queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.rewards(safeAddress) });
+      }
+      if (protocol === "yield-ai") {
+        queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddress) });
+        queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.hyperionLpPositions(safeAddress) });
       }
     };
     window.addEventListener("refreshPositions", handleRefresh);

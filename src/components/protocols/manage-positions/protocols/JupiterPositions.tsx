@@ -508,16 +508,17 @@ export function JupiterPositions() {
           { label: "Debt:", labelShort: "Debt", value: formatCurrency(borrowSummary.liabilities, 2) },
         ],
       },
-      {
-        id: "health",
-        title: "Health Factor",
-        titleShort: "Health",
-        icon: "health",
-        value:
-          typeof borrowSummary.health === "number" && Number.isFinite(borrowSummary.health)
-            ? borrowSummary.health.toFixed(2)
-            : "—",
-      },
+      ...(typeof borrowSummary.health === "number" && Number.isFinite(borrowSummary.health)
+        ? [
+            {
+              id: "health",
+              title: "Health Factor",
+              titleShort: "Health",
+              icon: "health" as const,
+              value: borrowSummary.health.toFixed(2),
+            },
+          ]
+        : []),
     ];
 
     return { tiles: tilesLocal, sections: sectionsLocal };
@@ -1662,6 +1663,7 @@ export function JupiterPositions() {
         onClose={closeWithdraw}
         onConfirm={handleWithdraw}
         isLoading={isWithdrawing}
+        protocol={{ name: "Jupiter", logoUrl: "/protocol_ico/jupiter.png" }}
         token={{
           symbol: selectedMeta.symbol,
           logoUrl: getPreferredJupiterTokenIcon(
@@ -1669,6 +1671,7 @@ export function JupiterPositions() {
             selectedPosition?.token?.asset?.logoUrl
           ),
           suppliedAmount: selectedMeta.amount,
+          priceUsd: toNumber(selectedPosition?.token?.asset?.price, 0),
         }}
       />
     </div>

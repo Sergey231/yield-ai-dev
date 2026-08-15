@@ -65,6 +65,9 @@ export interface DeltaNeutralPriceFundingChartProps {
   endTime?: number;
   /** Horizontal lines on the candle pane (e.g. position entry price). */
   entryPrices?: number[];
+  /** LP range bounds (price) — drawn as dashed lines so out-of-range risk is visible. */
+  rangeLowerPrice?: number;
+  rangeUpperPrice?: number;
   /** Pane height for the funding sub-pane. Default 100px. */
   fundingPaneHeight?: number;
   className?: string;
@@ -82,6 +85,8 @@ export function DeltaNeutralPriceFundingChart({
   startTime: startTimeProp,
   endTime: endTimeProp,
   entryPrices = [],
+  rangeLowerPrice,
+  rangeUpperPrice,
   fundingPaneHeight = 110,
   className,
 }: DeltaNeutralPriceFundingChartProps) {
@@ -222,6 +227,22 @@ export function DeltaNeutralPriceFundingChart({
           });
         }
 
+        // LP range bounds — amber dashed lines so the user sees how close price is to exiting range.
+        for (const [bound, title] of [
+          [rangeLowerPrice, 'Range ↓'],
+          [rangeUpperPrice, 'Range ↑'],
+        ] as const) {
+          if (typeof bound !== 'number' || !Number.isFinite(bound) || bound <= 0) continue;
+          candleSeries.createPriceLine({
+            price: bound,
+            color: '#f59e0b',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title,
+          });
+        }
+
         // Pane 1: funding APR step-line. Skip pane creation if we have no
         // funding data — the chart still works with just price.
         if (fundingPoints.length > 0) {
@@ -287,6 +308,8 @@ export function DeltaNeutralPriceFundingChart({
     startTimeProp,
     endTimeProp,
     entryPricesKey,
+    rangeLowerPrice,
+    rangeUpperPrice,
     fundingPaneHeight,
   ]);
 

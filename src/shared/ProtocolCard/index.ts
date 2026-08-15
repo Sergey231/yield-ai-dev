@@ -4,7 +4,7 @@ export { ProtocolCardSkeleton } from "./ProtocolCardSkeleton/ProtocolCardSkeleto
 export type { ProtocolCardSkeletonProps } from "./ProtocolCardSkeleton/ProtocolCardSkeleton";
 export { ProtocolCardPosition } from "./ProtocolCardPosition/ProtocolCardPosition";
 export type { ProtocolCardPositionProps } from "./ProtocolCardPosition/ProtocolCardPosition";
-export type { ProtocolPosition } from "./types";
+export type { ProtocolPosition, ProtocolPositionGroup } from "./types";
 export { PositionBadge } from "./types";
 export { LendingProtocolCard } from "./LendingProtocolCard/LendingProtocolCard";
 export type {

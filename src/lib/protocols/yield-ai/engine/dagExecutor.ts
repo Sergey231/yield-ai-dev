@@ -64,6 +64,7 @@ export async function executeActionDag(options: {
         const t = action.type;
         const changesBalance =
           t === "swapFaToFa" ||
+          t === "swapFaToFaHyperionBatch" ||
           t === "depositEchelonFa" ||
           t === "claimEchelonReward";
         if (changesBalance) {

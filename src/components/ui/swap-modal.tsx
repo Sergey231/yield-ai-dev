@@ -24,18 +24,48 @@ import {
 } from "@/lib/mobile/nativeBridge";
 import { submitAptosTransaction } from "@/lib/mobile/submitAptosTransaction";
 import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
+import { getSolanaWalletAddress } from "@/lib/wallet/getSolanaWalletAddress";
+import {
+  CustomAptosConnectDialogContent,
+  WALLET_CONNECT_MODAL_DIALOG_CLASS,
+  type WalletConnectChainTab,
+} from "@/components/wallet/customAptosConnectDialogContent";
 import { Token } from '@/lib/types/panora';
 import tokenList from '@/lib/data/tokenList.json';
 import { getProtocolsList } from '@/lib/protocols/getProtocolsList';
 import { cn } from '@/lib/utils';
+import { normalizeAddress as normalizeAptosAddress } from '@/lib/utils/addressNormalization';
 import { SwapTokenChart } from '@/components/ui/swap-token-chart';
 import { useWalletStore } from "@/lib/stores/walletStore";
 import { TOKEN_REGISTRY } from "@/lib/tokens/registry";
+import type { TokenRegistryItem } from "@/lib/tokens/registry";
+import { getAptosTokenIcon } from "@/lib/aptos/aptosTokenIcons";
+
+const SOLANA_REGISTRY_BY_MINT = (() => {
+  const m = new Map<string, TokenRegistryItem>();
+  for (const t of TOKEN_REGISTRY) {
+    if (t.chain !== "solana") continue;
+    const mint = t.addresses.mint;
+    if (mint) m.set(String(mint).toLowerCase(), t);
+  }
+  return m;
+})();
 // Убираем useWalletStore - используем готовые цены из tokens
 // import { useWalletStore } from '@/lib/stores/walletStore';
 
 // Aptos (Panora) token + actual price from wallet
 type AptosTokenWithActualPrice = Token & { actualPrice?: string | null };
+
+function withAptosLocalIcon(token: Token): Token {
+  return {
+    ...token,
+    logoUrl: getAptosTokenIcon(token.symbol, token.logoUrl),
+  };
+}
+
+function aptosPickerLogoUrl(symbol: string, logoUrl?: string | null): string {
+  return getAptosTokenIcon(symbol, logoUrl || "/file.svg");
+}
 
 function formatBpsAsPercent(bps: number): string {
   const safe = Number.isFinite(bps) ? Math.max(0, Math.min(10_000, Math.floor(bps))) : 0;
@@ -43,6 +73,31 @@ function formatBpsAsPercent(bps: number): string {
 }
 
 const DEFAULT_JUPITER_PLATFORM_FEE_BPS_UI = 1;
+
+function formatJupiterQuoteError(raw: string): string {
+  const noRouteMsg =
+    'No swap route found for this pair and amount. Try entering the amount in the "You pay" field instead.';
+  try {
+    const outer = JSON.parse(raw) as { error?: string; details?: string };
+    let inner: { errorCode?: string; error?: string } | null = null;
+    if (typeof outer.details === "string" && outer.details.trim()) {
+      try {
+        inner = JSON.parse(outer.details) as { errorCode?: string; error?: string };
+      } catch {
+        inner = { error: outer.details };
+      }
+    }
+    if (inner?.errorCode === "NO_ROUTES_FOUND" || /no routes found/i.test(String(inner?.error ?? ""))) {
+      return noRouteMsg;
+    }
+    const err = outer.error || inner?.error;
+    if (err && inner?.errorCode) return `${err}, ${inner.errorCode}`;
+    if (err) return String(err);
+  } catch {
+    if (/NO_ROUTES_FOUND/i.test(raw) || /no routes found/i.test(raw)) return noRouteMsg;
+  }
+  return raw;
+}
 
 // Minimal Solana token stub for UI only (not a Panora token)
 type SolanaTokenStub = {
@@ -62,6 +117,16 @@ type TokenPickerTab = "all" | "stablecoin" | "lst" | "xStocks" | "l1";
 
 function solanaSwapMint(stub: Pick<SolanaTokenStub, "faAddress" | "tokenAddress">): string {
   return String(stub.faAddress || stub.tokenAddress || "").toLowerCase();
+}
+
+function swapTokenKey(t: SwapToken | null | undefined): string {
+  if (!t) return "";
+  if ("chainId" in t) {
+    const aptos = t as AptosTokenWithActualPrice;
+    const fa = String(aptos.faAddress || aptos.tokenAddress || "").trim();
+    return fa ? normalizeAptosAddress(fa).toLowerCase() : "";
+  }
+  return solanaSwapMint(t as SolanaTokenStub);
 }
 
 function normalizeAptosFaForBirdeye(fa: string): string {
@@ -116,25 +181,32 @@ function solanaStubTokenInfo(stub: SolanaTokenStub): Token {
   };
 }
 
-function solanaTokenInfoFromWalletToken(t: {
-  address: string;
-  name: string;
-  symbol: string;
-  decimals: number;
-  logoUrl?: string;
-}): Token {
+function solanaTokenInfoFromWalletToken(
+  t: {
+    address: string;
+    name: string;
+    symbol: string;
+    decimals: number;
+    logoUrl?: string;
+  },
+  registry?: TokenRegistryItem | null
+): Token {
+  const name = registry?.name ?? t.name;
+  const symbol = registry?.symbol ?? t.symbol;
+  const decimals = registry?.decimals ?? t.decimals;
+  const logoUrl = registry?.logoUrl ?? (t.logoUrl || "/file.svg");
   return {
     chainId: 1,
     panoraId: "",
     tokenAddress: t.address,
     faAddress: t.address,
-    name: t.name,
-    symbol: t.symbol,
-    decimals: t.decimals,
+    name,
+    symbol,
+    decimals,
     bridge: null,
-    panoraSymbol: t.symbol,
+    panoraSymbol: symbol,
     usdPrice: "0",
-    logoUrl: t.logoUrl || "/file.svg",
+    logoUrl,
     websiteUrl: null,
     panoraUI: false,
     panoraTags: [],
@@ -539,7 +611,7 @@ export function SwapModal({
   variantDescription,
 }: SwapModalProps) {
   const { tokens, address: userAddress, refreshPortfolio } = useWalletData();
-  const { signAndSubmitTransaction, connected } = useWallet();
+  const { signAndSubmitTransaction, connected, account, wallet: aptosWallet } = useWallet();
   const { connection: solanaConnection } = useSolanaConnection();
   const {
     publicKey: solanaPublicKey,
@@ -602,7 +674,13 @@ export function SwapModal({
   }, [solanaAddress, solanaConnected, solanaPublicKey, solanaResolved.publicKey]);
 
   const injectedSolanaAddress = useNativeWalletStore((s) => s.solanaAddress);
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
   const trimmedInjectedSolanaAddress = (injectedSolanaAddress ?? "").trim();
+  const trimmedInjectedAptosAddress = (injectedAptosAddress ?? "").trim();
+  const effectiveAptosAddress = useMemo(() => {
+    const fromWalletData = (userAddress ?? "").trim();
+    return trimmedInjectedAptosAddress || fromWalletData;
+  }, [trimmedInjectedAptosAddress, userAddress]);
 
   // Keep "is native app?" reactive: WebViewBridge emits yieldai:native-ready
   // once the bridge handshake completes, after which isYieldAiNativeAppNow()
@@ -621,6 +699,43 @@ export function SwapModal({
     return Boolean(solanaResolved.signTx && solanaResolved.publicKey);
   }, [solanaResolved.publicKey, solanaResolved.signTx]);
 
+  const [walletConnectOpen, setWalletConnectOpen] = useState(false);
+
+  const derivedSolanaAddress = useMemo(
+    () => getSolanaWalletAddress(aptosWallet ?? null),
+    [aptosWallet],
+  );
+
+  const hasSolanaAdapterConnected = useMemo(
+    () => solanaWallets?.some((w) => w.adapter.connected && w.adapter.publicKey) ?? false,
+    [solanaWallets],
+  );
+
+  const hasAptosWallet = useMemo(
+    () => Boolean(connected && (userAddress || account?.address)),
+    [connected, userAddress, account?.address],
+  );
+
+  const hasSolanaWallet = useMemo(
+    () =>
+      Boolean(
+        (solanaConnected && solanaPublicKey) ||
+          hasSolanaAdapterConnected ||
+          solanaCanSign,
+      ),
+    [solanaConnected, solanaPublicKey, hasSolanaAdapterConnected, solanaCanSign],
+  );
+
+  const hasNativeWallet = useMemo(
+    () =>
+      Boolean(
+        isNativeApp && (trimmedInjectedSolanaAddress || trimmedInjectedAptosAddress),
+      ),
+    [isNativeApp, trimmedInjectedSolanaAddress, trimmedInjectedAptosAddress],
+  );
+
+  const hasAnyWallet = hasAptosWallet || hasSolanaWallet || hasNativeWallet;
+
   // Убираем fetchPrices - используем готовые цены из tokens
   // const { prices, fetchPrices } = useWalletStore();
 
@@ -636,6 +751,39 @@ export function SwapModal({
   const [jupiterPlatformFeeBpsUi, setJupiterPlatformFeeBpsUi] = useState<number>(DEFAULT_JUPITER_PLATFORM_FEE_BPS_UI);
   const [chainSelection, setChainSelection] = useState<SwapChain>("aptos");
   const didUserSelectChainRef = useRef(false);
+
+  const isActiveChainWalletReady = useMemo(() => {
+    if (chainSelection === "aptos") {
+      return hasAptosWallet || Boolean(isNativeApp && trimmedInjectedAptosAddress);
+    }
+    return Boolean(
+      hasSolanaWallet ||
+        (isNativeApp && trimmedInjectedSolanaAddress) ||
+        (hasAptosWallet && derivedSolanaAddress && solanaCanSign),
+    );
+  }, [
+    chainSelection,
+    hasAptosWallet,
+    hasSolanaWallet,
+    isNativeApp,
+    trimmedInjectedAptosAddress,
+    trimmedInjectedSolanaAddress,
+    derivedSolanaAddress,
+    solanaCanSign,
+  ]);
+
+  const walletGateBlocked = isOpen && (!hasAnyWallet || !isActiveChainWalletReady);
+  const chainTabsDisabled = walletGateBlocked && !hasAnyWallet;
+
+  const walletConnectInitialTab: WalletConnectChainTab =
+    chainSelection === "solana" ? "solana" : "aptos";
+
+  useEffect(() => {
+    if (!walletGateBlocked) {
+      setWalletConnectOpen(false);
+    }
+  }, [walletGateBlocked]);
+
   const [tokenPickerOpenFor, setTokenPickerOpenFor] = useState<"from" | "to" | null>(null);
   const [tokenPickerQuery, setTokenPickerQuery] = useState<string>("");
   const [tokenPickerTab, setTokenPickerTab] = useState<TokenPickerTab>("all");
@@ -653,6 +801,8 @@ export function SwapModal({
     fromToken: null as SwapToken | null,
     toToken: null as SwapToken | null,
     amount: '',
+    receiveAmount: '',
+    quoteInputSide: 'from' as 'from' | 'to',
     slippage: 0.5
   });
 
@@ -660,6 +810,8 @@ export function SwapModal({
   const [fromToken, setFromToken] = useState<SwapToken | null>(null);
   const [toToken, setToToken] = useState<SwapToken | null>(null);
   const [amount, setAmount] = useState<string>('');
+  const [receiveAmount, setReceiveAmount] = useState<string>('');
+  const [quoteInputSide, setQuoteInputSide] = useState<'from' | 'to'>('from');
   const [slippage, setSlippage] = useState<number>(0.5);
   const lastAptosPairRef = useRef<{ from: SwapToken | null; to: SwapToken | null }>({
     from: null,
@@ -669,6 +821,8 @@ export function SwapModal({
   const prefillSessionRef = useRef(false);
   const prefillRequestedAmountRef = useRef<string>('');
   const autoClampedFromPrefillRef = useRef(false);
+  const quoteAbortRef = useRef<AbortController | null>(null);
+  const quoteRequestIdRef = useRef(0);
 
   const walletPriceForFa = (faOrAddr: string | undefined): string | undefined => {
     if (!faOrAddr) return undefined;
@@ -700,6 +854,7 @@ export function SwapModal({
   useEffect(() => {
     if (!isOpen) {
       didUserSelectChainRef.current = false;
+      quoteAbortRef.current?.abort();
       // Full modal reset on close to avoid stale chain/token state on next open.
       setLoading(false);
       setError(null);
@@ -708,10 +863,12 @@ export function SwapModal({
       setQuoteDebug(null);
       setShowSlippage(false);
       setBalancesOverride({});
-      setLastQuoteData({ fromToken: null, toToken: null, amount: "", slippage: 0.5 });
+      setLastQuoteData({ fromToken: null, toToken: null, amount: "", receiveAmount: "", quoteInputSide: "from", slippage: 0.5 });
       setFromToken(null);
       setToToken(null);
       setAmount("");
+      setReceiveAmount("");
+      setQuoteInputSide("from");
       setSlippage(0.5);
       lastAptosPairRef.current = { from: null, to: null };
       setChainSelection("aptos");
@@ -784,11 +941,13 @@ export function SwapModal({
       setFromToken(sol);
       setToToken(usdc);
       setAmount("");
+      setReceiveAmount("");
+      setQuoteInputSide("from");
       setSwapQuote(null);
       setQuoteDebug(null);
       setSwapResult(null);
       setError(null);
-      setLastQuoteData({ fromToken: null, toToken: null, amount: "", slippage: 0.5 });
+      setLastQuoteData({ fromToken: null, toToken: null, amount: "", receiveAmount: "", quoteInputSide: "from", slippage: 0.5 });
       return;
     }
 
@@ -800,7 +959,7 @@ export function SwapModal({
       setQuoteDebug(null);
       setSwapResult(null);
       setError(null);
-      setLastQuoteData({ fromToken: null, toToken: null, amount: "", slippage: 0.5 });
+      setLastQuoteData({ fromToken: null, toToken: null, amount: "", receiveAmount: "", quoteInputSide: "from", slippage: 0.5 });
     }
   }, [chainSelection, isOpen]);
 
@@ -862,35 +1021,41 @@ export function SwapModal({
 
   // USD value of the "you receive" amount
   const receiveUsdValue = useMemo(() => {
-    if (!swapQuote || !toToken) return null;
+    if (!toToken) return null;
     const panora = quoteDebug?.quotes?.[0]?.toTokenAmountUSD;
     if (panora) { const v = parseFloat(panora); if (v > 0) return v; }
-    const amt = Number(swapQuote.estimatedToAmount || swapQuote.amount || 0);
+    const amt = Number(receiveAmount || swapQuote?.estimatedToAmount || swapQuote?.amount || 0);
     const p = getEffectivePrice(toToken);
     if (amt > 0 && p > 0) return amt * p;
     return null;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [swapQuote, quoteDebug, toToken, fetchedPrices]);
+  }, [swapQuote, quoteDebug, toToken, receiveAmount, fetchedPrices]);
 
   // Exchange rate from actual quote amounts
   const exchangeRate = useMemo(() => {
     if (!swapQuote || !fromToken || !toToken) return null;
-    const from = Number(amount || 0);
-    const to = Number(swapQuote.estimatedToAmount || swapQuote.amount || 0);
+    const from = Number(swapQuote.estimatedFromAmount || amount || 0);
+    const to = Number(swapQuote.estimatedToAmount || receiveAmount || swapQuote.amount || 0);
     if (!from || !to) return null;
     return to / from;
-  }, [swapQuote, amount, fromToken, toToken]);
+  }, [swapQuote, amount, receiveAmount, fromToken, toToken]);
 
   // Min received from quote
   const quoteMinReceived = useMemo(() => {
     if (!swapQuote) return null;
     if (chainSelection === "solana") {
+      if (quoteDebug?.swapMode === "ExactOut") {
+        if (quoteDebug?.outAmount != null && toToken?.decimals != null) {
+          return baseUnitsToDecimalString(String(quoteDebug.outAmount), Number(toToken.decimals));
+        }
+        return receiveAmount || null;
+      }
       if (quoteDebug?.otherAmountThreshold != null && toToken?.decimals != null)
         return baseUnitsToDecimalString(String(quoteDebug.otherAmountThreshold), Number(toToken.decimals));
       return null;
     }
     return (quoteDebug?.quotes?.[0]?.minToTokenAmount as string | undefined) ?? null;
-  }, [swapQuote, quoteDebug, chainSelection, toToken]);
+  }, [swapQuote, quoteDebug, chainSelection, toToken, receiveAmount]);
 
   // Price impact from quote
   const quotePriceImpact = useMemo(() => {
@@ -913,13 +1078,17 @@ export function SwapModal({
           if (!mint) return null;
           const actualPrice = w?.price != null ? String(w.price) : null;
           const decimals = Number(w?.decimals ?? 0);
-          const tokenInfo = solanaTokenInfoFromWalletToken({
-            address: mint,
-            name: String(w?.name || w?.symbol || mint),
-            symbol: String(w?.symbol || "Unknown"),
-            decimals: Number.isFinite(decimals) ? decimals : 0,
-            logoUrl: w?.logoUrl || undefined,
-          });
+          const registry = SOLANA_REGISTRY_BY_MINT.get(mint.toLowerCase()) ?? null;
+          const tokenInfo = solanaTokenInfoFromWalletToken(
+            {
+              address: mint,
+              name: String(w?.name || w?.symbol || mint),
+              symbol: String(w?.symbol || "Unknown"),
+              decimals: Number.isFinite(decimals) ? decimals : 0,
+              logoUrl: w?.logoUrl || undefined,
+            },
+            registry
+          );
           return {
             address: mint,
             name: tokenInfo.name,
@@ -985,13 +1154,17 @@ export function SwapModal({
           if (fromMint && mint.toLowerCase() === fromMint) return null;
           const actualPrice = w?.price != null ? String(w.price) : null;
           const decimals = Number(w?.decimals ?? 0);
-          const tokenInfo = solanaTokenInfoFromWalletToken({
-            address: mint,
-            name: String(w?.name || w?.symbol || mint),
-            symbol: String(w?.symbol || "Unknown"),
-            decimals: Number.isFinite(decimals) ? decimals : 0,
-            logoUrl: w?.logoUrl || undefined,
-          });
+          const registry = SOLANA_REGISTRY_BY_MINT.get(mint.toLowerCase()) ?? null;
+          const tokenInfo = solanaTokenInfoFromWalletToken(
+            {
+              address: mint,
+              name: String(w?.name || w?.symbol || mint),
+              symbol: String(w?.symbol || "Unknown"),
+              decimals: Number.isFinite(decimals) ? decimals : 0,
+              logoUrl: w?.logoUrl || undefined,
+            },
+            registry
+          );
           return {
             address: mint,
             name: tokenInfo.name,
@@ -1083,16 +1256,19 @@ export function SwapModal({
     const requiredTokens = (tokenList.data.data as Token[])
       .filter(token => requiredFaAddresses.includes((token.faAddress || '').toLowerCase()))
       .filter(token => token.faAddress !== fromToken?.faAddress)
-      .map(token => ({
-        address: token.faAddress || token.tokenAddress || '',
-        name: token.name || token.symbol,
-        symbol: token.symbol,
-        decimals: token.decimals,
-        amount: '0',
-        price: null as string | null,
-        tokenInfo: token,
-        actualPrice: null // No price for tokens not in wallet
-      }));
+      .map(token => {
+        const tokenInfo = withAptosLocalIcon(token);
+        return {
+          address: token.faAddress || token.tokenAddress || '',
+          name: tokenInfo.name || tokenInfo.symbol,
+          symbol: tokenInfo.symbol,
+          decimals: tokenInfo.decimals,
+          amount: '0',
+          price: null as string | null,
+          tokenInfo,
+          actualPrice: null // No price for tokens not in wallet
+        };
+      });
 
     // 3) Merge with deduplication by token address
     const byAddr = new Map<string, any>();
@@ -1130,13 +1306,14 @@ export function SwapModal({
 
     const normalizedAddress = normalizeAddress(address);
 
-    return (tokenList.data.data as Token[]).find(token => {
+    const found = (tokenList.data.data as Token[]).find(token => {
       const normalizedTokenAddress = normalizeAddress(token.tokenAddress || '');
       const normalizedFaAddress = normalizeAddress(token.faAddress || '');
 
       return normalizedTokenAddress === normalizedAddress ||
              normalizedFaAddress === normalizedAddress;
     });
+    return found ? withAptosLocalIcon(found) : undefined;
   }
 
   function normalizeAddress(address?: string) {
@@ -1255,40 +1432,45 @@ export function SwapModal({
     return registryByMint.get(mint) ?? null;
   };
 
-  // Auto-fetch quote: Debounced for amount changes (600ms delay)
+  const drivingQuoteAmount = quoteInputSide === "from" ? amount : receiveAmount;
+
+  // Auto-fetch quote: single debounced effect for amount, token, and slippage changes
   useEffect(() => {
-    // Validate all required fields
-    if (!fromToken || !toToken || !amount || parseFloat(amount) <= 0) return;
+    if (!isOpen) return;
+    if (walletGateBlocked) return;
+    if (!fromToken || !toToken || !drivingQuoteAmount || parseFloat(drivingQuoteAmount) <= 0) return;
     if (chainSelection === "aptos" && !userAddress) return;
     if (chainSelection === "solana" && !solanaTakerAddress) return;
 
-    // Debounce: wait 600ms after user stops typing
     const timer = setTimeout(() => {
       getQuote();
-    }, 600);
+    }, 900);
 
     return () => clearTimeout(timer);
-  }, [amount, chainSelection]); // Only trigger on amount change
-
-  // Auto-fetch quote: Fast reaction for token changes (100ms delay)
-  useEffect(() => {
-    // Validate all required fields
-    if (!fromToken || !toToken || !amount || parseFloat(amount) <= 0) return;
-    if (chainSelection === "aptos" && !userAddress) return;
-    if (chainSelection === "solana" && !solanaTakerAddress) return;
-
-    // Small delay to avoid aggressive requests
-    const timer = setTimeout(() => {
-      getQuote();
-    }, 100);
-
-    return () => clearTimeout(timer);
-  }, [fromToken, toToken, slippage, chainSelection]); // Trigger on token or slippage change
+  }, [
+    drivingQuoteAmount,
+    quoteInputSide,
+    fromToken,
+    toToken,
+    slippage,
+    chainSelection,
+    walletGateBlocked,
+    isOpen,
+    userAddress,
+    solanaTakerAddress,
+  ]);
 
   const getQuote = async () => {
+    quoteAbortRef.current?.abort();
+    const controller = new AbortController();
+    quoteAbortRef.current = controller;
+    const requestId = ++quoteRequestIdRef.current;
+    const isStale = () =>
+      requestId !== quoteRequestIdRef.current || controller.signal.aborted;
+
     if (chainSelection !== "aptos") {
       // Solana quote
-      if (!fromToken || !toToken || !amount || parseFloat(amount) <= 0) {
+      if (!fromToken || !toToken || !drivingQuoteAmount || parseFloat(drivingQuoteAmount) <= 0) {
         setError("Please select tokens and enter amount");
         return;
       }
@@ -1296,53 +1478,80 @@ export function SwapModal({
         setError("Solana wallet not connected. Please connect your Solana wallet first.");
         return;
       }
+      if (isStale()) return;
       setLoading(true);
       setError(null);
       setSwapQuote(null);
       setQuoteDebug(null);
       setSwapResult(null);
       try {
-        const decimals = fromToken.decimals ?? 9;
-        const amt = Number(amount);
-        const baseUnits = BigInt(Math.floor(amt * Math.pow(10, decimals))).toString();
+        const isExactOut = quoteInputSide === "to";
+        const quoteDecimals = isExactOut ? (toToken.decimals ?? 6) : (fromToken.decimals ?? 9);
+        const amt = Number(drivingQuoteAmount);
+        const baseUnits = BigInt(Math.floor(amt * Math.pow(10, quoteDecimals))).toString();
+        const swapMode = isExactOut ? "ExactOut" : "ExactIn";
         const res = await fetch(gaslessSwapEnabled ? "/api/jupiter/quote" : "/api/jupiter/quoteV1", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
           body: JSON.stringify({
             inputMint: fromToken.tokenAddress || fromToken.faAddress,
             outputMint: toToken.tokenAddress || toToken.faAddress,
             amount: baseUnits,
+            swapMode,
             slippageBps: Math.floor(slippage * 100),
             ...(gaslessSwapEnabled ? { taker: solanaTakerAddress } : {}),
           }),
         });
+        if (isStale()) return;
         if (!res.ok) {
           const t = await res.text();
-          throw new Error(t || `Quote failed: ${res.status}`);
+          throw new Error(formatJupiterQuoteError(t || `Quote failed: ${res.status}`));
         }
         const q = await res.json();
+        if (isStale()) return;
         setQuoteDebug(q);
-        const outDecimals = toToken.decimals ?? 6;
-        const outHuman = baseUnitsToDecimalString(String(q.outAmount || "0"), outDecimals);
+        const fromDecimals = fromToken.decimals ?? 9;
+        const toDecimals = toToken.decimals ?? 6;
+        const fromHuman = baseUnitsToDecimalString(String(q.inAmount || "0"), fromDecimals);
+        const outHuman = baseUnitsToDecimalString(String(q.outAmount || "0"), toDecimals);
+
+        if (isExactOut) {
+          setAmount(fromHuman);
+        } else {
+          setReceiveAmount(outHuman);
+        }
+
         setSwapQuote({
           amount: outHuman,
-          path: [],
-          estimatedFromAmount: amount,
+          path: q.routePlan ?? [],
+          estimatedFromAmount: fromHuman,
           estimatedToAmount: outHuman,
         });
-        setLastQuoteData({ fromToken, toToken, amount, slippage });
+        setLastQuoteData({
+          fromToken,
+          toToken,
+          amount: isExactOut ? fromHuman : drivingQuoteAmount,
+          receiveAmount: isExactOut ? drivingQuoteAmount : outHuman,
+          quoteInputSide,
+          slippage,
+        });
       } catch (e: any) {
+        if (controller.signal.aborted || isStale()) return;
         setError(`Quote error: ${e?.message || e}`);
       } finally {
-        setLoading(false);
+        if (requestId === quoteRequestIdRef.current) {
+          setLoading(false);
+        }
       }
       return;
     }
-    if (!fromToken || !toToken || !amount || parseFloat(amount) <= 0 || !userAddress) {
+    if (!fromToken || !toToken || !drivingQuoteAmount || parseFloat(drivingQuoteAmount) <= 0 || !userAddress) {
       setError('Please select tokens, enter amount, and connect wallet');
       return;
     }
 
+    if (isStale()) return;
     setLoading(true);
     setError(null);
     setSwapQuote(null);
@@ -1353,40 +1562,56 @@ export function SwapModal({
     // Цены уже актуальные и загружены при открытии приложения
 
     try {
-      const humanReadableAmount = amount;
+      const isExactOut = quoteInputSide === "to";
+      const quoteBody: Record<string, string> = {
+        chainId: "1",
+        fromTokenAddress: fromToken.faAddress || fromToken.tokenAddress || '',
+        toTokenAddress: toToken.faAddress || toToken.tokenAddress || '',
+        toWalletAddress: userAddress,
+        slippagePercentage: slippage.toString(),
+        getTransactionData: "transactionPayload",
+      };
+
+      if (isExactOut) {
+        quoteBody.toTokenAmount = drivingQuoteAmount;
+      } else {
+        quoteBody.fromTokenAmount = drivingQuoteAmount;
+      }
 
       const response = await fetch('/api/panora/swap-quote', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          chainId: "1",
-          fromTokenAddress: fromToken.faAddress || fromToken.tokenAddress || '',
-          toTokenAddress: toToken.faAddress || toToken.tokenAddress || '',
-          fromTokenAmount: humanReadableAmount,
-          toWalletAddress: userAddress,
-          slippagePercentage: slippage.toString(),
-          getTransactionData: "transactionPayload"
-        })
+        signal: controller.signal,
+        body: JSON.stringify(quoteBody),
       });
 
+      if (isStale()) return;
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.error || 'Failed to get quote');
       }
 
       const quoteData = await response.json();
+      if (isStale()) return;
       setQuoteDebug(quoteData);
       console.log('Panora swap quote:', quoteData);
 
       const quote = quoteData.quotes?.[0];
       const toTokenAmount = quote?.toTokenAmount || '0';
+      const fromTokenAmount = quote?.fromTokenAmount || drivingQuoteAmount;
+
+      if (isExactOut) {
+        setAmount(fromTokenAmount);
+      } else {
+        setReceiveAmount(toTokenAmount);
+      }
 
       setSwapQuote({
         amount: toTokenAmount,
         path: quoteData.route || quoteData.path || [],
-        estimatedFromAmount: humanReadableAmount,
+        estimatedFromAmount: fromTokenAmount,
         estimatedToAmount: toTokenAmount,
       });
 
@@ -1394,14 +1619,19 @@ export function SwapModal({
       setLastQuoteData({
         fromToken,
         toToken,
-        amount,
+        amount: isExactOut ? fromTokenAmount : drivingQuoteAmount,
+        receiveAmount: isExactOut ? drivingQuoteAmount : toTokenAmount,
+        quoteInputSide,
         slippage
       });
 
     } catch (error: any) {
+      if (controller.signal.aborted || isStale()) return;
       setError(`Quote error: ${error.message || error}`);
     } finally {
-      setLoading(false);
+      if (requestId === quoteRequestIdRef.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -1509,20 +1739,27 @@ export function SwapModal({
           });
           setSwapQuote(null);
           setQuoteDebug(null);
-          setLastQuoteData({ fromToken: null, toToken: null, amount: "", slippage: 0.5 });
+          setLastQuoteData({ fromToken: null, toToken: null, amount: "", receiveAmount: "", quoteInputSide: "from", slippage: 0.5 });
           return;
         }
 
         const buildRes = await fetch("/api/jupiter/build", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            inputMint: fromToken.tokenAddress || fromToken.faAddress,
-            outputMint: toToken.tokenAddress || toToken.faAddress,
-            amount: baseUnits,
-            taker: solanaTakerAddress,
-            slippageBps: Math.floor(slippage * 100),
-          }),
+          body: JSON.stringify(
+            quoteDebug?.swapMode === "ExactOut"
+              ? {
+                  quoteResponse: quoteDebug,
+                  taker: solanaTakerAddress,
+                }
+              : {
+                  inputMint: fromToken.tokenAddress || fromToken.faAddress,
+                  outputMint: toToken.tokenAddress || toToken.faAddress,
+                  amount: baseUnits,
+                  taker: solanaTakerAddress,
+                  slippageBps: Math.floor(slippage * 100),
+                },
+          ),
         });
         if (!buildRes.ok) {
           const t = await buildRes.text();
@@ -1582,7 +1819,7 @@ export function SwapModal({
         });
         setSwapQuote(null);
         setQuoteDebug(null);
-        setLastQuoteData({ fromToken: null, toToken: null, amount: "", slippage: 0.5 });
+        setLastQuoteData({ fromToken: null, toToken: null, amount: "", receiveAmount: "", quoteInputSide: "from", slippage: 0.5 });
       } catch (e: any) {
         console.error("[SwapModal:solana] executeSwap failed", {
           gaslessSwapEnabled,
@@ -1608,7 +1845,7 @@ export function SwapModal({
       }
       return;
     }
-    const aptosNativeFlowActive = isNativeApp && !!userAddress;
+    const aptosNativeFlowActive = isNativeApp && !!effectiveAptosAddress;
     if (!aptosNativeFlowActive && !connected) {
       setError('Wallet not connected. Please connect your wallet first.');
       return;
@@ -1705,8 +1942,8 @@ export function SwapModal({
             },
             signAndSubmitTransaction: signAndSubmitTransaction as any,
             connected,
-            address: userAddress,
-            isNativeApp,
+            address: effectiveAptosAddress || userAddress,
+            isNativeApp: aptosNativeFlowActive,
           });
 
           setSwapResult({
@@ -1723,6 +1960,8 @@ export function SwapModal({
             fromToken: null,
             toToken: null,
             amount: '',
+            receiveAmount: '',
+            quoteInputSide: 'from',
             slippage: 0.5
           });
 
@@ -1743,6 +1982,8 @@ export function SwapModal({
             setBalancesOverride(next);
 
             setAmount('');
+            setReceiveAmount('');
+            setQuoteInputSide('from');
           } catch {}
         } catch (walletError: any) {
           let errorMessage = 'Failed to sign transaction';
@@ -1809,17 +2050,20 @@ export function SwapModal({
     if (!lastQuoteData.fromToken || !lastQuoteData.toToken) return true;
 
     return (
-      lastQuoteData.fromToken.faAddress !== fromToken?.faAddress ||
-      lastQuoteData.toToken.faAddress !== toToken?.faAddress ||
-      lastQuoteData.amount !== amount ||
+      swapTokenKey(lastQuoteData.fromToken) !== swapTokenKey(fromToken) ||
+      swapTokenKey(lastQuoteData.toToken) !== swapTokenKey(toToken) ||
+      lastQuoteData.quoteInputSide !== quoteInputSide ||
+      (quoteInputSide === "from"
+        ? lastQuoteData.amount !== amount
+        : lastQuoteData.receiveAmount !== receiveAmount) ||
       lastQuoteData.slippage !== slippage
     );
   };
 
   const hasPositiveAmount = useMemo(() => {
-    const n = Number(amount);
+    const n = Number(drivingQuoteAmount);
     return Number.isFinite(n) && n > 0;
-  }, [amount]);
+  }, [drivingQuoteAmount]);
 
   // Fetch prices for Solana tokens not currently in wallet
   useEffect(() => {
@@ -1854,11 +2098,13 @@ export function SwapModal({
     if (!fromToken) return;
     const maxVal = maxSpendableHuman(fromToken);
     const val = maxVal * pct / 100;
+    setQuoteInputSide("from");
     setAmount(val > 0 ? formatHumanAmount(val, fromToken.decimals ?? 8) : "");
+    setReceiveAmount("");
     setSwapQuote(null);
     setQuoteDebug(null);
     setSwapResult(null);
-    setLastQuoteData({ fromToken: null, toToken: null, amount: "", slippage: 0.5 });
+    setLastQuoteData({ fromToken: null, toToken: null, amount: "", receiveAmount: "", quoteInputSide: "from", slippage: 0.5 });
   };
 
   const formatRate = (n: number): string => {
@@ -1870,6 +2116,15 @@ export function SwapModal({
 
   // Получаем конфигурацию кнопки
   const getButtonConfig = () => {
+    if (walletGateBlocked) {
+      return {
+        text: "Connect Wallet",
+        action: () => setWalletConnectOpen(true),
+        disabled: false,
+        variant: "default" as const,
+      };
+    }
+
     if (!swapQuote || hasDataChanged()) {
       return {
         text: 'Get Quote',
@@ -1966,9 +2221,10 @@ export function SwapModal({
   };
 
   const amountNum = useMemo(() => {
-    const n = Number(amount);
+    const payAmt = quoteInputSide === "to" ? amount : drivingQuoteAmount;
+    const n = Number(payAmt);
     return Number.isFinite(n) ? n : NaN;
-  }, [amount]);
+  }, [amount, drivingQuoteAmount, quoteInputSide]);
 
   const fromBal = useMemo(() => {
     if (!fromToken) return null;
@@ -2009,6 +2265,8 @@ export function SwapModal({
       fromToken: null,
       toToken: null,
       amount: '',
+      receiveAmount: '',
+      quoteInputSide: 'from',
       slippage: 0.5,
     });
   }, [isOpen, fromToken, insufficient]);
@@ -2046,12 +2304,29 @@ export function SwapModal({
       setFromToken(toToken);
       setToToken(fromToken);
 
-      // Если есть quote, используем количество получаемых токенов как новое количество
-      if (swapQuote && quoteDebug?.quotes?.[0]?.toTokenAmount) {
-        setAmount(quoteDebug.quotes[0].toTokenAmount);
+      let newPay = "";
+      if (quoteInputSide === "to" && receiveAmount) {
+        newPay = receiveAmount;
+      } else if (swapQuote) {
+        if (chainSelection === "solana") {
+          newPay =
+            swapQuote.estimatedToAmount ||
+            (quoteDebug?.outAmount && toToken.decimals != null
+              ? baseUnitsToDecimalString(String(quoteDebug.outAmount), Number(toToken.decimals))
+              : "") ||
+            swapQuote.amount ||
+            amount ||
+            "";
+        } else {
+          newPay = quoteDebug?.quotes?.[0]?.toTokenAmount || swapQuote.estimatedToAmount || swapQuote.amount || amount || "";
+        }
       } else {
-        setAmount('');
+        newPay = amount;
       }
+
+      setAmount(newPay);
+      setReceiveAmount("");
+      setQuoteInputSide("from");
 
       setSwapQuote(null);
       setQuoteDebug(null);
@@ -2062,12 +2337,15 @@ export function SwapModal({
         fromToken: null,
         toToken: null,
         amount: '',
+        receiveAmount: '',
+        quoteInputSide: 'from',
         slippage: 0.5
       });
     }
   };
 
   const openTokenPicker = (side: "from" | "to") => {
+    if (walletGateBlocked) return;
     setTokenPickerOpenFor(side);
     setTokenPickerQuery("");
     setTokenPickerTab("all");
@@ -2083,6 +2361,13 @@ export function SwapModal({
     const q = tokenPickerQuery.trim().toLowerCase();
     const chain = chainSelection;
 
+    const pickerAddrKey = (addr: string): string => {
+      const s = String(addr || "").trim();
+      if (!s) return "";
+      if (chain === "aptos") return normalizeAptosAddress(s).toLowerCase();
+      return s.toLowerCase();
+    };
+
     const reg = TOKEN_REGISTRY.filter((t) => t.chain === chain);
 
     const wallet = (() => {
@@ -2092,15 +2377,15 @@ export function SwapModal({
             const tokenInfo = row?.tokenInfo as Token | undefined;
             if (!tokenInfo) return null;
             const mintRaw = String(tokenInfo.faAddress || tokenInfo.tokenAddress || row?.address || "").trim();
-            const mintKey = mintRaw.toLowerCase();
+            const mintKey = pickerAddrKey(mintRaw);
             const match = registryByMint.get(mintKey) ?? null;
             return {
               kind: "wallet" as const,
               chain,
-              symbol: String(tokenInfo.symbol || row?.symbol || "Unknown"),
-              name: String(tokenInfo.name || row?.name || ""),
-              decimals: Number(tokenInfo.decimals ?? row?.decimals ?? 0),
-              logoUrl: String(tokenInfo.logoUrl || row?.logoUrl || "/file.svg"),
+              symbol: String(match?.symbol ?? tokenInfo.symbol ?? row?.symbol ?? "Unknown"),
+              name: String(match?.name ?? tokenInfo.name ?? row?.name ?? ""),
+              decimals: Number(match?.decimals ?? tokenInfo.decimals ?? row?.decimals ?? 0),
+              logoUrl: String(match?.logoUrl ?? tokenInfo.logoUrl ?? row?.logoUrl ?? "/file.svg"),
               tags: (match?.tags ?? []) as any[],
               id: `solana:${mintKey || String(row?.address || "").trim()}`,
               mint: mintRaw,
@@ -2115,17 +2400,19 @@ export function SwapModal({
         .map((row: any) => {
           const tokenInfo = row?.tokenInfo as Token | undefined;
           if (!tokenInfo) return null;
-          const fa = String(tokenInfo.faAddress || tokenInfo.tokenAddress || row?.address || "").toLowerCase();
-          const match = registryByFa.get(fa) ?? null;
+          const faRaw = String(tokenInfo.faAddress || tokenInfo.tokenAddress || row?.address || "");
+          const fa = pickerAddrKey(faRaw);
+          const match = registryByFa.get(fa) ?? registryByFa.get(faRaw.toLowerCase()) ?? null;
+          const symbol = String(tokenInfo.symbol || row?.symbol || "Unknown");
           return {
             kind: "wallet" as const,
             chain,
-            symbol: String(tokenInfo.symbol || row?.symbol || "Unknown"),
+            symbol,
             name: String(tokenInfo.name || row?.name || ""),
             decimals: Number(tokenInfo.decimals ?? row?.decimals ?? 0),
-            logoUrl: String(tokenInfo.logoUrl || row?.logoUrl || "/file.svg"),
+            logoUrl: aptosPickerLogoUrl(symbol, tokenInfo.logoUrl || row?.logoUrl),
             tags: (match?.tags ?? []) as any[],
-            id: `aptos:${fa || (row?.address || "")}`,
+            id: `aptos:${fa || faRaw}`,
             faAddress: fa,
             amount: row?.amount ?? "0",
             actualPrice: row?.actualPrice ?? null,
@@ -2136,8 +2423,9 @@ export function SwapModal({
 
     const walletAddressSet = new Set<string>(
       wallet
-        .map((w: any) => (chain === "solana" ? w?.mint : w?.faAddress))
-        .map((x: any) => String(x || "").toLowerCase())
+        .map((w: any) =>
+          pickerAddrKey(String((chain === "solana" ? w?.mint : w?.faAddress) || ""))
+        )
         .filter(Boolean)
     );
 
@@ -2149,14 +2437,19 @@ export function SwapModal({
         symbol: t.symbol,
         name: t.name,
         decimals: t.decimals,
-        logoUrl: String(t.logoUrl || "/file.svg"),
+        logoUrl:
+          chain === "aptos"
+            ? aptosPickerLogoUrl(t.symbol, t.logoUrl)
+            : String(t.logoUrl || "/file.svg"),
         tags: t.tags,
         id: t.id,
-        faAddress: t.addresses.faAddress ? String(t.addresses.faAddress).toLowerCase() : undefined,
-        mint: t.addresses.mint ? String(t.addresses.mint).trim() : undefined,
+        faAddress: t.addresses.faAddress
+          ? pickerAddrKey(String(t.addresses.faAddress))
+          : undefined,
+        mint: t.addresses.mint ? pickerAddrKey(String(t.addresses.mint)) : undefined,
       }))
       .filter((r) => {
-        const key = String((chain === "solana" ? r.mint : r.faAddress) || "").toLowerCase();
+        const key = pickerAddrKey(String((chain === "solana" ? r.mint : r.faAddress) || ""));
         if (!key) return false;
         return !walletAddressSet.has(key);
       });
@@ -2173,7 +2466,10 @@ export function SwapModal({
         : filtered.filter((t) => Array.isArray(t.tags) && (t.tags as any[]).includes(tokenPickerTab));
 
     const counts = ((): Record<TokenPickerTab, number> => {
-      const base = filtered;
+      const base =
+        tokenPickerOpenFor === "from"
+          ? filtered.filter((t) => t.kind === "wallet" && Number(t.amount || 0) > 0)
+          : filtered;
       const c: Record<TokenPickerTab, number> = {
         all: base.length,
         stablecoin: 0,
@@ -2193,6 +2489,7 @@ export function SwapModal({
   }, [
     tokenPickerQuery,
     tokenPickerTab,
+    tokenPickerOpenFor,
     chainSelection,
     availableTokens,
     registryByFa,
@@ -2244,10 +2541,12 @@ export function SwapModal({
     setQuoteDebug(null);
     setError(null);
     setSwapResult(null);
-    setLastQuoteData({ fromToken: null, toToken: null, amount: "", slippage: 0.5 });
+    setLastQuoteData({ fromToken: null, toToken: null, amount: "", receiveAmount: "", quoteInputSide: "from", slippage: 0.5 });
 
     // Clear amount when changing token via picker to avoid mismatched quote.
     setAmount("");
+    setReceiveAmount("");
+    setQuoteInputSide("from");
   };
 
   const amountInputRef = useRef<HTMLInputElement | null>(null);
@@ -2324,7 +2623,7 @@ export function SwapModal({
     <>
     <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className={cn(
-        "fixed left-1/2 top-1/2 z-[60] w-[calc(100vw-1rem)] -translate-x-1/2 -translate-y-1/2 sm:w-auto sm:max-w-[440px] max-h-[95dvh] overflow-hidden rounded-2xl border bg-background p-0 shadow-lg [&>button:last-child]:hidden",
+        "relative fixed left-1/2 top-1/2 z-[60] w-[calc(100vw-1rem)] -translate-x-1/2 -translate-y-1/2 sm:w-auto sm:max-w-[440px] max-h-[95dvh] overflow-hidden rounded-2xl border bg-background p-0 shadow-lg [&>button:last-child]:hidden",
         chartToken && "lg:max-w-[1120px]"
       )}>
         {/* Hidden a11y title */}
@@ -2460,8 +2759,9 @@ export function SwapModal({
                   <button
                     key={c}
                     type="button"
+                    disabled={chainTabsDisabled}
                     onClick={() => {
-                      if (chainSelection === c) return;
+                      if (chainTabsDisabled || chainSelection === c) return;
                       didUserSelectChainRef.current = true;
                       setChainSelection(c);
                     }}
@@ -2489,7 +2789,11 @@ export function SwapModal({
               <Button
                 variant="ghost"
                 size="icon"
-                onClick={() => setShowSlippage((s) => !s)}
+                disabled={walletGateBlocked}
+                onClick={() => {
+                  if (walletGateBlocked) return;
+                  setShowSlippage((s) => !s);
+                }}
                 className={cn("h-8 w-8", showSlippage && "bg-muted text-foreground")}
               >
                 <Settings className="h-4 w-4" />
@@ -2508,6 +2812,13 @@ export function SwapModal({
           </div>
 
           {/* Body */}
+          <div className="relative min-h-0 flex-1">
+            <div
+              className={cn(
+                "flex min-h-full flex-col",
+                walletGateBlocked && "pointer-events-none select-none opacity-45",
+              )}
+            >
           <div className="flex flex-col gap-0.5 px-4 pb-3 pt-2.5 sm:px-5 sm:pb-4 sm:pt-3">
             {/* Slippage panel */}
             {showSlippage && (
@@ -2524,7 +2835,7 @@ export function SwapModal({
                         setSlippage(v);
                         setSwapQuote(null);
                         setQuoteDebug(null);
-                        setLastQuoteData({ fromToken: null, toToken: null, amount: "", slippage: 0.5 });
+                        setLastQuoteData({ fromToken: null, toToken: null, amount: "", receiveAmount: "", quoteInputSide: "from", slippage: 0.5 });
                       }}
                       className={cn(
                         "flex-1 rounded-lg border py-1.5 text-xs font-semibold transition-colors",
@@ -2579,23 +2890,30 @@ export function SwapModal({
                   );
                 })()}
                 <div className="min-w-0 flex-1 text-right">
-                  <input
-                    ref={amountInputRef}
-                    type="number"
-                    placeholder="0"
-                    value={amount}
-                    onChange={(e) => {
-                      setAmount(e.target.value);
-                      setSwapResult(null);
-                      setSwapQuote(null);
-                      setQuoteDebug(null);
-                      setLastQuoteData({ fromToken: null, toToken: null, amount: "", slippage: 0.5 });
-                    }}
-                    disabled={loading}
-                    className="w-full bg-transparent text-xl sm:text-2xl font-semibold text-right outline-none placeholder:text-muted-foreground/30 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                  />
-                  {fromToken && amount && usdAmount > 0 && (
-                    <div className="mt-0.5 text-xs text-muted-foreground">${formatNumber(usdAmount)}</div>
+                  {loading && quoteInputSide === "to" ? (
+                    <div className="animate-pulse text-xl sm:text-2xl font-semibold text-muted-foreground">Quoting…</div>
+                  ) : (
+                    <>
+                      <input
+                        ref={amountInputRef}
+                        type="number"
+                        placeholder="0"
+                        value={amount}
+                        onChange={(e) => {
+                          setQuoteInputSide("from");
+                          setAmount(e.target.value);
+                          setSwapResult(null);
+                          setSwapQuote(null);
+                          setQuoteDebug(null);
+                          setLastQuoteData({ fromToken: null, toToken: null, amount: "", receiveAmount: "", quoteInputSide: "from", slippage: 0.5 });
+                        }}
+                        disabled={loading && quoteInputSide === "to"}
+                        className="w-full bg-transparent text-xl sm:text-2xl font-semibold text-right outline-none placeholder:text-muted-foreground/30 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                      />
+                      {fromToken && amount && usdAmount > 0 && (
+                        <div className="mt-0.5 text-xs text-muted-foreground">${formatNumber(usdAmount)}</div>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -2694,19 +3012,34 @@ export function SwapModal({
                   );
                 })()}
                 <div className="min-w-0 flex-1 text-right">
-                  {loading ? (
+                  {loading && quoteInputSide === "from" ? (
                     <div className="animate-pulse text-xl sm:text-2xl font-semibold text-muted-foreground">Quoting…</div>
-                  ) : swapQuote && toToken ? (
-                    <>
-                      <div className="text-xl sm:text-2xl font-semibold">
-                        {formatReceivedAmount(swapQuote.estimatedToAmount || swapQuote.amount || 0)}
-                      </div>
-                      {receiveUsdValue != null && receiveUsdValue > 0 && (
-                        <div className="mt-0.5 text-xs text-muted-foreground">${formatNumber(receiveUsdValue)}</div>
-                      )}
-                    </>
                   ) : (
-                    <div className="text-2xl font-medium text-muted-foreground/25">—</div>
+                    <>
+                      <input
+                        type="number"
+                        placeholder="0"
+                        value={receiveAmount}
+                        onChange={(e) => {
+                          setQuoteInputSide("to");
+                          setReceiveAmount(e.target.value);
+                          setSwapResult(null);
+                          setSwapQuote(null);
+                          setQuoteDebug(null);
+                          setLastQuoteData({ fromToken: null, toToken: null, amount: "", receiveAmount: "", quoteInputSide: "to", slippage: 0.5 });
+                        }}
+                        disabled={loading && quoteInputSide === "from"}
+                        className="w-full bg-transparent text-xl sm:text-2xl font-semibold text-right outline-none placeholder:text-muted-foreground/30 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                      />
+                      {toToken && receiveAmount && (() => {
+                        const qty = Number(receiveAmount || swapQuote?.estimatedToAmount || swapQuote?.amount || 0);
+                        const price = getEffectivePrice(toToken);
+                        const usd = qty > 0 && price > 0 ? qty * price : receiveUsdValue;
+                        return usd != null && usd > 0 ? (
+                          <div className="mt-0.5 text-xs text-muted-foreground">${formatNumber(usd)}</div>
+                        ) : null;
+                      })()}
+                    </>
                   )}
                 </div>
               </div>
@@ -2876,6 +3209,12 @@ export function SwapModal({
                 <span>Quote will update automatically…</span>
               </div>
             )}
+            {chainSelection === "solana" && !loading && !swapQuote && fromToken && toToken && drivingQuoteAmount && parseFloat(drivingQuoteAmount) > 0 && (
+              <div className="flex items-center justify-center gap-1 text-xs text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                <span>Quote will update automatically…</span>
+              </div>
+            )}
           </div>
 
           {/* Footer */}
@@ -2885,6 +3224,25 @@ export function SwapModal({
                 ? `Gasless · no SOL required for gas · ${formatBpsAsPercent(jupiterPlatformFeeBpsUi)} swap fee`
                 : `${formatBpsAsPercent(jupiterPlatformFeeBpsUi)} swap fee applies`)
               : `Gasless · no APT required for gas · ${panoraFee}% swap fee`}
+          </div>
+            </div>
+
+            {walletGateBlocked && (
+              <div className="absolute inset-0 z-[70] flex flex-col items-center justify-center gap-3 rounded-b-2xl bg-background/85 px-6 backdrop-blur-[2px]">
+                <AlertCircle className="h-10 w-10 text-muted-foreground" aria-hidden />
+                <p className="text-center text-base font-semibold">Подключите кошелек</p>
+                <p className="max-w-xs text-center text-sm text-muted-foreground">
+                  {hasAnyWallet
+                    ? chainSelection === "solana"
+                      ? "Connect a Solana wallet to swap on Solana."
+                      : "Connect an Aptos wallet to swap on Aptos."
+                    : "Connect a wallet to use Swap."}
+                </p>
+                <Button type="button" onClick={() => setWalletConnectOpen(true)}>
+                  Connect Wallet
+                </Button>
+              </div>
+            )}
           </div>
         </div>
 
@@ -2915,6 +3273,16 @@ export function SwapModal({
         </div>
         )}
         </div>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={walletConnectOpen} onOpenChange={setWalletConnectOpen}>
+      <DialogContent className={cn(WALLET_CONNECT_MODAL_DIALOG_CLASS, "z-[120]")}>
+        <CustomAptosConnectDialogContent
+          close={() => setWalletConnectOpen(false)}
+          mode="deposit"
+          dialogOpen={walletConnectOpen}
+          initialChainTabOnOpen={walletConnectInitialTab}
+        />
       </DialogContent>
     </Dialog>
     <Dialog open={isMobileViewport && chartToken != null} onOpenChange={(open) => !open && setChartToken(null)}>

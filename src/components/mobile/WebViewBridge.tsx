@@ -51,6 +51,7 @@ function getClickableElement(target: EventTarget | null) {
 
 export function WebViewBridge() {
   const sessionNonce = useRef<string | null>(null);
+  const pendingDisconnectChain = useRef<"aptos" | "solana" | "all" | null>(null);
 
   useEffect(() => {
     const w = window as WindowWithBridge;
@@ -61,10 +62,38 @@ export function WebViewBridge() {
       console.log("[Bridge] ReactNativeWebView not found — running in browser");
     }
 
+    const clearNativeWalletState = (chain: unknown) => {
+      if (chain === "all") {
+        useNativeWalletStore.getState().setDisconnected("aptos");
+        useNativeWalletStore.getState().setDisconnected("solana");
+        window.dispatchEvent(
+          new CustomEvent("yieldai:wallet-changed", {
+            detail: { chain, address: null, walletId: null },
+          }),
+        );
+        return;
+      }
+
+      if (chain === "aptos" || chain === "solana") {
+        useNativeWalletStore.getState().setDisconnected(chain);
+        window.dispatchEvent(
+          new CustomEvent("yieldai:wallet-changed", {
+            detail: { chain, address: null, walletId: null },
+          }),
+        );
+      }
+    };
+
     const postToNative = (type: string, payload?: Record<string, unknown>) => {
       if (!w.ReactNativeWebView?.postMessage) return;
       // bridge_ready is sent before nonce is known — all others require nonce
       if (type !== "bridge_ready" && !sessionNonce.current) return;
+      if (type === "disconnect_wallet") {
+        const chain = payload?.chain;
+        if (chain === "aptos" || chain === "solana" || chain === "all") {
+          pendingDisconnectChain.current = chain;
+        }
+      }
       console.log("[Bridge →RN]", type, payload ?? "");
       w.ReactNativeWebView.postMessage(
         stringifyMessage(type, sessionNonce.current, payload),
@@ -170,13 +199,25 @@ export function WebViewBridge() {
           }
         } else if (command.type === "wallet_disconnected") {
           const chain = command.payload?.chain;
-          if (chain === "aptos" || chain === "solana") {
-            useNativeWalletStore.getState().setDisconnected(chain);
-            window.dispatchEvent(
-              new CustomEvent("yieldai:wallet-changed", {
-                detail: { chain, address: null, walletId: null },
-              }),
-            );
+          clearNativeWalletState(chain);
+          if (
+            chain === pendingDisconnectChain.current ||
+            chain === "all" ||
+            pendingDisconnectChain.current === "all"
+          ) {
+            pendingDisconnectChain.current = null;
+          }
+        } else if (command.type === "wallet_error" && pendingDisconnectChain.current) {
+          const code = String(command.payload?.code ?? "");
+          const message = String(command.payload?.message ?? "");
+          const disconnectAlreadyCompleted =
+            code === "WALLET_NOT_CONNECTED" ||
+            message.includes("No active wallet selected") ||
+            message.includes("Local association cancelled");
+
+          if (disconnectAlreadyCompleted) {
+            clearNativeWalletState(pendingDisconnectChain.current);
+            pendingDisconnectChain.current = null;
           }
         }
 

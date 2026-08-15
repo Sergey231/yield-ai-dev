@@ -1,6 +1,13 @@
 "use client";
 
-import { PublicKey, Transaction, Keypair, ComputeBudgetProgram } from "@solana/web3.js";
+import {
+  PublicKey,
+  Transaction,
+  VersionedTransaction,
+  TransactionMessage,
+  Keypair,
+  ComputeBudgetProgram,
+} from "@solana/web3.js";
 import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { USDC_MINT, TOKEN_MESSENGER_MINTER_PROGRAM_ID } from "@/lib/cctp-mint-pdas";
 import { createDepositForBurnInstructionManual } from "@/lib/cctp-deposit-for-burn";
@@ -45,6 +52,9 @@ export type SolanaToAptosBridgeTmpOptions = {
 /** Wallet-mode options. Pass a bare function for the plain status-callback form. */
 export type SolanaToAptosBridgeWalletOptions = {
   onStatusUpdate: (status: string) => void;
+  /** Native/mobile flow: transaction is already partially signed by the event account;
+   * wallet signs the fee payer/owner and submits it, returning the tx signature. */
+  signAndSubmitTransaction?: (tx: Transaction | VersionedTransaction) => Promise<string>;
   /** Called after confirmation with the new burn's MessageSent event account (base58),
    *  so the caller can queue it for a later manual rent reclaim. */
   onEventAccount?: (eventAccount: string) => void;
@@ -59,7 +69,7 @@ export type SolanaToAptosBridgeWalletOptions = {
 export async function executeSolanaToAptosBridge(
   amount: string,
   solanaPublicKey: PublicKey,
-  signTransaction: (tx: Transaction) => Promise<Transaction>,
+  signTransaction: <T extends Transaction | VersionedTransaction>(tx: T) => Promise<T>,
   solanaConnection: any,
   aptosAddress: string,
   onStatusUpdateOrOptions:
@@ -192,179 +202,74 @@ export async function executeSolanaToAptosBridge(
       messageSendEventDataKeypair
     );
 
-    // Create transaction
-    // Note: Service wallet for gas payment is only used for Aptos transactions (in /api/aptos/mint-cctp)
-    // For Solana burn transaction, user pays for gas
-    const transaction = new Transaction();
-    transaction.add(
-      ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICROLAMPORTS }),
-    );
-    transaction.add(instruction);
-    transaction.feePayer = solanaPublicKey;
-
-    // Get fresh blockhash
+    // Build a v0 (versioned) transaction instead of a legacy one.
+    //
+    // Why: the burn tx needs a second signer — the ephemeral `messageSendEventData`
+    // account the CCTP program initializes. With a legacy Transaction the wallet
+    // adapter could reorder accounts, which forced the old code into fragile manual
+    // nacl signing on the recompiled message (and skipPreflight: true to dodge the
+    // resulting checks). A v0 message is immutable once compiled, so the ephemeral
+    // keypair co-signs cleanly AND Phantom can simulate the tx and attach its
+    // Lighthouse guard instructions — which is what clears the "this transaction may
+    // be malicious" warning users were seeing on the burn step.
     onStatusUpdate('Getting fresh blockhash...');
     const { blockhash, lastValidBlockHeight } = await solanaConnection.getLatestBlockhash('confirmed');
-    transaction.recentBlockhash = blockhash;
 
-    // Verify messageSendEventData is in instruction keys (more reliable than transaction.message.accountKeys)
-    const instructionKeyIndex = instruction.keys.findIndex((key: any) => 
-      key.pubkey && key.pubkey.toBase58() === eventDataKeypair.publicKey.toBase58()
-    );
-    console.log('[SolanaToAptosBridge] messageSendEventData in instruction keys:', instructionKeyIndex);
-    if (instructionKeyIndex < 0) {
-      throw new Error('messageSendEventData account not found in instruction keys');
-    }
-    
-    // Also check if it's marked as signer
-    const instructionKey = instruction.keys[instructionKeyIndex];
-    if (!instructionKey.isSigner) {
-      console.warn('[SolanaToAptosBridge] WARNING: messageSendEventData is not marked as signer in instruction!');
-    }
-    console.log('[SolanaToAptosBridge] messageSendEventData key details:', {
-      index: instructionKeyIndex,
-      pubkey: eventDataKeypair.publicKey.toBase58(),
-      isSigner: instructionKey.isSigner,
-      isWritable: instructionKey.isWritable,
-    });
+    const messageV0 = new TransactionMessage({
+      payerKey: solanaPublicKey,
+      recentBlockhash: blockhash,
+      instructions: [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_UNIT_LIMIT }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICROLAMPORTS }),
+        instruction,
+      ],
+    }).compileToV0Message();
 
-    // Sign with user's wallet FIRST
-    // Then we'll add keypair signature after wallet adapter signs
-    onStatusUpdate('Please approve the transaction in your Solana wallet...');
-    let signed = await signTransaction(transaction);
-    console.log('[SolanaToAptosBridge] Transaction signed with wallet. Signatures count:', signed.signatures.length);
-    
-    // Get account keys and find messageSendEventData index AFTER wallet signing
-    // This is important because wallet adapter may reorder accounts
-    let finalAccountKeys: PublicKey[] = [];
-    let messageSendEventDataIndex = -1;
-    
-    try {
-      const finalCompiledMessage = signed.compileMessage();
-      finalAccountKeys = finalCompiledMessage.accountKeys;
-      messageSendEventDataIndex = finalAccountKeys.findIndex((key: PublicKey) => 
-        key && key.toBase58() === eventDataKeypair.publicKey.toBase58()
-      );
-    } catch (compileError: any) {
-      console.warn('[SolanaToAptosBridge] Could not compile message after wallet signing:', compileError.message);
-      // Fallback: try to get from message directly
-      finalAccountKeys = (signed as any).message?.accountKeys || (signed as any).message?.staticAccountKeys || [];
-      messageSendEventDataIndex = finalAccountKeys.findIndex((key: PublicKey) => 
-        key && key.toBase58() === eventDataKeypair.publicKey.toBase58()
-      );
-    }
-    
-    console.log('[SolanaToAptosBridge] messageSendEventData index after wallet signing:', messageSendEventDataIndex);
-    console.log('[SolanaToAptosBridge] All account keys after wallet signing:', finalAccountKeys.map((k: PublicKey, i: number) => ({
-      index: i,
-      pubkey: k.toBase58(),
-        isSigner: (signed as any).message?.header?.numRequiredSignatures ? i < (signed as any).message.header.numRequiredSignatures : false,
-      hasSignature: !!signed.signatures[i]?.signature,
-    })));
-    
-    if (messageSendEventDataIndex < 0) {
-      throw new Error('messageSendEventData account not found in transaction accounts after wallet signing');
-    }
-    
-    // Now sign with messageSendEventData keypair AFTER wallet adapter
-    // CRITICAL: We need to sign the EXACT message bytes that will be sent to the blockchain
-    // partialSign may not work correctly if wallet adapter modified the transaction
-    // So we'll manually create the signature on the final compiled message
-    console.log('[SolanaToAptosBridge] Signing with messageSendEventData keypair AFTER wallet adapter:', eventDataKeypair.publicKey.toBase58());
-    console.log('[SolanaToAptosBridge] Keypair will be signed at index:', messageSendEventDataIndex);
-    
-    // Get the final compiled message (this is what will be sent to blockchain)
-    const finalCompiledMessage = signed.compileMessage();
-    
-    // Get the message bytes that need to be signed
-    const messageBytes = finalCompiledMessage.serialize();
-    console.log('[SolanaToAptosBridge] Message bytes length for signing:', messageBytes.length);
-    
-    // Create signature manually using tweetnacl
-    const nacl = await import('tweetnacl');
-    const keypairSignature = nacl.sign.detached(messageBytes, eventDataKeypair.secretKey);
-    console.log('[SolanaToAptosBridge] Created keypair signature manually, length:', keypairSignature.length);
-    
-    // Verify the signature is valid before adding it
-    const isValid = nacl.sign.detached.verify(messageBytes, keypairSignature, eventDataKeypair.publicKey.toBytes());
-    if (!isValid) {
-      throw new Error('Failed to create valid signature for messageSendEventData');
-    }
-    console.log('[SolanaToAptosBridge] ✅ Signature verified as valid');
-    
-    // IMPORTANT:
-    // Never replace entries in `signed.signatures` with objects missing `publicKey`.
-    // web3.js expects each entry to be { publicKey, signature }, and will crash otherwise.
-    // Instead, locate the existing signature entry for this publicKey and set its signature.
-    const sigEntryIndex = signed.signatures.findIndex((s: any) =>
-      s?.publicKey?.toBase58?.() === eventDataKeypair.publicKey.toBase58()
-    );
-    if (sigEntryIndex < 0) {
-      throw new Error('messageSendEventData signature entry not found in transaction.signatures');
-    }
+    const transaction = new VersionedTransaction(messageV0);
 
-    // Sanity check: the signature-entry index should match the signer index in the compiled message header
-    if (sigEntryIndex !== messageSendEventDataIndex) {
-      console.warn('[SolanaToAptosBridge] Signature entry index differs from accountKeys signer index:', {
-        sigEntryIndex,
-        messageSendEventDataIndex,
-      });
-    }
+    // Co-sign with the ephemeral MessageSent event account first. Its signature slot
+    // survives the wallet signing step because the v0 message can't be mutated.
+    transaction.sign([eventDataKeypair]);
 
-    signed.signatures[sigEntryIndex].signature = Buffer.from(keypairSignature);
-    
-    // Verify that keypair signature is now present
-    const addedSignature = signed.signatures[sigEntryIndex]?.signature;
-    console.log('[SolanaToAptosBridge] messageSendEventData signature verification after manual signing:', {
-      index: sigEntryIndex,
-      hasSignature: !!addedSignature,
-      signatureLength: addedSignature?.length || 0,
-      publicKey: eventDataKeypair.publicKey.toBase58(),
-    });
-    
-    if (!addedSignature) {
-      throw new Error('Failed to add messageSendEventData signature. Transaction cannot be sent.');
-    }
-    
-    // Verify transaction is valid with both signatures
-    try {
-      const finalCheck = signed.compileMessage();
-      console.log('[SolanaToAptosBridge] ✅ Transaction compiled successfully with both signatures');
-      console.log('[SolanaToAptosBridge] Final account keys count:', finalCheck.accountKeys.length);
-      console.log('[SolanaToAptosBridge] Final signatures count:', signed.signatures.length);
-      
-      // Verify all required signatures are present
-      const numRequiredSignatures = finalCheck.header.numRequiredSignatures;
-      const signaturesPresent = signed.signatures.slice(0, numRequiredSignatures).filter(sig => sig.signature).length;
-      console.log('[SolanaToAptosBridge] Required signatures:', numRequiredSignatures, 'Present:', signaturesPresent);
-      
-      if (signaturesPresent < numRequiredSignatures) {
-        throw new Error(`Missing signatures: required ${numRequiredSignatures}, present ${signaturesPresent}`);
+    if (walletOpts.signAndSubmitTransaction) {
+      onStatusUpdate('Please approve the transaction in your Solana wallet...');
+
+      const signature = await walletOpts.signAndSubmitTransaction(transaction);
+      console.log('[SolanaToAptosBridge] Native transaction submitted:', signature);
+      console.log('[SolanaToAptosBridge] View on Solscan: https://solscan.io/tx/' + signature);
+
+      onStatusUpdate('Waiting for transaction confirmation...');
+      const confirmation = await solanaConnection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+      }, 'confirmed');
+
+      if (confirmation.value.err) {
+        throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
       }
-    } catch (compileError: any) {
-      console.error('[SolanaToAptosBridge] ❌ Failed to compile transaction:', compileError.message);
-      throw new Error(`Transaction compilation failed: ${compileError.message}`);
-    }
-    
-    // Safely log signature details
-    try {
-        const accountKeys = (signed as any).message?.accountKeys || (signed as any).message?.staticAccountKeys || [];
-      console.log('[SolanaToAptosBridge] Signatures:', signed.signatures.map((sig, idx) => ({
-        index: idx,
-        publicKey: accountKeys[idx]?.toBase58() || 'unknown',
-        hasSignature: !!sig.signature,
-      })));
-    } catch (sigError: any) {
-      console.warn('[SolanaToAptosBridge] Could not log signature details:', sigError.message);
+
+      onStatusUpdate(`Burn completed! Transaction: ${signature.slice(0, 8)}...${signature.slice(-8)}`);
+      walletOpts.onEventAccount?.(messageSendEventData.toBase58());
+      return signature;
     }
 
-    // Send transaction
-    // Use skipPreflight: true to bypass simulation that may incorrectly check signatures
-    // The transaction will still be validated on-chain
+    onStatusUpdate('Please approve the transaction in your Solana wallet...');
+    const signed = (await signTransaction(transaction)) as VersionedTransaction;
+
+    // Both required signatures (fee payer + event account) must be present.
+    const requiredSigners = signed.message.header.numRequiredSignatures;
+    const presentSigs = signed.signatures.filter((s) => s.some((b) => b !== 0)).length;
+    console.log('[SolanaToAptosBridge] v0 burn tx signatures required/present:', requiredSigners, presentSigs);
+    if (presentSigs < requiredSigners) {
+      throw new Error(`Missing signatures: required ${requiredSigners}, present ${presentSigs}`);
+    }
+
+    // Preflight back ON now that the tx is well-formed: let the RPC reject a bad tx
+    // before submit instead of relying on skipPreflight like the old legacy path.
     onStatusUpdate('Sending transaction to Solana...');
     const signature = await solanaConnection.sendRawTransaction(signed.serialize(), {
-      skipPreflight: true,
+      skipPreflight: false,
       maxRetries: 3,
     });
 
@@ -384,25 +289,25 @@ export async function executeSolanaToAptosBridge(
         // Get detailed error information
         const errorDetails = JSON.stringify(confirmation.value.err, null, 2);
         console.error('[SolanaToAptosBridge] Transaction failed with error:', errorDetails);
-        
+
         // Try to get transaction details for more info
         try {
           const txDetails = await solanaConnection.getTransaction(signature, {
             commitment: 'confirmed',
             maxSupportedTransactionVersion: 0,
           });
-          
+
           if (txDetails?.meta?.err) {
             console.error('[SolanaToAptosBridge] Transaction error details:', {
               err: txDetails.meta.err,
               logMessages: txDetails.meta.logMessages?.slice(0, 10), // First 10 log messages
             });
-            
+
             // Extract error message from logs if available
-            const errorLogs = txDetails.meta.logMessages?.filter((log: string) => 
+            const errorLogs = txDetails.meta.logMessages?.filter((log: string) =>
               log.includes('Error') || log.includes('failed') || log.includes('AccountNotSigner')
             );
-            
+
             if (errorLogs && errorLogs.length > 0) {
               throw new Error(`Transaction failed: ${errorLogs.join('; ')}`);
             }
@@ -410,7 +315,7 @@ export async function executeSolanaToAptosBridge(
         } catch (txError: any) {
           console.warn('[SolanaToAptosBridge] Could not get transaction details:', txError.message);
         }
-        
+
         throw new Error(`Transaction failed: ${errorDetails}`);
       }
 
@@ -432,7 +337,7 @@ export async function executeSolanaToAptosBridge(
       } catch (statusError: any) {
         console.warn('[SolanaToAptosBridge] Could not get transaction status:', statusError.message);
       }
-      
+
       throw confirmError;
     }
 

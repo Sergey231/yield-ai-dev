@@ -7,6 +7,11 @@ import {
   executeDepositEchelonFa,
   executeSwapFaToFa,
 } from "@/lib/protocols/yield-ai/vaultExecutor";
+import { submitSwapFaToFaThala } from "@/lib/protocols/yield-ai/swapFaToFaThala";
+import {
+  submitSwapFaToFaHyperionBatch,
+} from "@/lib/protocols/yield-ai/swapFaToFaHyperionBatch";
+import { HYPERION_THAPT_USDC_LP_PATH } from "@/lib/constants/yieldAiVault";
 import { toCanonicalAddress } from "@/lib/utils/addressNormalization";
 
 function slippageBps(ctx: StrategyRunContext): number {
@@ -120,6 +125,117 @@ export async function executeAction(options: {
 
     txCount += 1;
     if (!ctx.dryRun && r.hash) txHashes.push(r.hash);
+    return { actionId: action.id, executed: true, txHashes, txCount };
+  }
+
+  if (action.type === "swapFaToFaThala") {
+    const fromAssetKey = action.params?.fromAsset;
+    const toAssetKey = action.params?.toAsset;
+    const maxImpactBps = action.params?.maxImpactBps ?? 100;
+
+    if (typeof fromAssetKey !== "string" || typeof toAssetKey !== "string") {
+      throw new Error("swapFaToFaThala missing fromAsset/toAsset");
+    }
+
+    const fromAsset = ctx.config.global.assets[fromAssetKey];
+    const toAsset = ctx.config.global.assets[toAssetKey];
+    if (!fromAsset || !toAsset) {
+      throw new Error(
+        `swapFaToFaThala unknown asset: ${fromAssetKey} -> ${toAssetKey}`
+      );
+    }
+
+    const amountIn = state.safeBalance[fromAssetKey] ?? 0n;
+    if (amountIn <= 0n) {
+      return {
+        actionId: action.id,
+        executed: false,
+        skippedReason: "amountIn<=0",
+        txHashes: [],
+        txCount: 0,
+      };
+    }
+
+    const deadline = BigInt(
+      Math.floor(Date.now() / 1000) +
+        Number(ctx.config.global.dexDefaults.deadlineSecs ?? 120)
+    );
+
+    const r = await submitSwapFaToFaThala({
+      network: ctx.config.network as "mainnet" | "testnet",
+      safe: ctx.safeAddress,
+      amountIn,
+      fromMetadata: fromAsset.metadata,
+      toMetadata: toAsset.metadata,
+      maxImpactBps,
+      slippageBps: slippageBps(ctx),
+      dryRun: ctx.dryRun,
+      deadline,
+    });
+
+    txCount = r.totalChunks;
+    if (!ctx.dryRun && r.txHashes.length > 0) {
+      txHashes.push(...r.txHashes);
+    }
+
+    return { actionId: action.id, executed: true, txHashes, txCount };
+  }
+
+  if (action.type === "swapFaToFaHyperionBatch") {
+    const fromAssetKey = action.params?.fromAsset;
+    const toAssetKey = action.params?.toAsset;
+    if (typeof fromAssetKey !== "string" || typeof toAssetKey !== "string") {
+      throw new Error("swapFaToFaHyperionBatch missing fromAsset/toAsset");
+    }
+
+    const fromAsset = ctx.config.global.assets[fromAssetKey];
+    const toAsset = ctx.config.global.assets[toAssetKey];
+    if (!fromAsset || !toAsset) {
+      throw new Error(
+        `swapFaToFaHyperionBatch unknown asset: ${fromAssetKey} -> ${toAssetKey}`
+      );
+    }
+
+    // Route is allowlisted on-chain; default to the canonical thAPT->APT->USDC path when
+    // the config omits it. `lpPath` lets a future route be wired without code changes.
+    const lpPath: string[] = Array.isArray(action.params?.lpPath)
+      ? action.params.lpPath.map((p: unknown) => String(p))
+      : [...HYPERION_THAPT_USDC_LP_PATH];
+
+    const amountIn = state.safeBalance[fromAssetKey] ?? 0n;
+    if (amountIn <= 0n) {
+      return {
+        actionId: action.id,
+        executed: false,
+        skippedReason: "amountIn<=0",
+        txHashes: [],
+        txCount: 0,
+      };
+    }
+
+    const r = await submitSwapFaToFaHyperionBatch({
+      network: ctx.config.network as "mainnet" | "testnet",
+      safe: ctx.safeAddress,
+      lpPath,
+      amountIn,
+      fromMetadata: fromAsset.metadata,
+      toMetadata: toAsset.metadata,
+      slippageBps: slippageBps(ctx),
+      dryRun: ctx.dryRun,
+    });
+
+    if (r.skipped) {
+      return {
+        actionId: action.id,
+        executed: false,
+        skippedReason: r.skippedReason ?? "skipped",
+        txHashes: [],
+        txCount: 0,
+      };
+    }
+
+    txCount += 1;
+    if (!ctx.dryRun && r.txHash) txHashes.push(r.txHash);
     return { actionId: action.id, executed: true, txHashes, txCount };
   }
 

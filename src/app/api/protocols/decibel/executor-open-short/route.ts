@@ -5,6 +5,10 @@ import { buildOpenMarketOrderPayload, type DecibelMarketConfig } from "@/lib/pro
 import { getDecibelExecutorAccount, submitExecutorEntryFunction } from "@/lib/protocols/decibel/executorSubmit";
 import { Aptos, AptosConfig, Network } from "@aptos-labs/ts-sdk";
 import { PACKAGE_MAINNET, PACKAGE_TESTNET } from "@/lib/protocols/decibel/closePosition";
+import {
+  ManageAuthError,
+  assertOwnerManageAuth,
+} from "@/lib/protocols/yield-ai/manageAuthServer";
 
 type DelegationDto = {
   delegated_account?: string;
@@ -181,6 +185,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // No Yield AI safe involved (delegated subaccount trading) — verify the
+    // wallet signature and that it matches the claimed owner.
+    const { ownerAddress: verifiedOwner } = await assertOwnerManageAuth({
+      action: "decibel_open_short",
+      // Must mirror the client exactly: same keys, order, and raw values.
+      fields: { subaccount: subaccountRaw, asset: assetRaw, sizeUsd },
+      auth: body.auth,
+    });
+    if (normalizeAddress(verifiedOwner) !== normalizeAddress(canonicalOwner)) {
+      return NextResponse.json(
+        { success: false, error: "owner does not match the signed authorization" },
+        { status: 403 }
+      );
+    }
+
     const { min, max } = getSizeLimits();
     if (!Number.isFinite(sizeUsd) || sizeUsd < min || sizeUsd > max) {
       return NextResponse.json(
@@ -335,7 +354,7 @@ export async function POST(request: NextRequest) {
     console.error("[Decibel] executor-open-short error:", error);
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : "Unknown error" },
-      { status: 500 }
+      { status: error instanceof ManageAuthError ? error.status : 500 }
     );
   }
 }

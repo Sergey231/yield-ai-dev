@@ -130,6 +130,9 @@ export async function computeStateForSafe(ctx: StrategyRunContext): Promise<{
   if (!echelonProtocol) {
     throw new Error("Missing required protocol in config: echelon");
   }
+  if (!echelonProtocol.adapterAddressView) {
+    throw new Error("Missing required config: protocols.echelon.adapterAddressView");
+  }
 
   const echelonView = echelonProtocol.adapterAddressView.includes("::")
     ? `${globalPkg}::${echelonProtocol.adapterAddressView}`

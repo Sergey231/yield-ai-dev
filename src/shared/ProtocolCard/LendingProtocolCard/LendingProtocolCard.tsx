@@ -45,10 +45,17 @@ export interface LendingProtocolCardRow {
   /** Borrow collateral leg (shown in Supplies with a Collateral badge). */
   isCollateral?: boolean;
   positionType: LendingPositionType;
+  /** External manage link shown instead of Deposit/Withdraw (e.g. Exponent app). */
+  manageLink?: {
+    href: string;
+    label?: string;
+  };
 }
 
 export interface LendingProtocolCardSection<Row extends LendingProtocolCardRow> {
   id: "supply" | "borrow";
+  /** Unique key when multiple sections share the same `id` (e.g. Positions + Strategy). */
+  sectionKey?: string;
   title: string;
   /** Compact heading on narrow viewports (e.g. «Your Supplies» → «Supplies»). */
   titleShort?: string;
@@ -102,7 +109,8 @@ export function LendingProtocolCard<Row extends LendingProtocolCardRow>({
   const [openSections, setOpenSections] = useState<Record<string, boolean>>(() => {
     const initial: Record<string, boolean> = {};
     for (const s of sections) {
-      initial[s.id] = s.defaultOpen ?? true;
+      const key = s.sectionKey ?? s.id;
+      initial[key] = s.defaultOpen ?? true;
     }
     return initial;
   });
@@ -201,18 +209,20 @@ export function LendingProtocolCard<Row extends LendingProtocolCardRow>({
         ) : null}
 
         {sectionsMemo.map((s) => {
-          const expanded = openSections[s.id] ?? true;
+          const sectionKey = s.sectionKey ?? s.id;
+          const expanded = openSections[sectionKey] ?? true;
           const isCollapsed = !expanded;
           const isEmpty = s.rows.length === 0;
           return (
-            <div key={s.id} className={styles.section}>
+            <div key={sectionKey} className={styles.section}>
               <div
                 className={styles.sectionHeader}
-                onClick={() => setOpenSections((prev) => ({ ...prev, [s.id]: !expanded }))}
+                onClick={() => setOpenSections((prev) => ({ ...prev, [sectionKey]: !expanded }))}
                 role="button"
                 tabIndex={0}
                 onKeyDown={(e) =>
-                  e.key === "Enter" && setOpenSections((prev) => ({ ...prev, [s.id]: !expanded }))
+                  e.key === "Enter" &&
+                  setOpenSections((prev) => ({ ...prev, [sectionKey]: !expanded }))
                 }
               >
                 <div className={styles.sectionHeaderMain}>
@@ -263,8 +273,11 @@ export function LendingProtocolCard<Row extends LendingProtocolCardRow>({
 
                       {s.rows.map((row) => {
                         const aprText = row.aprLabel ?? null;
+                        const showManageLink = Boolean(row.manageLink?.href);
                         const showActionsForRow =
-                          s.id === "supply" && showSupplyActions && !row.isCollateral;
+                          s.id === "supply" &&
+                          !row.isCollateral &&
+                          (showSupplyActions || showManageLink);
                         const renderApr = () =>
                           aprText ? (
                             <Badge variant="success" className={styles.aprPill}>
@@ -324,21 +337,35 @@ export function LendingProtocolCard<Row extends LendingProtocolCardRow>({
                               <div className={styles.colActions}>
                                 {showActionsForRow && (
                                   <div className={styles.actionsCell}>
-                                    {onDeposit ? (
-                                      <Button size="sm" onClick={() => onDeposit(row as Row)}>
-                                        Deposit
+                                    {showManageLink ? (
+                                      <Button size="sm" variant="outline" asChild>
+                                        <a
+                                          href={row.manageLink!.href}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                        >
+                                          {row.manageLink!.label ?? "Manage"}
+                                        </a>
                                       </Button>
-                                    ) : null}
-                                    {onWithdraw ? (
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() => onWithdraw(row as Row)}
-                                        disabled={withdrawDisabled}
-                                      >
-                                        Withdraw
-                                      </Button>
-                                    ) : null}
+                                    ) : (
+                                      <>
+                                        {onDeposit ? (
+                                          <Button size="sm" onClick={() => onDeposit(row as Row)}>
+                                            Deposit
+                                          </Button>
+                                        ) : null}
+                                        {onWithdraw ? (
+                                          <Button
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={() => onWithdraw(row as Row)}
+                                            disabled={withdrawDisabled}
+                                          >
+                                            Withdraw
+                                          </Button>
+                                        ) : null}
+                                      </>
+                                    )}
                                   </div>
                                 )}
                               </div>

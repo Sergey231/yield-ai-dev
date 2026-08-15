@@ -25,6 +25,12 @@ const CLOSURE_NOTICES: Partial<Record<ProtocolKey, ClosureNotice>> = {
       "If you currently have funds on the platform, please withdraw your assets as soon as possible.",
     url: "https://x.com/AuroFinance_/status/2034253492068766028",
   },
+  aries: {
+    title: "Aries Markets is winding down (maintenance-only)",
+    description:
+      "Aries is in maintenance-only mode. Please withdraw your assets as soon as possible. Pyth plans to discontinue support in July, after which safe operation may no longer be guaranteed.",
+    url: "https://discord.com/channels/1000012426479153172/1000012426923757631/1522112702544085064",
+  },
   moar: {
     title: "Moar Market is winding down (reduce-only)",
     description:

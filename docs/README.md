@@ -2,6 +2,7 @@
 
 Other docs in this folder:
 
+- [Public Wallet API](./public-wallet-api.md) — external HTTP API for wallet balances and DeFi positions (Aptos + Solana).
 - [Kamino integration](./kamino-integration.md) — Solana Kamino (API routes, positions, unsigned tx flow).
 - [Jupiter Lend and Swap (Solana)](./jupiter-lend-and-swap.md) — Earn positions, borrow reads, Lite/API deposit-withdraw, Jupiter Swap (gasless vs user gas).
 

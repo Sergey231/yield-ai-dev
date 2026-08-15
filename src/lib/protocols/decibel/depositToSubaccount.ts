@@ -9,14 +9,18 @@ export interface DepositToSubaccountParams {
   isTestnet?: boolean;
 }
 
-export function buildDepositToSubaccountPayload(
-  params: DepositToSubaccountParams
+export interface DepositAssetToSubaccountParams extends DepositToSubaccountParams {
+  assetMetadataAddr: string;
+}
+
+export function buildDepositAssetToSubaccountPayload(
+  params: DepositAssetToSubaccountParams
 ): {
   function: string;
   typeArguments: string[];
   functionArguments: unknown[];
 } {
-  const { subaccountAddr, amountBaseUnits, isTestnet = false } = params;
+  const { subaccountAddr, assetMetadataAddr, amountBaseUnits, isTestnet = false } = params;
   const pkg = isTestnet ? PACKAGE_TESTNET : PACKAGE_MAINNET;
 
   return {
@@ -24,8 +28,21 @@ export function buildDepositToSubaccountPayload(
     typeArguments: [],
     functionArguments: [
       subaccountAddr,
-      DECIBEL_MAINNET_USDC_METADATA,
+      assetMetadataAddr,
       amountBaseUnits.toString(),
     ],
   };
+}
+
+export function buildDepositToSubaccountPayload(
+  params: DepositToSubaccountParams
+): {
+  function: string;
+  typeArguments: string[];
+  functionArguments: unknown[];
+} {
+  return buildDepositAssetToSubaccountPayload({
+    ...params,
+    assetMetadataAddr: DECIBEL_MAINNET_USDC_METADATA,
+  });
 }

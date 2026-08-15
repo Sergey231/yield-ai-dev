@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 import Image from 'next/image';
 import { useWalletData } from '@/contexts/WalletContext';
 import { useYieldAiSafes } from '@/lib/query/hooks/protocols/yield-ai';
@@ -21,6 +21,8 @@ import { useProtocol } from '@/lib/contexts/ProtocolContext';
 import { useMobileManagement } from '@/contexts/MobileManagementContext';
 import { dispatchSelectYieldAiSafe } from '@/lib/query/hooks/protocols/yield-ai/useSelectedYieldAiSafe';
 import { useCardTokenDrop } from '@/hooks/useCardTokenDrop';
+import { fetchFundingApr, type FundingAprResult } from '@/lib/protocols/decibel/fundingApr';
+import { WalletConnectDialog } from '@/components/ui/wallet-connect-dialog';
 
 export interface DecibelAiAgentWalletBlockProps {
   className?: string;
@@ -38,10 +40,40 @@ export function DecibelAiAgentWalletBlock({ className }: DecibelAiAgentWalletBlo
   const aiAgentProtocol = getProtocolByName('AI agent');
   const [logoError, setLogoError] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [walletDialogOpen, setWalletDialogOpen] = useState(false);
   const [depositOpen, setDepositOpen] = useState(false);
   const [selectedSafeAddress, setSelectedSafeAddress] = useState<string | null>(null);
   const { setSelectedProtocol } = useProtocol();
   const { setActiveTab, scrollToTop } = useMobileManagement();
+
+  // Headline APR for the card = Decibel perp funding yield. Prefer BTC; fall
+  // back to APT. Only surfaced when the funding rate is positive (the agent
+  // farms positive funding), mirroring the "Total APR" block on the other cards.
+  const [btcFunding, setBtcFunding] = useState<FundingAprResult | null>(null);
+  const [aptFunding, setAptFunding] = useState<FundingAprResult | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetchFundingApr('BTC/USD').then((d) => {
+      if (!cancelled) setBtcFunding(d);
+    });
+    fetchFundingApr('APT/USD').then((d) => {
+      if (!cancelled) setAptFunding(d);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const fundingApr = useMemo(() => {
+    const btc = btcFunding?.avg_yearly_apr_pct;
+    if (typeof btc === 'number' && Number.isFinite(btc) && btc > 0) {
+      return { market: 'BTC', apr: btc };
+    }
+    const apt = aptFunding?.avg_yearly_apr_pct;
+    if (typeof apt === 'number' && Number.isFinite(apt) && apt > 0) {
+      return { market: 'APT', apr: apt };
+    }
+    return null;
+  }, [btcFunding, aptFunding]);
 
   const { data: safeAddresses = [], isLoading: safesLoading } = useYieldAiSafes(address, {
     enabled: Boolean(address),
@@ -121,6 +153,21 @@ export function DecibelAiAgentWalletBlock({ className }: DecibelAiAgentWalletBlo
     }
   };
 
+  const isCardClickable = hasDecibelSafe && !isCheckingSafes;
+
+  const handleCardClick = () => {
+    if (!isCardClickable) return;
+    handleManagePosition();
+  };
+
+  const handleCardKeyDown = (e: KeyboardEvent) => {
+    if (!isCardClickable) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      handleManagePosition();
+    }
+  };
+
   const walletUsdcPriceUsd = useMemo(() => {
     const usdc = tokens?.find(
       (t) =>
@@ -134,117 +181,145 @@ export function DecibelAiAgentWalletBlock({ className }: DecibelAiAgentWalletBlo
     <>
       <Card
         {...dragHandlers}
+        role={isCardClickable ? 'button' : undefined}
+        tabIndex={isCardClickable ? 0 : undefined}
+        aria-label={isCardClickable ? 'Manage Decibel Agent' : undefined}
+        onClick={isCardClickable ? handleCardClick : undefined}
+        onKeyDown={isCardClickable ? handleCardKeyDown : undefined}
         className={cn(
           // Explicit emerald hue: app's `--success` token is greyscale.
-          'h-full min-w-0 overflow-hidden border border-primary/20 hover:shadow-md transition-all',
+          'h-full min-w-0 overflow-hidden border border-primary/20 transition-all',
+          isCardClickable
+            ? 'cursor-pointer hover:border-primary/40 hover:bg-muted/20 hover:shadow-md active:scale-[0.995]'
+            : 'hover:shadow-md',
           isDraggingAccepted && 'border-2 border-emerald-500 bg-emerald-500/15 ring-2 ring-emerald-500/40',
           isOver && 'border-2 border-emerald-500 bg-emerald-500/30 ring-4 ring-emerald-500',
           className
         )}
       >
-        <CardContent className="p-4 sm:p-6 flex flex-col h-full">
-          <div className="flex flex-col items-stretch gap-4 flex-1 xl:flex-row xl:items-center xl:justify-between">
-            <div className="flex items-start gap-3 min-w-0 w-full xl:items-center">
-              <div className="p-2 bg-primary/10 rounded-full shrink-0">
-                <div className="w-5 h-5 relative">
-                  {!logoError && protocol?.logoUrl ? (
-                    <Image
-                      src={protocol.logoUrl}
-                      alt={protocol.name ?? 'Decibel'}
-                      width={20}
-                      height={20}
-                      className="object-contain"
-                      onError={() => setLogoError(true)}
-                      unoptimized
-                    />
-                  ) : (
-                    <div className="w-5 h-5 flex items-center justify-center text-[10px] font-semibold text-primary">
-                      D
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div className="min-w-0 flex-1">
-                <h3 className="text-lg font-semibold text-primary truncate">Decibel AI agent</h3>
-                <div className="mt-1 flex min-w-0 flex-col items-start gap-2 sm:flex-row sm:items-center sm:gap-1.5">
-                  {subtitle ? (
-                    <p className="max-w-full text-sm text-muted-foreground truncate">{subtitle}</p>
-                  ) : null}
-                  {hasDecibelSafe && decibelSafeAddresses.length > 1 ? (
-                    <Select value={selectedSafe ?? ''} onValueChange={setSelectedSafeAddress}>
-                      <SelectTrigger className="h-8 w-full max-w-full sm:h-7 sm:w-[190px] sm:ml-2">
-                        <SelectValue placeholder="Select safe" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {decibelSafeAddresses.map((safe) => (
-                          <SelectItem key={safe} value={safe}>
-                            {safe.slice(0, 6)}...{safe.slice(-4)}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  ) : null}
-                  {hasDecibelSafe ? (
-                    <Badge variant="secondary" className="max-w-full whitespace-normal text-left leading-tight sm:ml-2 sm:whitespace-nowrap">
-                      Decibel delta-neutral
-                    </Badge>
-                  ) : null}
-                  {/* Highlight what the safe is earning under the hood. */}
-                  <Badge
-                    variant="secondary"
-                    className="max-w-full whitespace-nowrap border-emerald-500/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 leading-tight"
-                  >
-                    Farm funding and AMPs
-                  </Badge>
-                  {/* Copy-address affordance removed from the main page card. */}
-                </div>
+        <CardContent className="p-4 sm:p-5 flex flex-col h-full gap-3">
+          {/* Header: icon + title + strategy badges (own row → no truncation). */}
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="p-2 bg-primary/10 rounded-full shrink-0">
+              <div className="w-5 h-5 relative">
+                {!logoError && protocol?.logoUrl ? (
+                  <Image
+                    src={protocol.logoUrl}
+                    alt={protocol.name ?? 'Decibel'}
+                    width={20}
+                    height={20}
+                    className="object-contain"
+                    onError={() => setLogoError(true)}
+                    unoptimized
+                  />
+                ) : (
+                  <div className="w-5 h-5 flex items-center justify-center text-[10px] font-semibold text-primary">
+                    D
+                  </div>
+                )}
               </div>
             </div>
+            <div className="min-w-0 flex-1">
+              <h3 className="text-base font-semibold text-primary leading-tight">Decibel Agent</h3>
+              <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
+                {subtitle ? (
+                  <p className="w-full text-sm text-muted-foreground">{subtitle}</p>
+                ) : null}
+                {fundingApr ? (
+                  <div className="flex shrink-0 items-baseline gap-1 leading-none">
+                    <span className="text-xl font-bold tabular-nums text-foreground">
+                      {fundingApr.apr.toFixed(2)}%
+                    </span>
+                    <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Funding APR · {fundingApr.market}
+                    </span>
+                  </div>
+                ) : null}
+                {hasDecibelSafe && decibelSafeAddresses.length > 1 ? (
+                  <Select value={selectedSafe ?? ''} onValueChange={setSelectedSafeAddress}>
+                    <SelectTrigger
+                      className="h-7 w-full max-w-[190px]"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <SelectValue placeholder="Select safe" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {decibelSafeAddresses.map((safe) => (
+                        <SelectItem key={safe} value={safe}>
+                          {safe.slice(0, 6)}...{safe.slice(-4)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : null}
+                {hasDecibelSafe ? (
+                  <Badge variant="secondary" className="whitespace-nowrap leading-tight">
+                    Delta neutral
+                  </Badge>
+                ) : null}
+                {/* Highlight what the safe is earning under the hood. */}
+                <Badge
+                  variant="secondary"
+                  className="whitespace-nowrap border-emerald-500/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 leading-tight"
+                >
+                  Farm funding and AMPs
+                </Badge>
+              </div>
+            </div>
+          </div>
 
-            <div className="shrink-0 flex w-full items-center gap-2 xl:w-auto">
-              {isCheckingSafes ? (
-                <Button size="sm" variant="outline" disabled className="w-full xl:w-auto">
-                  Checking...
-                </Button>
-              ) : !hasDecibelSafe ? (
+          {/* Footer actions, pinned to the bottom so cards align in the row. */}
+          <div
+            className="mt-auto flex items-center justify-end gap-2 pt-1"
+            onClick={isCardClickable ? (e) => e.stopPropagation() : undefined}
+          >
+            {isCheckingSafes ? (
+              <Button size="sm" variant="outline" disabled className="w-full">
+                Checking...
+              </Button>
+            ) : !hasDecibelSafe ? (
+              <Button
+                size="sm"
+                onClick={() => {
+                  if (!address) {
+                    setWalletDialogOpen(true);
+                    return;
+                  }
+                  setSettingsOpen(true);
+                }}
+                className="w-full bg-black text-white hover:bg-black/90"
+              >
+                Create Decibel Agent
+              </Button>
+            ) : (
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-9 w-9 shrink-0 p-0"
+                      onClick={handleManagePosition}
+                      disabled={!address || !selectedSafe}
+                      aria-label="Manage Position"
+                    >
+                      <LineChart className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p>Manage Position</p>
+                  </TooltipContent>
+                </Tooltip>
                 <Button
                   size="sm"
-                  onClick={() => setSettingsOpen(true)}
-                  disabled={!address}
-                  className="w-full bg-black text-white hover:bg-black/90 xl:w-auto"
+                  className="flex-1 bg-success text-success-foreground hover:bg-success/90"
+                  onClick={() => setDepositOpen(true)}
+                  disabled={!address || !selectedSafe}
                 >
-                  Create Decibel AI agent
+                  Deposit
                 </Button>
-              ) : (
-                <>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-9 w-9 shrink-0 p-0 sm:h-9 sm:w-9"
-                        onClick={handleManagePosition}
-                        disabled={!address || !selectedSafe}
-                        aria-label="Manage Position"
-                      >
-                        <LineChart className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Manage Position</p>
-                    </TooltipContent>
-                  </Tooltip>
-                  <Button
-                    size="sm"
-                    className="flex-1 bg-success text-success-foreground hover:bg-success/90 xl:flex-none xl:w-auto"
-                    onClick={() => setDepositOpen(true)}
-                    disabled={!address || !selectedSafe}
-                  >
-                    Deposit
-                  </Button>
-                </>
-              )}
-            </div>
+              </>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -254,6 +329,8 @@ export function DecibelAiAgentWalletBlock({ className }: DecibelAiAgentWalletBlo
         onOpenChange={setSettingsOpen}
         existingDecibelSafe={selectedSafe}
       />
+
+      <WalletConnectDialog open={walletDialogOpen} onOpenChange={setWalletDialogOpen} />
 
       <DepositModal
         isOpen={depositOpen}
@@ -282,6 +359,8 @@ export function DecibelAiAgentWalletBlock({ className }: DecibelAiAgentWalletBlo
         yieldAiSafeAddress={selectedSafe ?? undefined}
         secondaryLogoUrl={protocol?.logoUrl}
         secondaryLogoAlt="Decibel"
+        yieldAiSuccessDescription=""
+        onDepositSuccess={handleManagePosition}
       />
     </>
   );

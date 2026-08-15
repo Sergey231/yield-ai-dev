@@ -90,6 +90,68 @@ function parseTokenAmount(rawAmount: string, decimals: number): number {
   return amount / Math.pow(10, decimals);
 }
 
+async function getPositionFeesAvailable(
+  positionAddress: string
+): Promise<{ raw0: string; raw1: string }> {
+  if (!positionAddress) return { raw0: '0', raw1: '0' };
+
+  try {
+    const result = await callView(`${THALA_POOL_ADDRESS}::pool::fees_available`, [positionAddress]);
+    const values = unwrapArray(result);
+    return {
+      raw0: String(values?.[0] ?? '0'),
+      raw1: String(values?.[1] ?? '0')
+    };
+  } catch (error) {
+    console.warn('[Thala] fees_available failed', { positionAddress }, error);
+    return { raw0: '0', raw1: '0' };
+  }
+}
+
+function buildPositionFees(params: {
+  rawFee0: string;
+  rawFee1: string;
+  token0Decimals: number;
+  token1Decimals: number;
+  token0Price: number;
+  token1Price: number;
+  token0Symbol: string;
+  token1Symbol: string;
+}) {
+  const {
+    rawFee0,
+    rawFee1,
+    token0Decimals,
+    token1Decimals,
+    token0Price,
+    token1Price,
+    token0Symbol,
+    token1Symbol
+  } = params;
+
+  const fee0Amount = parseTokenAmount(rawFee0, token0Decimals);
+  const fee1Amount = parseTokenAmount(rawFee1, token1Decimals);
+  const fee0ValueUSD = fee0Amount * token0Price;
+  const fee1ValueUSD = fee1Amount * token1Price;
+  const feesValueUSD = fee0ValueUSD + fee1ValueUSD;
+
+  return {
+    token0: {
+      symbol: token0Symbol,
+      amountRaw: rawFee0,
+      amount: fee0Amount,
+      valueUSD: fee0ValueUSD
+    },
+    token1: {
+      symbol: token1Symbol,
+      amountRaw: rawFee1,
+      amount: fee1Amount,
+      valueUSD: fee1ValueUSD
+    },
+    feesValueUSD
+  };
+}
+
 async function getNonStakedThalaPositionAddresses(ownerAddress: string): Promise<string[]> {
   if (!ownerAddress) return [];
 
@@ -531,6 +593,23 @@ export async function GET(request: NextRequest) {
       const token1Value = token1Amount * token1Price;
       const positionValueUSD = token0Value + token1Value;
 
+      const token0Symbol = token0Info?.symbol || poolInfo?.tokenASymbol || 'Unknown';
+      const token1Symbol = token1Info?.symbol || poolInfo?.tokenBSymbol || 'Unknown';
+
+      const { raw0: rawFee0, raw1: rawFee1 } = positionObjectAddress
+        ? await getPositionFeesAvailable(positionObjectAddress)
+        : { raw0: '0', raw1: '0' };
+      const fees = buildPositionFees({
+        rawFee0,
+        rawFee1,
+        token0Decimals,
+        token1Decimals,
+        token0Price,
+        token1Price,
+        token0Symbol,
+        token1Symbol
+      });
+
       const rewards = [];
       let rewardsValueUSD = 0;
 
@@ -599,7 +678,7 @@ export async function GET(request: NextRequest) {
         poolAddress: poolObjInner,
         token0: {
           address: token0Address,
-          symbol: token0Info?.symbol || poolInfo?.tokenASymbol || 'Unknown',
+          symbol: token0Symbol,
           name: token0Info?.name || poolInfo?.tokenASymbol || 'Unknown',
           decimals: token0Decimals,
           logoUrl: token0Info?.logoUrl || null,
@@ -610,7 +689,7 @@ export async function GET(request: NextRequest) {
         },
         token1: {
           address: token1Address,
-          symbol: token1Info?.symbol || poolInfo?.tokenBSymbol || 'Unknown',
+          symbol: token1Symbol,
           name: token1Info?.name || poolInfo?.tokenBSymbol || 'Unknown',
           decimals: token1Decimals,
           logoUrl: token1Info?.logoUrl || null,
@@ -620,10 +699,12 @@ export async function GET(request: NextRequest) {
           valueUSD: token1Value
         },
         inRange: token0Amount > 0 && token1Amount > 0,
+        fees,
+        feesValueUSD: fees.feesValueUSD,
         rewards,
         positionValueUSD,
         rewardsValueUSD,
-        totalValueUSD: positionValueUSD + rewardsValueUSD,
+        totalValueUSD: positionValueUSD + fees.feesValueUSD + rewardsValueUSD,
         rawPosition: position
       });
     }
@@ -746,6 +827,21 @@ export async function GET(request: NextRequest) {
         const token1Value = token1Amount * token1Price;
         const positionValueUSD = token0Value + token1Value;
 
+        const token0Symbol = token0Info?.symbol || poolInfo?.tokenASymbol || 'Unknown';
+        const token1Symbol = token1Info?.symbol || poolInfo?.tokenBSymbol || 'Unknown';
+
+        const { raw0: rawFee0, raw1: rawFee1 } = await getPositionFeesAvailable(positionAddress);
+        const fees = buildPositionFees({
+          rawFee0,
+          rawFee1,
+          token0Decimals,
+          token1Decimals,
+          token0Price,
+          token1Price,
+          token0Symbol,
+          token1Symbol
+        });
+
         formattedPositions.push({
           positionId: String(positionInfo?.position_id || ''),
           positionAddress,
@@ -754,7 +850,7 @@ export async function GET(request: NextRequest) {
           poolAddress: poolObjInner,
           token0: {
             address: token0Address,
-            symbol: token0Info?.symbol || poolInfo?.tokenASymbol || 'Unknown',
+            symbol: token0Symbol,
             name: token0Info?.name || poolInfo?.tokenASymbol || 'Unknown',
             decimals: token0Decimals,
             logoUrl: token0Info?.logoUrl || null,
@@ -765,7 +861,7 @@ export async function GET(request: NextRequest) {
           },
           token1: {
             address: token1Address,
-            symbol: token1Info?.symbol || poolInfo?.tokenBSymbol || 'Unknown',
+            symbol: token1Symbol,
             name: token1Info?.name || poolInfo?.tokenBSymbol || 'Unknown',
             decimals: token1Decimals,
             logoUrl: token1Info?.logoUrl || null,
@@ -775,10 +871,12 @@ export async function GET(request: NextRequest) {
             valueUSD: token1Value
           },
           inRange: token0Amount > 0 && token1Amount > 0,
+          fees,
+          feesValueUSD: fees.feesValueUSD,
           rewards: [],
           positionValueUSD,
           rewardsValueUSD: 0,
-          totalValueUSD: positionValueUSD,
+          totalValueUSD: positionValueUSD + fees.feesValueUSD,
           rawPosition: positionInfo
         });
       } catch (e) {

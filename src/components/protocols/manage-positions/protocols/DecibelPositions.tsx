@@ -16,7 +16,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Info, Target } from 'lucide-react';
+import { Download, Info, Target, Upload } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { ToastAction } from '@/components/ui/toast';
 import { formatNumber, formatCurrency } from '@/lib/utils/numberFormat';
@@ -58,6 +58,7 @@ import {
 } from '@/components/ui/select';
 import { useProtocol } from '@/lib/contexts/ProtocolContext';
 import { useMobileManagement } from '@/contexts/MobileManagementContext';
+import { useEffectiveWalletAddresses } from '@/lib/hooks/useEffectiveWalletAddresses';
 import { getProtocolByName } from '@/lib/protocols/getProtocolsList';
 import { dispatchSelectYieldAiSafe } from '@/lib/query/hooks/protocols/yield-ai/useSelectedYieldAiSafe';
 import {
@@ -65,7 +66,27 @@ import {
   type DecibelReferralCode,
 } from '@/lib/query/hooks/protocols/decibel/useDecibelReferralDashboard';
 import { useDecibelSubaccounts } from '@/lib/query/hooks/protocols/decibel/useDecibelSubaccounts';
+import { useDecibelUserPositions } from '@/lib/query/hooks/protocols/decibel/useDecibelUserPositions';
+import {
+  useDecibelAccountOverview,
+  useDecibelAmps,
+  useDecibelMarkets,
+  useDecibelOpenOrders,
+  useDecibelPredepositorBalance,
+  useDecibelPrices,
+  useDecibelVaultPerformance,
+} from '@/lib/query/hooks/protocols/decibel/useDecibelPortfolioData';
+import {
+  useEchelonPositions,
+  type EchelonPosition,
+} from '@/lib/query/hooks/protocols/echelon/useEchelonPositions';
 import { DecibelWithdrawModal } from '@/components/ui/decibel-withdraw-modal';
+import { DecibelVaultShareDepositModal } from '@/components/ui/decibel-vault-share-deposit-modal';
+import { DecibelVaultShareWithdrawModal } from '@/components/ui/decibel-vault-share-withdraw-modal';
+import { DecibelMarketIcon } from '@/components/decibel/DecibelMarketIcon';
+import { useDecibelMarketLogosMap } from '@/hooks/useDecibelMarketLogosMap';
+import { MARKET_LOGOS } from '@/lib/protocols/decibel/marketIcon';
+import { marketNameForFundingApi } from '@/lib/protocols/decibel/fundingApr';
 
 /** Decibel API position shape (snake_case from API) */
 export interface DecibelPosition {
@@ -86,10 +107,25 @@ export interface DecibelPosition {
 
 /** Decibel vault performance item (from account_vault_performance API, enriched with apr) */
 export interface DecibelVaultItem {
-  vault?: { name?: string };
+  vault?: {
+    name?: string;
+    address?: string;
+    share_asset_metadata?: string;
+    share_symbol?: string;
+    wallet_share_balance?: number | string;
+  };
+  account_address?: string;
+  current_num_shares?: number | string;
   current_value_of_shares?: number;
+  total_deposited?: number;
+  total_withdrawn?: number;
   /** Current unrealized vault PnL from Decibel account_vault_performance. */
   unrealized_pnl?: number;
+  share_price?: number;
+  locked_amount?: number;
+  share_asset_metadata?: string;
+  share_symbol?: string;
+  wallet_share_balance?: number | string;
   /** APR in % (e.g. 2.98 = 2.98%), from API; display as-is, do not multiply by 100 */
   apr?: number;
 }
@@ -102,11 +138,6 @@ type DecibelAmpsData = {
   vault_amps?: number;
   streak_amps?: number;
   bonus_amps?: number;
-};
-
-type DecibelSubaccount = {
-  subaccount_address?: string;
-  custom_label?: string | null;
 };
 
 type YieldAiSafesResponse = {
@@ -148,15 +179,6 @@ export interface DecibelOpenOrder {
   reduce_only?: boolean;
   is_reduce_only?: boolean;
   order_id?: string;
-}
-
-/** Normalize API response to array of orders (data may be array or { items, total_count }) */
-function normalizeOpenOrdersResponse(data: unknown): DecibelOpenOrder[] {
-  if (Array.isArray(data)) return data as DecibelOpenOrder[];
-  if (data && typeof data === 'object' && 'items' in data && Array.isArray((data as { items: unknown }).items)) {
-    return (data as { items: DecibelOpenOrder[] }).items;
-  }
-  return [];
 }
 
 /** Find reduce-only order for this position (same market) */
@@ -221,11 +243,23 @@ function canAdjustLimitPricePct(current: string, markPx: number | null): boolean
   return markPx != null && markPx > 0;
 }
 
-/** Decibel returns funding in bps; convert to percent for UI. */
-function formatFundingRatePercent(fundingRateBps: number): string {
-  const percent = fundingRateBps / 100;
+const FUNDING_APR_PCT_PER_BPS_PER_HOUR = (24 * 365) / 100;
+
+function signedFundingBps(info: { fundingRateBps: number; isFundingPositive: boolean }): number {
+  return info.isFundingPositive ? info.fundingRateBps : -info.fundingRateBps;
+}
+
+/** Decibel returns funding in bps per funding period; convert to signed percent for UI. */
+function formatFundingRatePercent(info: { fundingRateBps: number; isFundingPositive: boolean }): string {
+  const percent = signedFundingBps(info) / 100;
   const sign = percent > 0 ? '+' : percent < 0 ? '-' : '';
   return `${sign}${formatNumber(Math.abs(percent), 6)}%`;
+}
+
+function formatFundingAprPercent(info: { fundingRateBps: number; isFundingPositive: boolean }): string {
+  const apr = signedFundingBps(info) * FUNDING_APR_PCT_PER_BPS_PER_HOUR;
+  const sign = apr > 0 ? '+' : apr < 0 ? '-' : '';
+  return `${sign}${formatNumber(Math.abs(apr), 2)}% APR`;
 }
 
 function formatUsageLimit(value: number | string | undefined): string {
@@ -265,6 +299,98 @@ function formatDecibelMarket(marketName: string): { base: string; quote: string;
   return { base, quote, displayPair: quote ? `${base}-${quote}` : base };
 }
 
+function getVaultName(vault: DecibelVaultItem): string {
+  return vault.vault?.name ?? 'Vault';
+}
+
+function getVaultShareMetadata(vault: DecibelVaultItem): string {
+  return vault.share_asset_metadata ?? vault.vault?.share_asset_metadata ?? '';
+}
+
+function getVaultShareSymbol(vault: DecibelVaultItem): string {
+  const symbol = vault.share_symbol ?? vault.vault?.share_symbol;
+  if (symbol) return symbol;
+  return getVaultName(vault).toLowerCase().includes('decibel protocol vault') ? 'DPV' : 'shares';
+}
+
+function getVaultSubaccount(vault: DecibelVaultItem): string {
+  return vault.account_address ?? '';
+}
+
+function getVaultShareBalanceBaseUnits(vault: DecibelVaultItem): string {
+  const raw = vault.current_num_shares;
+  if (typeof raw === 'string' && /^\d+$/.test(raw.trim())) return raw.trim();
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return Math.floor(raw).toString();
+  return '0';
+}
+
+function getVaultWalletShareBalanceBaseUnits(vault: DecibelVaultItem): string {
+  const raw = vault.wallet_share_balance ?? vault.vault?.wallet_share_balance;
+  if (typeof raw === 'string' && /^\d+$/.test(raw.trim())) return raw.trim();
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return Math.floor(raw).toString();
+  return '0';
+}
+
+function toPositiveBaseUnits(value: unknown): bigint {
+  if (typeof value === 'bigint') return value > 0n ? value : 0n;
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? BigInt(Math.floor(value)) : 0n;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return /^\d+$/.test(trimmed) ? BigInt(trimmed) : 0n;
+  }
+  return 0n;
+}
+
+function getVaultEchelonShareBalanceBaseUnits(
+  vault: DecibelVaultItem,
+  echelonPositions: EchelonPosition[]
+): string {
+  const shareMetadata = getVaultShareMetadata(vault);
+  if (!shareMetadata) return '0';
+  const normalizedShareMetadata = normalizeAddress(shareMetadata);
+  let total = 0n;
+
+  for (const position of echelonPositions) {
+    if (position.type && position.type !== 'supply') continue;
+    if (normalizeAddress(position.coin) !== normalizedShareMetadata) continue;
+    total += toPositiveBaseUnits(position.amount ?? position.supply);
+  }
+
+  return total.toString();
+}
+
+function hasVaultWalletShareBalance(vault: DecibelVaultItem): boolean {
+  return vault.wallet_share_balance !== undefined || vault.vault?.wallet_share_balance !== undefined;
+}
+
+function formatVaultShareBaseUnits(baseUnits: string): string {
+  const raw = /^\d+$/.test(baseUnits) ? baseUnits : '0';
+  const value = Number(raw) / 1_000_000;
+  return Number.isFinite(value)
+    ? value.toLocaleString('en-US', { maximumFractionDigits: 6 })
+    : '0';
+}
+
+function addVaultShareBaseUnits(...values: string[]): string {
+  return values
+    .reduce((sum, value) => sum + toPositiveBaseUnits(value), 0n)
+    .toString();
+}
+
+function getVaultSharePriceUsd(vault: DecibelVaultItem): number {
+  if (typeof vault.share_price === 'number' && Number.isFinite(vault.share_price) && vault.share_price > 0) {
+    return vault.share_price;
+  }
+  const value = vault.current_value_of_shares;
+  const sharesBaseUnits = Number(getVaultShareBalanceBaseUnits(vault));
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0 && Number.isFinite(sharesBaseUnits) && sharesBaseUnits > 0) {
+    return value / (sharesBaseUnits / 1_000_000);
+  }
+  return 0;
+}
+
 /** Aptos client for direct submission (no Gas Station). Decibel close uses this to avoid Gas Station rules. */
 function getDecibelAptosClient(network: 'testnet' | 'mainnet'): Aptos {
   const aptosNetwork = network === 'testnet' ? Network.TESTNET : Network.MAINNET;
@@ -274,6 +400,7 @@ function getDecibelAptosClient(network: 'testnet' | 'mainnet'): Aptos {
 
 export function DecibelPositions() {
   const { account, signTransaction, signAndSubmitTransaction } = useWallet();
+  const { effectiveAptosAddress } = useEffectiveWalletAddresses();
   const { tokens: walletTokens } = useWalletData();
   const { toast } = useToast();
   const { setSelectedProtocol } = useProtocol();
@@ -310,7 +437,9 @@ export function DecibelPositions() {
   const [cancelingOrderId, setCancelingOrderId] = useState<string | null>(null);
   const [yieldAiManagedPositionKeys, setYieldAiManagedPositionKeys] = useState<Set<string>>(new Set());
   const [yieldAiSafeByPositionKey, setYieldAiSafeByPositionKey] = useState<Record<string, string>>({});
-  const [subaccountLabels, setSubaccountLabels] = useState<Record<string, string>>({});
+  // Journal-cycle (post-migration) DN positions: normalized perp market -> owning safe. These are
+  // matched by market because a journal cycle does not store the Decibel subaccount.
+  const [yieldAiJournalSafeByMarket, setYieldAiJournalSafeByMarket] = useState<Record<string, string>>({});
   const [selectedSubaccount, setSelectedSubaccount] = useState('');
   const [tradeModalOpen, setTradeModalOpen] = useState(false);
   const [tradeMarket, setTradeMarket] = useState<DecibelOpenPositionMarket | null>(null);
@@ -320,8 +449,40 @@ export function DecibelPositions() {
   const [postCloseUnwindPrefill, setPostCloseUnwindPrefill] = useState<SwapModalPrefill | null>(null);
   const [withdrawModalOpen, setWithdrawModalOpen] = useState(false);
   const [withdrawSubaccountBalance, setWithdrawSubaccountBalance] = useState<number | null>(null);
+  const [vaultShareWithdraw, setVaultShareWithdraw] = useState<DecibelVaultItem | null>(null);
+  const [vaultShareDeposit, setVaultShareDeposit] = useState<DecibelVaultItem | null>(null);
 
-  const subaccountsQuery = useDecibelSubaccounts(account?.address?.toString());
+  const walletAddress = effectiveAptosAddress ?? undefined;
+  const subaccountsQuery = useDecibelSubaccounts(walletAddress);
+  const positionsQuery = useDecibelUserPositions(walletAddress);
+  const vaultsQuery = useDecibelVaultPerformance(walletAddress);
+  const echelonPositionsQuery = useEchelonPositions(walletAddress, {
+    enabled: Boolean(walletAddress),
+  });
+  const marketsQuery = useDecibelMarkets();
+  const overviewQuery = useDecibelAccountOverview(walletAddress);
+  const pricesQuery = useDecibelPrices(undefined, { enabled: positions.length > 0 });
+  const preDepositQuery = useDecibelPredepositorBalance(walletAddress);
+  const ampsQuery = useDecibelAmps(walletAddress);
+
+  const openOrderSubaccounts = useMemo(() => {
+    if (positions.length > 0) {
+      return Array.from(new Set(positions.map((p) => p.user).filter(Boolean)));
+    }
+    return walletAddress ? [walletAddress] : [];
+  }, [positions, walletAddress]);
+
+  const openOrdersQuery = useDecibelOpenOrders(openOrderSubaccounts);
+
+  const subaccountLabels = useMemo(() => {
+    const labels: Record<string, string> = {};
+    for (const sub of subaccountsQuery.data ?? []) {
+      const address = typeof sub.subaccount_address === 'string' ? sub.subaccount_address : '';
+      const label = typeof sub.custom_label === 'string' ? sub.custom_label.trim() : '';
+      if (address && label) labels[normalizeAddress(address)] = label;
+    }
+    return labels;
+  }, [subaccountsQuery.data]);
 
   const closeShortHedgeHint = useMemo(() => {
     const pos = closeConfirmPosition;
@@ -366,14 +527,17 @@ export function DecibelPositions() {
   }, [positionSubaccounts, selectedSubaccount]);
 
   const hasMultiplePositionSubaccounts = positionSubaccounts.length > 1;
-  const referralDashboard = useDecibelReferralDashboard(account?.address?.toString(), {
-    enabled: referralDialogOpen && Boolean(account?.address),
+  const referralDashboard = useDecibelReferralDashboard(walletAddress, {
+    enabled: referralDialogOpen && Boolean(walletAddress),
   });
 
   const visiblePositions = useMemo(() => {
     if (!hasMultiplePositionSubaccounts || !selectedSubaccountNormalized) return positions;
     return positions.filter((pos) => normalizeAddress(pos.user) === selectedSubaccountNormalized);
   }, [hasMultiplePositionSubaccounts, positions, selectedSubaccountNormalized]);
+
+  const marketNamesForLogos = useMemo(() => Object.values(marketNames), [marketNames]);
+  const logoUrlsByMarket = useDecibelMarketLogosMap(marketNamesForLogos, MARKET_LOGOS);
 
   const primarySubaccountAddr = useMemo(() => {
     const list = subaccountsQuery.data ?? [];
@@ -445,284 +609,142 @@ export function DecibelPositions() {
     };
   }, [account?.address]);
 
-  const fetchPositions = useCallback(async () => {
-    if (!account?.address) {
+  useEffect(() => {
+    setLoading(positionsQuery.isLoading);
+    if (positionsQuery.error) {
+      setError(positionsQuery.error instanceof Error ? positionsQuery.error.message : "Failed to load positions");
       setPositions([]);
       return;
     }
-    setLoading(true);
     setError(null);
-    try {
-      const res = await fetch(
-        `/api/protocols/decibel/userPositions?address=${encodeURIComponent(account.address.toString())}`
-      );
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || `Request failed: ${res.status}`);
-        setPositions([]);
-        return;
-      }
-      if (data.success && Array.isArray(data.data)) {
-        const active = (data.data as DecibelPosition[]).filter((p) => !p.is_deleted);
-        setPositions(active);
-      } else {
-        setPositions([]);
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to load positions';
-      setError(msg);
-      setPositions([]);
-      toast({ title: 'Error', description: msg, variant: 'destructive' });
-    } finally {
-      setLoading(false);
+    if (positionsQuery.data) {
+      setPositions(positionsQuery.data.filter((p) => !p.is_deleted) as DecibelPosition[]);
     }
-  }, [account?.address, toast]);
+  }, [positionsQuery.data, positionsQuery.error, positionsQuery.isLoading]);
+
+  useEffect(() => {
+    setVaultsLoading(vaultsQuery.isLoading);
+    setVaults(vaultsQuery.data ?? []);
+  }, [vaultsQuery.data, vaultsQuery.isLoading]);
+
+  useEffect(() => {
+    const nameMap: Record<string, string> = {};
+    const configMap: Record<string, DecibelMarketConfig> = {};
+    for (const m of marketsQuery.data?.data ?? []) {
+      const addr = m.market_addr;
+      const name = m.market_name;
+      if (addr != null) {
+        const key = normalizeAddress(String(addr));
+        if (name != null) nameMap[key] = String(name);
+        configMap[key] = {
+          market_addr: String(addr),
+          market_name: m.market_name,
+          px_decimals: m.px_decimals ?? 9,
+          sz_decimals: m.sz_decimals ?? 9,
+          tick_size: m.tick_size ?? 1_000_000,
+          lot_size: m.lot_size ?? 100_000_000,
+          min_size: m.min_size ?? 1_000_000_000,
+        };
+      }
+    }
+    setMarketNames(nameMap);
+    setMarketsMap(configMap);
+    if (marketsQuery.data?.network === "mainnet" || marketsQuery.data?.network === "testnet") {
+      setDecibelNetwork(marketsQuery.data.network);
+    }
+  }, [marketsQuery.data]);
+
+  useEffect(() => {
+    setOverviewLoading(overviewQuery.isLoading);
+    if (overviewQuery.data) {
+      setAvailableToTrade(
+        overviewQuery.data.usdc_cross_withdrawable_balance != null
+          ? Number(overviewQuery.data.usdc_cross_withdrawable_balance)
+          : null
+      );
+      setTotalEquity(
+        overviewQuery.data.perp_equity_balance != null
+          ? Number(overviewQuery.data.perp_equity_balance)
+          : null
+      );
+    } else if (!overviewQuery.isLoading) {
+      setAvailableToTrade(null);
+      setTotalEquity(null);
+    }
+  }, [overviewQuery.data, overviewQuery.isLoading]);
+
+  useEffect(() => {
+    const map: Record<string, number> = {};
+    const fundingMap: Record<string, { fundingRateBps: number; isFundingPositive: boolean }> = {};
+    for (const item of pricesQuery.data ?? []) {
+      const addr = item.market;
+      if (addr != null) {
+        const key = normalizeAddress(String(addr));
+        const mark = item.mark_px ?? item.mid_px;
+        if (typeof mark === "number") map[key] = mark;
+        if (typeof item.funding_rate_bps === "number") {
+          fundingMap[key] = {
+            fundingRateBps: item.funding_rate_bps,
+            isFundingPositive: item.is_funding_positive === true,
+          };
+        }
+      }
+    }
+    setPricesMap(map);
+    setFundingRatesMap(fundingMap);
+  }, [pricesQuery.data]);
+
+  useEffect(() => {
+    setPreDepositLoading(preDepositQuery.isLoading);
+    if (typeof preDepositQuery.data === "number") {
+      setPreDepositSumUsdc(preDepositQuery.data);
+    } else if (!preDepositQuery.isLoading) {
+      setPreDepositSumUsdc(null);
+    }
+  }, [preDepositQuery.data, preDepositQuery.isLoading]);
+
+  useEffect(() => {
+    setAmpsLoading(ampsQuery.isLoading);
+    setTotalAmps(ampsQuery.data?.total_amps ?? null);
+    setAmpsData(ampsQuery.data ?? null);
+  }, [ampsQuery.data, ampsQuery.isLoading]);
+
+  useEffect(() => {
+    setOpenOrdersLoading(openOrdersQuery.isLoading);
+    setOpenOrders(openOrdersQuery.data ?? []);
+  }, [openOrdersQuery.data, openOrdersQuery.isLoading]);
+
+  const fetchPositions = useCallback(async () => {
+    await positionsQuery.refetch();
+  }, [positionsQuery]);
 
   const fetchVaults = useCallback(async () => {
-    if (!account?.address) {
-      setVaults([]);
-      return;
-    }
-    setVaultsLoading(true);
-    try {
-      const res = await fetch(
-        `/api/protocols/decibel/accountVaultPerformance?address=${encodeURIComponent(account.address.toString())}`
-      );
-      const data = await res.json();
-      if (data.success && Array.isArray(data.data)) {
-        setVaults(data.data as DecibelVaultItem[]);
-      } else {
-        setVaults([]);
-      }
-    } catch {
-      setVaults([]);
-    } finally {
-      setVaultsLoading(false);
-    }
-  }, [account?.address]);
-
-  useEffect(() => {
-    fetchPositions();
-  }, [fetchPositions]);
-
-  const fetchMarkets = useCallback(async () => {
-    try {
-      const res = await fetch('/api/protocols/decibel/markets');
-      const data = await res.json();
-      if (data.success && Array.isArray(data.data)) {
-        const nameMap: Record<string, string> = {};
-        const configMap: Record<string, DecibelMarketConfig> = {};
-        for (const m of data.data as (DecibelMarketConfig & { market_addr?: string; market_name?: string })[]) {
-          const addr = m.market_addr;
-          const name = m.market_name;
-          if (addr != null) {
-            const key = normalizeAddress(String(addr));
-            if (name != null) nameMap[key] = String(name);
-            configMap[key] = {
-              market_addr: String(addr),
-              market_name: m.market_name,
-              px_decimals: m.px_decimals ?? 9,
-              sz_decimals: m.sz_decimals ?? 9,
-              tick_size: m.tick_size ?? 1_000_000,
-              lot_size: m.lot_size ?? 100_000_000,
-              min_size: m.min_size ?? 1_000_000_000,
-            };
-          }
-        }
-        setMarketNames(nameMap);
-        setMarketsMap(configMap);
-        if (data.network === 'mainnet' || data.network === 'testnet') {
-          setDecibelNetwork(data.network);
-        }
-      }
-    } catch {
-      setMarketNames({});
-      setMarketsMap({});
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchVaults();
-  }, [fetchVaults]);
+    await vaultsQuery.refetch();
+  }, [vaultsQuery]);
 
   const fetchOverview = useCallback(async () => {
-    if (!account?.address) {
-      setAvailableToTrade(null);
-      setTotalEquity(null);
-      return;
-    }
-    setOverviewLoading(true);
-    try {
-      const res = await fetch(
-        `/api/protocols/decibel/accountOverview?address=${encodeURIComponent(account.address.toString())}`
-      );
-      const data = await res.json();
-      if (data.success && data.data) {
-        const d = data.data as { usdc_cross_withdrawable_balance?: number; perp_equity_balance?: number };
-        setAvailableToTrade(
-          d.usdc_cross_withdrawable_balance != null ? Number(d.usdc_cross_withdrawable_balance) : null
-        );
-        setTotalEquity(
-          d.perp_equity_balance != null ? Number(d.perp_equity_balance) : null
-        );
-      } else {
-        setAvailableToTrade(null);
-        setTotalEquity(null);
-      }
-    } catch {
-      setAvailableToTrade(null);
-      setTotalEquity(null);
-    } finally {
-      setOverviewLoading(false);
-    }
-  }, [account?.address]);
-
-  useEffect(() => {
-    fetchMarkets();
-  }, [fetchMarkets]);
+    await overviewQuery.refetch();
+  }, [overviewQuery]);
 
   const fetchPrices = useCallback(async () => {
-    try {
-      const res = await fetch('/api/protocols/decibel/prices');
-      const data = await res.json();
-      if (data.success && Array.isArray(data.data)) {
-        const map: Record<string, number> = {};
-        const fundingMap: Record<string, { fundingRateBps: number; isFundingPositive: boolean }> = {};
-        for (const item of data.data as {
-          market?: string;
-          mark_px?: number;
-          mid_px?: number;
-          funding_rate_bps?: number;
-          is_funding_positive?: boolean;
-        }[]) {
-          const addr = item.market;
-          if (addr != null) {
-            const key = normalizeAddress(String(addr));
-            const mark = item.mark_px ?? item.mid_px;
-            if (typeof mark === 'number') map[key] = mark;
-            if (typeof item.funding_rate_bps === 'number') {
-              fundingMap[key] = {
-                fundingRateBps: item.funding_rate_bps,
-                isFundingPositive: item.is_funding_positive === true,
-              };
-            }
-          }
-        }
-        setPricesMap(map);
-        setFundingRatesMap(fundingMap);
-      } else {
-        setPricesMap({});
-        setFundingRatesMap({});
-      }
-    } catch {
-      setPricesMap({});
-      setFundingRatesMap({});
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchOverview();
-  }, [fetchOverview]);
-
-  useEffect(() => {
-    if (positions.length > 0) fetchPrices();
-  }, [positions.length, fetchPrices]);
+    await pricesQuery.refetch();
+  }, [pricesQuery]);
 
   const fetchPreDeposit = useCallback(async () => {
-    if (!account?.address) {
-      setPreDepositSumUsdc(null);
-      return;
-    }
-    setPreDepositLoading(true);
-    try {
-      const res = await fetch(
-        `/api/protocols/decibel/predepositorBalance?address=${encodeURIComponent(account.address.toString())}`
-      );
-      const data = await res.json();
-      if (data.success && typeof data.data?.sumUsdc === 'number') {
-        setPreDepositSumUsdc(data.data.sumUsdc);
-      } else {
-        setPreDepositSumUsdc(0);
-      }
-    } catch {
-      setPreDepositSumUsdc(null);
-    } finally {
-      setPreDepositLoading(false);
-    }
-  }, [account?.address]);
-
-  useEffect(() => {
-    fetchPreDeposit();
-  }, [fetchPreDeposit]);
+    await preDepositQuery.refetch();
+  }, [preDepositQuery]);
 
   const fetchAmps = useCallback(async () => {
-    if (!account?.address) {
-      setTotalAmps(null);
-      setAmpsData(null);
-      return;
-    }
-    setAmpsLoading(true);
-    try {
-      const res = await fetch(
-        `/api/protocols/decibel/amps?owner=${encodeURIComponent(account.address.toString())}`
-      );
-      const data = await res.json();
-      if (data.success && typeof data.data?.total_amps === 'number') {
-        setTotalAmps(data.data.total_amps);
-        setAmpsData(data.data as DecibelAmpsData);
-      } else {
-        setTotalAmps(null);
-        setAmpsData(null);
-      }
-    } catch {
-      setTotalAmps(null);
-      setAmpsData(null);
-    } finally {
-      setAmpsLoading(false);
-    }
-  }, [account?.address]);
+    await ampsQuery.refetch();
+  }, [ampsQuery]);
 
   const fetchOpenOrders = useCallback(async () => {
-    if (!account?.address) {
-      setOpenOrders([]);
-      return;
-    }
-    // Decibel open_orders returns orders per subaccount, not per owner. Use subaccounts from positions.
-    const subaccounts = positions.length > 0
-      ? Array.from(new Set(positions.map((p) => p.user).filter(Boolean)))
-      : [account.address.toString()];
-    setOpenOrdersLoading(true);
-    try {
-      const allOrders: DecibelOpenOrder[] = [];
-      for (const addr of subaccounts) {
-        const res = await fetch(
-          `/api/protocols/decibel/openOrders?address=${encodeURIComponent(addr)}`
-        );
-        const data = await res.json();
-        if (data.success && data.data != null) {
-          allOrders.push(
-            ...normalizeOpenOrdersResponse(data.data).map((order) => ({
-              ...order,
-              source_subaccount: addr,
-            }))
-          );
-        }
-      }
-      setOpenOrders(allOrders);
-    } catch {
-      setOpenOrders([]);
-    } finally {
-      setOpenOrdersLoading(false);
-    }
-  }, [account?.address, positions]);
+    await openOrdersQuery.refetch();
+  }, [openOrdersQuery]);
 
-  useEffect(() => {
-    fetchAmps();
-  }, [fetchAmps]);
-
-  useEffect(() => {
-    fetchOpenOrders();
-  }, [fetchOpenOrders]);
+  const fetchEchelonPositions = useCallback(async () => {
+    await echelonPositionsQuery.refetch();
+  }, [echelonPositionsQuery]);
 
   useEffect(() => {
     const handler = (e: CustomEvent<{ protocol: string; data?: DecibelPosition[] }>) => {
@@ -737,66 +759,76 @@ export function DecibelPositions() {
         fetchPrices();
         fetchAmps();
         fetchOpenOrders();
+        fetchEchelonPositions();
       }
     };
     window.addEventListener('refreshPositions', handler as EventListener);
     return () => window.removeEventListener('refreshPositions', handler as EventListener);
-  }, [fetchVaults, fetchOverview, fetchPreDeposit, fetchPrices, fetchAmps, fetchOpenOrders]);
+  }, [fetchVaults, fetchOverview, fetchPreDeposit, fetchPrices, fetchAmps, fetchOpenOrders, fetchEchelonPositions]);
 
   const positionKey = (pos: DecibelPosition) => `${pos.market}-${pos.user}-${pos.size}-${pos.entry_price}`;
 
 
-
   useEffect(() => {
-    if (!account?.address) {
-      setSubaccountLabels({});
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch(
-          `/api/protocols/decibel/subaccounts?address=${encodeURIComponent(account.address.toString())}`
-        );
-        if (!res.ok) throw new Error(`Subaccounts request failed: ${res.status}`);
-        const data = await res.json();
-        const labels: Record<string, string> = {};
-        if (data?.success && Array.isArray(data.data)) {
-          for (const sub of data.data as DecibelSubaccount[]) {
-            const address = typeof sub.subaccount_address === 'string' ? sub.subaccount_address : '';
-            const label = typeof sub.custom_label === 'string' ? sub.custom_label.trim() : '';
-            if (address && label) {
-              labels[normalizeAddress(address)] = label;
-            }
-          }
-        }
-        if (!cancelled) setSubaccountLabels(labels);
-      } catch {
-        if (!cancelled) setSubaccountLabels({});
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [account?.address]);
-
-  useEffect(() => {
-    if (!account?.address || positions.length === 0) {
+    if (!walletAddress || positions.length === 0) {
       setYieldAiManagedPositionKeys(new Set());
       setYieldAiSafeByPositionKey({});
+      setYieldAiJournalSafeByMarket({});
       return;
     }
     let cancelled = false;
     (async () => {
       try {
         const safesRes = await fetch(
-          `/api/protocols/yield-ai/safes?owner=${encodeURIComponent(account.address.toString())}`
+          `/api/protocols/yield-ai/safes?owner=${encodeURIComponent(walletAddress)}`
         );
         if (!safesRes.ok) throw new Error(`Yield AI safes request failed: ${safesRes.status}`);
         const safesData = (await safesRes.json()) as YieldAiSafesResponse;
         const safeAddresses = Array.isArray(safesData?.data?.safeAddresses)
           ? safesData.data.safeAddresses
           : [];
+        // Journal cycles FIRST (light = fast). The legacy delta-neutral-state call below can take
+        // ~15s (indexer close-swap resolver), so we must not block the agent badge behind it.
+        const cycleLists = await Promise.all(
+          safeAddresses.map(
+            async (safeAddress): Promise<Array<{ market: string; subaccount: string | null; safeAddress: string }>> => {
+              try {
+                const res = await fetch(
+                  `/api/protocols/yield-ai/delta-neutral-cycles?safeAddress=${encodeURIComponent(safeAddress)}&light=1`
+                );
+                if (!res.ok) return [];
+                const json = (await res.json()) as {
+                  data?: { cycles?: Array<{ perpMarket?: string; isOpen?: boolean; decibelSubaccount?: string | null }> };
+                };
+                const cycles = json.data?.cycles ?? [];
+                return cycles
+                  .filter((c) => c?.isOpen && c?.perpMarket)
+                  .map((c) => ({
+                    market: normalizeAddress(c.perpMarket as string),
+                    subaccount: c.decibelSubaccount ? c.decibelSubaccount : null,
+                    safeAddress,
+                  }));
+              } catch {
+                return [];
+              }
+            }
+          )
+        );
+        if (!cancelled) {
+          const journalEntries = cycleLists.flat();
+          // Exact (subaccount, market) journal matches use the same key scheme as legacy.
+          const exact = journalEntries
+            .filter((e) => e.subaccount)
+            .map((e) => [yieldAiManagedPositionKey(e.subaccount as string, e.market), e.safeAddress] as const);
+          setYieldAiManagedPositionKeys(new Set(exact.map(([k]) => k)));
+          setYieldAiSafeByPositionKey(Object.fromEntries(exact));
+          // Market-only fallback for cycles whose subaccount was not pinned (older opens).
+          setYieldAiJournalSafeByMarket(
+            Object.fromEntries(journalEntries.filter((e) => !e.subaccount).map((e) => [e.market, e.safeAddress]))
+          );
+        }
+
+        // Legacy delta_neutral records (slow). Merge into the existing maps when ready.
         const checks = await Promise.all(safeAddresses.map(async (safeAddress) => {
           try {
             const res = await fetch(
@@ -818,22 +850,26 @@ export function DecibelPositions() {
         }));
         if (!cancelled) {
           const matches = checks.filter((v): v is { key: string; safeAddress: string } => !!v);
-          setYieldAiManagedPositionKeys(new Set(matches.map((m) => m.key)));
-          setYieldAiSafeByPositionKey(
-            Object.fromEntries(matches.map((m) => [m.key, m.safeAddress]))
-          );
+          if (matches.length > 0) {
+            setYieldAiManagedPositionKeys((prev) => new Set([...prev, ...matches.map((m) => m.key)]));
+            setYieldAiSafeByPositionKey((prev) => ({
+              ...prev,
+              ...Object.fromEntries(matches.map((m) => [m.key, m.safeAddress])),
+            }));
+          }
         }
       } catch {
         if (!cancelled) {
           setYieldAiManagedPositionKeys(new Set());
           setYieldAiSafeByPositionKey({});
+          setYieldAiJournalSafeByMarket({});
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [account?.address, positions.length]);
+  }, [walletAddress, positions.length]);
   const handleCloseClick = (pos: DecibelPosition) => {
     setCloseConfirmPosition(pos);
     setCloseMode('market');
@@ -846,13 +882,18 @@ export function DecibelPositions() {
     setTradeMarket({
       marketAddr: pos.market,
       marketName,
+      marketLogoUrl: logoUrlsByMarket[marketNameForFundingApi(marketName)],
     });
     setTradeModalOpen(true);
   };
 
-  const handleManageYieldAiPosition = (safeAddress: string) => {
-    if (!account?.address) return;
-    dispatchSelectYieldAiSafe(account.address.toString(), safeAddress);
+  const handleManageYieldAiPosition = (safeAddress: string, market?: string) => {
+    if (!walletAddress) return;
+    // Tell the agent view which position to scroll to + highlight once it loads.
+    if (market && typeof window !== 'undefined') {
+      sessionStorage.setItem('dnFocusMarket', normalizeAddress(market));
+    }
+    dispatchSelectYieldAiSafe(walletAddress, safeAddress);
     const aiAgentProtocol = getProtocolByName('AI agent');
     if (aiAgentProtocol) {
       setSelectedProtocol(aiAgentProtocol);
@@ -1230,7 +1271,7 @@ export function DecibelPositions() {
     [decibelNetwork, signTransaction, signAndSubmitTransaction, account?.address, toast, fetchOpenOrders, fetchPositions]
   );
 
-  if (!account?.address) {
+  if (!walletAddress) {
     return (
       <div className="text-sm text-muted-foreground py-4">
         Connect your Aptos wallet to view Decibel positions.
@@ -1257,7 +1298,18 @@ export function DecibelPositions() {
     (sum, v) => sum + (v.current_value_of_shares ?? 0),
     0
   );
-  const visibleVaults = vaults.filter((v) => (v.current_value_of_shares ?? 0) > 0);
+  const echelonPositions = echelonPositionsQuery.data ?? [];
+  const visibleVaults = vaults.filter((v) => (
+    (v.current_value_of_shares ?? 0) > 0 ||
+    getVaultShareBalanceBaseUnits(v) !== '0' ||
+    getVaultWalletShareBalanceBaseUnits(v) !== '0' ||
+    getVaultEchelonShareBalanceBaseUnits(v, echelonPositions) !== '0' ||
+    ((v.total_withdrawn ?? 0) > 0)
+  ));
+  const selectedVaultShareMetadata = vaultShareWithdraw ? getVaultShareMetadata(vaultShareWithdraw) : '';
+  const selectedVaultShareSubaccount = vaultShareWithdraw ? getVaultSubaccount(vaultShareWithdraw) : '';
+  const selectedVaultDepositMetadata = vaultShareDeposit ? getVaultShareMetadata(vaultShareDeposit) : '';
+  const selectedVaultDepositSubaccount = vaultShareDeposit ? getVaultSubaccount(vaultShareDeposit) : '';
   const totalAssets = (totalEquity ?? 0) + vaultsTotal + (preDepositSumUsdc ?? 0);
   const hasTestnetData =
     availableToTrade != null || positions.length > 0 || visibleVaults.length > 0;
@@ -1428,6 +1480,7 @@ export function DecibelPositions() {
             {visiblePositions.map((pos, i) => {
               const marketKey = normalizeAddress(pos.market);
               const marketName = marketNames[marketKey] ?? pos.market;
+              const marketLogoUrl = logoUrlsByMarket[marketNameForFundingApi(marketName)];
               const { base, quote, displayPair } = formatDecibelMarket(marketName);
               const showTokenLabels = base && quote && !pos.market.startsWith('0x');
               const notionalUsd = Math.abs(pos.size) * pos.entry_price;
@@ -1445,8 +1498,11 @@ export function DecibelPositions() {
                 ? `${subaccountLabel} (${shortenHex(pos.user)})`
                 : shortenHex(pos.user);
               const managedPositionKey = yieldAiManagedPositionKey(pos.user, pos.market);
-              const isYieldAiDeltaNeutralPosition = yieldAiManagedPositionKeys.has(managedPositionKey);
-              const yieldAiSafeAddress = yieldAiSafeByPositionKey[managedPositionKey];
+              // Journal cycles match by market (no subaccount stored); legacy matches by (subaccount, market).
+              const journalSafeAddress = yieldAiJournalSafeByMarket[normalizeAddress(pos.market)];
+              const isYieldAiDeltaNeutralPosition =
+                yieldAiManagedPositionKeys.has(managedPositionKey) || Boolean(journalSafeAddress);
+              const yieldAiSafeAddress = yieldAiSafeByPositionKey[managedPositionKey] ?? journalSafeAddress;
               const fundingRateInfo = fundingRatesMap[marketKey];
               const pnlColor = totalPnl > 0 ? 'text-green-600 dark:text-green-400' : totalPnl < 0 ? 'text-destructive' : 'text-muted-foreground';
               const pricePnlColor = pricePnl > 0 ? 'text-green-600 dark:text-green-400' : pricePnl < 0 ? 'text-destructive' : 'text-muted-foreground';
@@ -1460,6 +1516,12 @@ export function DecibelPositions() {
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="flex flex-col gap-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
+                        <DecibelMarketIcon
+                          logoUrl={marketLogoUrl}
+                          marketName={marketName}
+                          size={20}
+                          className="h-5 w-5"
+                        />
                         <span className="font-medium">{displayPair}</span>
                         <Badge
                           variant="outline"
@@ -1568,7 +1630,7 @@ export function DecibelPositions() {
                           <Button
                             variant="default"
                             size="sm"
-                            onClick={() => yieldAiSafeAddress && handleManageYieldAiPosition(yieldAiSafeAddress)}
+                            onClick={() => yieldAiSafeAddress && handleManageYieldAiPosition(yieldAiSafeAddress, pos.market)}
                             disabled={!yieldAiSafeAddress}
                           >
                             Manage in Yield AI agent
@@ -1655,8 +1717,8 @@ export function DecibelPositions() {
                             </TooltipTrigger>
                             <TooltipContent side="bottom" className="max-w-[260px]">
                               <p>
-                                Current market funding rate for this perp. Decibel uses continuous
-                                funding, so this is not an hourly rate.
+                                Current signed funding rate for this perp and the equivalent annualized APR.
+                                Positive values mean longs pay shorts.
                               </p>
                             </TooltipContent>
                           </Tooltip>
@@ -1664,12 +1726,13 @@ export function DecibelPositions() {
                       </div>
                       <span className="ml-0">
                         {fundingRateInfo
-                          ? formatFundingRatePercent(fundingRateInfo.fundingRateBps)
+                          ? formatFundingRatePercent(fundingRateInfo)
                           : '—'}
                       </span>
                       {fundingRateInfo && (
-                        <div className="text-xs text-muted-foreground mt-0.5">
-                          {fundingRateInfo.isFundingPositive ? 'Longs pay shorts' : 'Shorts pay longs'}
+                        <div className="text-xs text-muted-foreground mt-0.5 space-y-0.5">
+                          <div>{formatFundingAprPercent(fundingRateInfo)}</div>
+                          <div>{fundingRateInfo.isFundingPositive ? 'Longs pay shorts' : 'Shorts pay longs'}</div>
                         </div>
                       )}
                     </div>
@@ -1885,23 +1948,60 @@ export function DecibelPositions() {
             <p className="text-base text-muted-foreground">No vault deposits.</p>
           ) : (
             <ul className="space-y-2">
-              {visibleVaults.map((v, i) => (
+              {visibleVaults.map((v, i) => {
+                const shareMetadata = getVaultShareMetadata(v);
+                const shareSubaccount = getVaultSubaccount(v);
+                const shareSymbol = getVaultShareSymbol(v);
+                const shareBalance = getVaultShareBalanceBaseUnits(v);
+                const walletShareBalance = getVaultWalletShareBalanceBaseUnits(v);
+                const echelonShareBalance = getVaultEchelonShareBalanceBaseUnits(v, echelonPositions);
+                const outsideDecibelShareBalance = addVaultShareBaseUnits(walletShareBalance, echelonShareBalance);
+                const walletShareBalanceLoaded = hasVaultWalletShareBalance(v);
+                const totalWithdrawn = Number(v.total_withdrawn);
+                const redeemedUsd = Number.isFinite(totalWithdrawn) ? totalWithdrawn : null;
+                const canWithdrawShares =
+                  typeof signAndSubmitTransaction === 'function' &&
+                  Boolean(shareMetadata && shareSubaccount && shareBalance !== '0');
+                const canDepositShares =
+                  typeof signAndSubmitTransaction === 'function' &&
+                  Boolean(shareMetadata && shareSubaccount && walletShareBalance !== '0');
+                return (
                 <li
-                  key={i}
-                  className="rounded-lg border bg-card p-3 text-card-foreground shadow-sm"
+                  key={`${v.vault?.address ?? 'vault'}-${v.account_address ?? i}`}
+                  className="overflow-hidden rounded-lg border bg-card text-card-foreground shadow-sm"
                 >
-                  <div className="flex items-start justify-between gap-2 py-1">
-                    <div className="min-w-0 text-base font-medium">{v.vault?.name ?? 'Vault'}</div>
-                    <div className="shrink-0 flex items-center gap-2 text-right">
+                  <div className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1.5fr)_auto_auto_auto] sm:items-center">
+                    <div className="min-w-0">
+                      <div className="min-w-0 truncate text-base font-semibold" title={getVaultName(v)}>
+                        {getVaultName(v)}
+                      </div>
+                      <div className="mt-1 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                        <span>In Decibel: {formatVaultShareBaseUnits(shareBalance)} {shareSymbol}</span>
+                        {walletShareBalanceLoaded && (
+                          <span>In wallet: {formatVaultShareBaseUnits(walletShareBalance)} {shareSymbol}</span>
+                        )}
+                        {echelonShareBalance !== '0' && (
+                          <span>In Echelon: {formatVaultShareBaseUnits(echelonShareBalance)} {shareSymbol}</span>
+                        )}
+                        {outsideDecibelShareBalance !== '0' && (
+                          <span>Outside Decibel: {formatVaultShareBaseUnits(outsideDecibelShareBalance)} {shareSymbol}</span>
+                        )}
+                        {redeemedUsd != null && redeemedUsd > 0 && (
+                          <span>USDC redeemed: {formatCurrency(redeemedUsd, 2)}</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center sm:justify-center">
                       {v.apr != null && Number.isFinite(v.apr) && (
                         <Badge
                           variant="outline"
-                          className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-xs font-normal px-2 py-0.5 h-5"
+                          className="h-6 border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400"
                         >
-                          APR: {v.apr.toFixed(2)}%
+                          APR {v.apr.toFixed(2)}%
                         </Badge>
                       )}
-                      <div>
+                    </div>
+                    <div className="sm:text-right">
                         <div className="text-base font-medium">
                           {v.current_value_of_shares != null
                             ? formatCurrency(v.current_value_of_shares, 2)
@@ -1912,11 +2012,52 @@ export function DecibelPositions() {
                             PnL: {v.unrealized_pnl >= 0 ? '+' : ''}{formatCurrency(v.unrealized_pnl, 2)}
                           </div>
                         ) : null}
-                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2 sm:justify-end">
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="h-8 px-3 text-xs"
+                          disabled={!canDepositShares}
+                          onClick={() => setVaultShareDeposit(v)}
+                          title={
+                            !shareMetadata
+                              ? 'Share asset metadata is not available yet. Refresh Decibel positions.'
+                              : !shareSubaccount
+                                ? 'Vault subaccount is not available yet.'
+                                : walletShareBalance === '0'
+                                  ? `No ${shareSymbol} shares in your Aptos wallet.`
+                                  : undefined
+                          }
+                        >
+                          <Upload className="mr-1.5 h-3.5 w-3.5" />
+                          Deposit
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-8 px-3 text-xs"
+                          disabled={!canWithdrawShares}
+                          onClick={() => setVaultShareWithdraw(v)}
+                          title={
+                            !shareMetadata
+                              ? 'Share asset metadata is not available yet. Refresh Decibel positions.'
+                              : !shareSubaccount
+                                ? 'Vault subaccount is not available yet.'
+                                : shareBalance === '0'
+                                  ? `No ${shareSymbol} shares in this Decibel subaccount.`
+                                  : undefined
+                          }
+                        >
+                          <Download className="mr-1.5 h-3.5 w-3.5" />
+                          Withdraw
+                        </Button>
                     </div>
                   </div>
                 </li>
-              ))}
+                );
+              })}
             </ul>
           )}
         </div>
@@ -2200,6 +2341,32 @@ export function DecibelPositions() {
           onClose={() => setWithdrawModalOpen(false)}
           subaccountAddr={withdrawSubaccountAddr}
           withdrawableBalanceUsd={withdrawableBalanceUsd}
+          isTestnet={decibelNetwork === 'testnet'}
+        />
+      )}
+      {vaultShareWithdraw && selectedVaultShareMetadata && selectedVaultShareSubaccount && (
+        <DecibelVaultShareWithdrawModal
+          isOpen={Boolean(vaultShareWithdraw)}
+          onClose={() => setVaultShareWithdraw(null)}
+          vaultName={getVaultName(vaultShareWithdraw)}
+          subaccountAddr={selectedVaultShareSubaccount}
+          assetMetadataAddr={selectedVaultShareMetadata}
+          shareBalanceBaseUnits={getVaultShareBalanceBaseUnits(vaultShareWithdraw)}
+          shareSymbol={getVaultShareSymbol(vaultShareWithdraw)}
+          sharePriceUsd={getVaultSharePriceUsd(vaultShareWithdraw)}
+          isTestnet={decibelNetwork === 'testnet'}
+        />
+      )}
+      {vaultShareDeposit && selectedVaultDepositMetadata && selectedVaultDepositSubaccount && (
+        <DecibelVaultShareDepositModal
+          isOpen={Boolean(vaultShareDeposit)}
+          onClose={() => setVaultShareDeposit(null)}
+          vaultName={getVaultName(vaultShareDeposit)}
+          subaccountAddr={selectedVaultDepositSubaccount}
+          assetMetadataAddr={selectedVaultDepositMetadata}
+          walletShareBalanceBaseUnits={getVaultWalletShareBalanceBaseUnits(vaultShareDeposit)}
+          shareSymbol={getVaultShareSymbol(vaultShareDeposit)}
+          sharePriceUsd={getVaultSharePriceUsd(vaultShareDeposit)}
           isTestnet={decibelNetwork === 'testnet'}
         />
       )}

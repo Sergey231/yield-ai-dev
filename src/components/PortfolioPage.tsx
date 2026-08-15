@@ -34,6 +34,7 @@ import { PositionsList as MeteoraPositionsList } from "./protocols/meteora/Posit
 import { PositionsList as RaydiumPositionsList } from "./protocols/raydium/PositionsList";
 import { PositionsList as OrcaPositionsList } from "./protocols/orca/PositionsList";
 import { PositionsList as TramplinPositionsList } from "./protocols/tramplin/PositionsList";
+import { PositionsList as ExponentPositionsList } from "./protocols/exponent/PositionsList";
 import { PositionsList as YieldAIPositionsList } from "./protocols/yield-ai/PositionsList";
 import { CardTitle } from '@/components/ui/card';
 import { usePortfolioAddressResolver } from '@/lib/hooks/usePortfolioAddressResolver';
@@ -87,6 +88,7 @@ export default function PortfolioPage() {
   const [raydiumValue, setRaydiumValue] = useState(0);
   const [orcaValue, setOrcaValue] = useState(0);
   const [tramplinValue, setTramplinValue] = useState(0);
+  const [exponentValue, setExponentValue] = useState(0);
   const [yieldAIValue, setYieldAIValue] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [checkingAptosProtocols, setCheckingAptosProtocols] = useState<string[]>([]);
@@ -267,7 +269,7 @@ export default function PortfolioPage() {
    "APTree",
    "AI agent",
   ];
-  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino", "Meteora", "Raydium", "Orca", "Tramplin"];
+  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino", "Meteora", "Raydium", "Orca", "Tramplin", "Exponent"];
 
   const resetAptosChecking = useCallback(() => {
     setAptosCheckRunId((x) => x + 1);
@@ -317,9 +319,7 @@ export default function PortfolioPage() {
     }
   }, [resolvedAptosAddress]);
 
-  const handleRefresh = useCallback(async () => {
-    await loadPortfolio();
-    await refreshSolana();
+  const resetAptosProtocolValues = useCallback(() => {
     setHyperionValue(0);
     setEchelonValue(0);
     setAriesValue(0);
@@ -336,17 +336,24 @@ export default function PortfolioPage() {
     setDecibelValue(0);
     setDecibelMainnetValue(0);
     setAptreeValue(0);
+    setYieldAIValue(0);
+  }, []);
+
+  const handleRefresh = useCallback(async () => {
+    await loadPortfolio();
+    await refreshSolana();
+    resetAptosProtocolValues();
     setJupiterValue(0);
     setKaminoValue(0);
     setMeteoraValue(0);
     setRaydiumValue(0);
     setOrcaValue(0);
     setTramplinValue(0);
-    setYieldAIValue(0);
+    setExponentValue(0);
     resetAptosChecking();
     resetSolanaChecking();
     setRefreshKey((k) => k + 1);
-  }, [loadPortfolio, refreshSolana, resetAptosChecking, resetSolanaChecking]);
+  }, [loadPortfolio, refreshSolana, resetAptosChecking, resetAptosProtocolValues, resetSolanaChecking]);
 
   useEffect(() => {
     void loadPortfolio();
@@ -363,6 +370,10 @@ export default function PortfolioPage() {
   }, [resolvedAptosAddress, solanaProtocolsAddress, resetAptosChecking, resetSolanaChecking]);
 
   useEffect(() => {
+    resetAptosProtocolValues();
+  }, [resolvedAptosAddress, resetAptosProtocolValues]);
+
+  useEffect(() => {
     if (!solanaProtocolsAddress) {
       setJupiterValue(0);
       setKaminoValue(0);
@@ -370,6 +381,7 @@ export default function PortfolioPage() {
       setRaydiumValue(0);
       setOrcaValue(0);
       setTramplinValue(0);
+      setExponentValue(0);
     }
   }, [solanaProtocolsAddress]);
 
@@ -480,6 +492,10 @@ export default function PortfolioPage() {
     setTramplinValue(Number.isFinite(value) ? value : 0);
   }, []);
 
+  const handleExponentValueChange = useCallback((value: number) => {
+    setExponentValue(Number.isFinite(value) ? value : 0);
+  }, []);
+
   // Считаем сумму по кошельку (value или amount × price — как в Solana)
   const walletTotal = tokens.reduce((sum, token) => {
     const value = getTokenUsdValue(token);
@@ -509,7 +525,7 @@ export default function PortfolioPage() {
   // Итоговая сумма
   const totalAssets = walletTotal + totalProtocolsValue;
   const chartTotalAssets =
-    totalAssets + (solanaTotalValue ?? 0) + jupiterValue + kaminoValue + meteoraValue + raydiumValue + orcaValue + tramplinValue;
+    totalAssets + (solanaTotalValue ?? 0) + jupiterValue + kaminoValue + meteoraValue + raydiumValue + orcaValue + tramplinValue + exponentValue;
 
   useEffect(() => {
     // Global total assets (used e.g. in ChatPanel): include Solana wallet + Solana protocols too.
@@ -541,6 +557,7 @@ export default function PortfolioPage() {
     { name: 'Raydium', value: raydiumValue },
     { name: 'Orca', value: orcaValue },
     { name: 'Tramplin', value: tramplinValue },
+    { name: 'Exponent', value: exponentValue },
     { name: 'AI agent', value: yieldAIValue },
   ];
 
@@ -947,6 +964,12 @@ export default function PortfolioPage() {
                           name: "Tramplin" as const,
                           value: tramplinValue,
                           onValue: handleTramplinValueChange,
+                        },
+                        {
+                          component: ExponentPositionsList,
+                          name: "Exponent" as const,
+                          value: exponentValue,
+                          onValue: handleExponentValueChange,
                         },
                       ]
                         .sort((a, b) => b.value - a.value)

@@ -9,6 +9,7 @@ export type YieldAiStablecoinCompoundHistory = {
     txVersion: string;
     timestamp: string;
     label: string;
+    actor: "user" | "agent";
     legs: Array<{ direction: "in" | "out"; assetLabel: string; amountHuman: string }>;
   }[];
 };

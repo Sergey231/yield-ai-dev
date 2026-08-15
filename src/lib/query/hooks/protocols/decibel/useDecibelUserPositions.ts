@@ -2,19 +2,23 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { queryKeys } from "@/lib/query/queryKeys";
-import { STALE_TIME } from "@/lib/query/config";
+import { CACHE_TIME, STALE_TIME } from "@/lib/query/config";
 
 /** Row shape from GET /api/protocols/decibel/userPositions (Decibel REST). */
 export type DecibelUserPositionRow = {
   market: string;
   size: number;
   entry_price: number;
-  estimated_liquidation_price?: number;
-  unrealized_funding?: number;
+  estimated_liquidation_price: number;
+  unrealized_funding: number;
   user: string;
-  user_leverage?: number;
-  is_isolated?: boolean;
+  user_leverage: number;
+  is_isolated: boolean;
   is_deleted?: boolean;
+  sl_limit_price?: number | null;
+  sl_trigger_price?: number | null;
+  tp_limit_price?: number | null;
+  tp_trigger_price?: number | null;
 };
 
 async function fetchDecibelUserPositions(address: string): Promise<DecibelUserPositionRow[]> {
@@ -32,5 +36,6 @@ export function useDecibelUserPositions(walletAddress: string | undefined) {
     queryFn: () => fetchDecibelUserPositions(walletAddress!),
     enabled: Boolean(walletAddress),
     staleTime: STALE_TIME.POSITIONS,
+    gcTime: CACHE_TIME.LONG,
   });
 }

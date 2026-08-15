@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { createErrorResponse, createSuccessResponse } from "@/lib/utils/http";
 import { normalizeAddress, toCanonicalAddress } from "@/lib/utils/addressNormalization";
 import { readSafeHyperionPositions } from "@/lib/protocols/yield-ai/hyperionLp";
+import {
+  loadHyperionLpEventTotalsBySafe,
+  netLpLegTotals,
+  type HyperionLpPositionEventTotals,
+} from "@/lib/protocols/yield-ai/hyperionLpEvents";
 import { PanoraPricesService } from "@/lib/services/panora/prices";
 import { APTOS_COIN_TYPE } from "@/lib/constants/yieldAiVault";
 
@@ -14,12 +19,50 @@ const SECONDS_PER_YEAR = 365 * 24 * 60 * 60;
 /** Min elapsed before a realized per-position APR is meaningful (avoids huge early numbers). */
 const APR_MIN_ELAPSED_SECONDS = 60 * 60;
 
+function rawToUsd(raw: bigint, info?: PriceInfo): number {
+  if (!info || raw <= 0n) return 0;
+  return (Number(raw) / 10 ** info.decimals) * info.usd;
+}
+
+function basisUsdFromEvents(
+  totals: HyperionLpPositionEventTotals,
+  priceOf: (addr: string) => PriceInfo | undefined,
+  tokenA: string,
+  tokenB: string,
+  closed: boolean
+): number {
+  if (closed) {
+    return rawToUsd(totals.depositedA, priceOf(tokenA)) + rawToUsd(totals.depositedB, priceOf(tokenB));
+  }
+  const { netA, netB } = netLpLegTotals(totals);
+  return rawToUsd(netA, priceOf(tokenA)) + rawToUsd(netB, priceOf(tokenB));
+}
+
+function claimedUsdFromVaultEvents(
+  totals: HyperionLpPositionEventTotals,
+  priceOf: (addr: string) => PriceInfo | undefined,
+  tokenA: string,
+  tokenB: string
+): number {
+  let usd = rawToUsd(totals.feesClaimedA, priceOf(tokenA)) + rawToUsd(totals.feesClaimedB, priceOf(tokenB));
+  for (const [meta, amount] of totals.rewardsClaimed) {
+    usd += rawToUsd(amount, priceOf(meta));
+  }
+  return usd;
+}
+
+function hasDeploymentEvents(totals: HyperionLpPositionEventTotals): boolean {
+  return totals.depositedA > 0n || totals.depositedB > 0n;
+}
+
 /**
  * GET /api/protocols/yield-ai/hyperion-lp/positions?safe=0x...
  * Read-only: Hyperion LP positions tracked on a safe, with live composition,
- * active/inactive flag, and USD-priced value + uncollected fees/rewards. The
- * pending fees/rewards are read on-chain (the Hyperion indexer/SDK does not
- * track vault-owned positions); prices come from Panora. No secret required.
+ * active/inactive flag, and USD-priced value + uncollected fees/rewards. Realized APR
+ * annualizes total earned (claimed + uncollected fees/rewards) vs the deposit basis
+ * (falling back to current LP value when basis is not indexed).
+ * PnL uses vault `HyperionLp*Event` totals (`used_a/b` basis, `got_a/b` on close) — not
+ * `principal_usdc`. Prices from Panora. No secret required.
  */
 export async function GET(request: NextRequest) {
   try {
@@ -28,7 +71,11 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(createErrorResponse(new Error("safe query param is required")), { status: 400 });
     }
 
-    const positions = await readSafeHyperionPositions(toCanonicalAddress(safe));
+    const safeCanon = toCanonicalAddress(safe);
+    const [positions, eventTotalsByPosition] = await Promise.all([
+      readSafeHyperionPositions(safeCanon),
+      loadHyperionLpEventTotalsBySafe(safeCanon).catch(() => new Map<string, HyperionLpPositionEventTotals>()),
+    ]);
 
     // Collect every token that needs a price (legs + reward tokens).
     const addrs = new Set<string>([APTOS_COIN_TYPE]);
@@ -36,6 +83,10 @@ export async function GET(request: NextRequest) {
       addrs.add(p.tokenA);
       addrs.add(p.tokenB);
       for (const r of p.pendingRewards ?? []) addrs.add(r.metadata);
+      const ev = eventTotalsByPosition.get(toCanonicalAddress(p.position));
+      if (ev) {
+        for (const meta of ev.rewardsClaimed.keys()) addrs.add(meta);
+      }
     }
 
     const byAddr = new Map<string, PriceInfo>();
@@ -59,7 +110,6 @@ export async function GET(request: NextRequest) {
     const priceOf = (addr: string): PriceInfo | undefined => {
       const direct = byAddr.get(normalizeAddress(addr));
       if (direct) return direct;
-      // APT may be priced under its coin type while rewards report the 0xa FA.
       if (normalizeAddress(addr) === normalizeAddress(APT_FA_METADATA)) {
         return byAddr.get(normalizeAddress(APTOS_COIN_TYPE));
       }
@@ -84,7 +134,6 @@ export async function GET(request: NextRequest) {
       const valueUsd = toUsd(p.amountA, pa) + toUsd(p.amountB, pb);
       const feesUsd = toUsd(p.pendingFeeA, pa) + toUsd(p.pendingFeeB, pb);
 
-      // Per-token breakdowns (amount in token units) for the hover tooltips.
       const feesBreakdown: Array<{ symbol: string; amount: number }> = [];
       const feeAh = toHuman(p.pendingFeeA, pa);
       const feeBh = toHuman(p.pendingFeeB, pb);
@@ -100,17 +149,59 @@ export async function GET(request: NextRequest) {
         if (amt > 0) rewardsBreakdown.push({ symbol: info?.symbol ?? "reward", amount: amt });
       }
 
-      // Realized per-position APR: annualized uncollected (fees+rewards) over the
-      // value, since the position opened. Est. only — resets on claim; hidden for
-      // brand-new positions where the number would be noise.
+      const posKey = toCanonicalAddress(p.position);
+      const evTotals = eventTotalsByPosition.get(posKey);
+      const claimedUsd = evTotals ? claimedUsdFromVaultEvents(evTotals, priceOf, p.tokenA, p.tokenB) : 0;
+
       const openedAt = Number(p.openedAt);
       const elapsed = Number.isFinite(openedAt) && openedAt > 0 ? nowSec - openedAt : 0;
+      const earnedUsd = feesUsd + rewardsUsd + claimedUsd;
+
+      // Deposit basis (USD of net deployed legs from vault events) — the same
+      // figure PnL uses. Computed before APR so APR can annualize the realized
+      // yield on *deposited capital*, not on current LP value.
+      let basisUsd: number | null = null;
+      if (evTotals && hasDeploymentEvents(evTotals)) {
+        basisUsd = basisUsdFromEvents(evTotals, priceOf, p.tokenA, p.tokenB, p.closed);
+      }
+
+      // APR = earned ÷ basis, annualized over the position's age. Falls back to
+      // current LP value when the deposit basis isn't indexed, so the realized
+      // APR badge still shows. Stables: basis ≈ value; volatile pairs diverge.
+      const aprDenominator = basisUsd != null && basisUsd > 0 ? basisUsd : valueUsd;
       const aprPct =
-        valueUsd > 0 && elapsed >= APR_MIN_ELAPSED_SECONDS
-          ? ((feesUsd + rewardsUsd) / valueUsd) * (SECONDS_PER_YEAR / elapsed) * 100
+        aprDenominator > 0 && elapsed >= APR_MIN_ELAPSED_SECONDS
+          ? (earnedUsd / aprDenominator) * (SECONDS_PER_YEAR / elapsed) * 100
           : null;
 
-      return { ...p, valueUsd, feesUsd, rewardsUsd, feesBreakdown, rewardsBreakdown, aprPct };
+      let pnlUsd: number | null = null;
+      let pnlUnavailableReason: string | null = null;
+
+      if (evTotals && basisUsd != null) {
+        if (p.closed) {
+          const exitUsd =
+            rawToUsd(evTotals.removedA, pa) + rawToUsd(evTotals.removedB, pb);
+          pnlUsd = exitUsd + claimedUsd - basisUsd;
+        } else {
+          pnlUsd = valueUsd + feesUsd + rewardsUsd + claimedUsd - basisUsd;
+        }
+      } else if (!p.closed) {
+        pnlUnavailableReason = "No vault deployment events indexed for this position";
+      }
+
+      return {
+        ...p,
+        valueUsd,
+        feesUsd,
+        rewardsUsd,
+        feesBreakdown,
+        rewardsBreakdown,
+        aprPct,
+        claimedUsd,
+        basisUsd,
+        pnlUsd,
+        pnlUnavailableReason,
+      };
     });
 
     return NextResponse.json(createSuccessResponse({ positions: enriched }));

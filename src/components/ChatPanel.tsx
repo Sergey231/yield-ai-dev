@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
+import { LegalLinks } from '@/components/legal/LegalLinks';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { SwapModal } from '@/components/ui/swap-modal';
@@ -14,6 +15,7 @@ import { useWallet as useSolanaWallet } from '@solana/wallet-adapter-react';
 import { useWalletData } from '@/contexts/WalletContext';
 import { useWalletStore } from '@/lib/stores/walletStore';
 import type { ClaimableRewardsSummary } from '@/lib/stores/walletStore';
+import { useYieldAiSafes } from '@/lib/query/hooks/protocols/yield-ai';
 import { useToast } from '@/components/ui/use-toast';
 import { getSolanaWalletAddress } from '@/lib/wallet/getSolanaWalletAddress';
 import { Connection, PublicKey, Transaction, TransactionInstruction } from '@solana/web3.js';
@@ -24,7 +26,16 @@ import {
   postToNative,
   signAndSubmitSolanaTransaction,
 } from '@/lib/mobile/nativeBridge';
-import { Gift, Loader2 } from 'lucide-react';
+import { Gift, Loader2, Send } from 'lucide-react';
+
+const MOBILE_DEBUG_MARKER = 'mobile-debug-tools-v1';
+
+function shortDebugValue(value?: string | null, head = 6, tail = 5): string {
+  if (!value) return 'none';
+  if (value.length <= head + tail + 3) return value;
+  if (tail <= 0) return value.slice(0, head);
+  return `${value.slice(0, head)}...${value.slice(-tail)}`;
+}
 
 /** Minimal shape for portfolio rows when summing USD in Tools panel */
 type WalletTokenForTotal = {
@@ -34,7 +45,11 @@ type WalletTokenForTotal = {
   amount?: string;
 };
 
-export default function ChatPanel() {
+interface ChatPanelProps {
+  headerActions?: React.ReactNode;
+}
+
+export default function ChatPanel({ headerActions }: ChatPanelProps) {
   const [isSwapModalOpen, setIsSwapModalOpen] = useState(false);
   const [isYieldCalcOpen, setIsYieldCalcOpen] = useState(false);
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
@@ -50,7 +65,7 @@ export default function ChatPanel() {
     signMessage: solanaSignMessage,
     wallet: solanaWallet,
   } = useSolanaWallet();
-  const { tokens } = useWalletData();
+  const { address: effectiveAptosAddress, tokens } = useWalletData();
   const totalAssetsStore = useWalletStore((s) => s.totalAssets);
   const rewardsLoading = useWalletStore((s) => s.rewardsLoading);
   const fetchRewards = useWalletStore((s) => s.fetchRewards);
@@ -60,11 +75,23 @@ export default function ChatPanel() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { toast } = useToast();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
+  const injectedAptosWalletId = useNativeWalletStore((s) => s.aptosWalletId);
   const injectedSolanaAddress = useNativeWalletStore((s) => s.solanaAddress);
+  const injectedSolanaWalletId = useNativeWalletStore((s) => s.solanaWalletId);
 
   // Check if any wallet is connected (Solana derived, Aptos derived, Aptos native, or direct Solana)
   const solanaAddress = useMemo(() => getSolanaWalletAddress(wallet), [wallet]);
-  const aptosAddress = account?.address?.toString();
+  const adapterAptosAddress = account?.address?.toString() ?? null;
+  const adapterSolanaAddress = solanaConnected && solanaPublicKey
+    ? solanaPublicKey.toBase58()
+    : solanaWallets?.find((w) => w.adapter.connected && w.adapter.publicKey)?.adapter.publicKey?.toBase58() ?? null;
+  const aptosAddress = effectiveAptosAddress ?? account?.address?.toString();
+  const { data: yieldAiSafeAddresses = [] } = useYieldAiSafes(aptosAddress, {
+    enabled: Boolean(aptosAddress),
+    refetchOnMount: 'always',
+  });
+  const hasAiAgent = yieldAiSafeAddresses.length > 0;
   const hasSolanaWallet = !!solanaAddress;
   // Direct Solana wallet check (covers case when Aptos derived is disconnected but Solana remains connected)
   const hasSolanaDirectWallet = solanaConnected && !!solanaPublicKey;
@@ -138,6 +165,57 @@ export default function ChatPanel() {
       });
     }
   };
+
+  const [tgLoading, setTgLoading] = useState(false);
+
+  const handleTgNotifications = useCallback(async () => {
+    if (!aptosAddress) {
+      toast({
+        variant: 'destructive',
+        title: 'Wallet Not Connected',
+        description: 'Please connect your Aptos wallet to enable Telegram alerts',
+      });
+      return;
+    }
+
+    setTgLoading(true);
+    try {
+      const solana = injectedSolanaAddress?.trim() || solanaPublicKey?.toBase58() || solanaAddress || '';
+
+      const response = await fetch('/api/tg-subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ solana, aptos: aptosAddress }),
+      });
+
+      let data: { link?: string; error?: string } | null = null;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+
+      if (response.ok && data?.link) {
+        window.open(data.link, '_blank', 'noopener,noreferrer');
+        return;
+      }
+
+      toast({
+        variant: 'destructive',
+        title: 'Subscription error',
+        description: data?.error || 'Subscription server is unavailable, please try again later',
+      });
+    } catch (error) {
+      console.error('TG notifications error:', error);
+      toast({
+        variant: 'destructive',
+        title: 'Subscription error',
+        description: 'Subscription server is unavailable, please try again later',
+      });
+    } finally {
+      setTgLoading(false);
+    }
+  }, [aptosAddress, injectedSolanaAddress, solanaAddress, solanaPublicKey, toast]);
 
   const makeRequestId = useCallback(() => {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -398,9 +476,12 @@ export default function ChatPanel() {
 
   return (
     <div className="p-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <h1 className="text-xl font-bold">Tools</h1>
-        <ThemeToggle />
+        <div className="flex items-center gap-1">
+          {headerActions}
+          <ThemeToggle />
+        </div>
       </div>
       <div className="mt-4 flex flex-col gap-2 w-full">
         <Button
@@ -473,7 +554,54 @@ export default function ChatPanel() {
             Bridge USDC
           </Button>
         )}
+        {hasAiAgent && (
+          <Button
+            variant="outline"
+            onClick={handleTgNotifications}
+            disabled={tgLoading}
+            className="flex items-center gap-2 w-full justify-start"
+          >
+            {tgLoading ? (
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+            ) : (
+              <Send className="h-4 w-4 shrink-0" />
+            )}
+            <span className="flex min-w-0 flex-col items-start leading-tight">
+              <span className="truncate">Telegram Alerts</span>
+              <span className="truncate text-xs font-normal text-muted-foreground">
+                notifications
+              </span>
+            </span>
+          </Button>
+        )}
       </div>
+
+      {showNativeDebugTools && (
+        <div className="mt-6 rounded-lg border border-border bg-muted/30 p-3 text-[11px] text-muted-foreground">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="font-medium text-foreground">Mobile debug</span>
+            <span className="font-mono">{MOBILE_DEBUG_MARKER}</span>
+          </div>
+          <div className="grid grid-cols-[90px_minmax(0,1fr)] gap-x-3 gap-y-1 font-mono">
+            <span>branch</span>
+            <span className="break-all">{process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_REF ?? 'unknown'}</span>
+            <span>commit</span>
+            <span>{shortDebugValue(process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA, 7, 0)}</span>
+            <span>native</span>
+            <span>yes</span>
+            <span>aptos native</span>
+            <span className="break-all">{shortDebugValue(injectedAptosAddress)} / {injectedAptosWalletId ?? 'none'}</span>
+            <span>aptos adapter</span>
+            <span className="break-all">{shortDebugValue(adapterAptosAddress)} / {wallet?.name ?? 'none'}</span>
+            <span>aptos final</span>
+            <span className="break-all">{shortDebugValue(aptosAddress)}</span>
+            <span>sol native</span>
+            <span className="break-all">{shortDebugValue(injectedSolanaAddress)} / {injectedSolanaWalletId ?? 'none'}</span>
+            <span>sol adapter</span>
+            <span className="break-all">{shortDebugValue(adapterSolanaAddress)}</span>
+          </div>
+        </div>
+      )}
 
       {/* Compact Footer - Mobile only */}
       <div className="mt-8 pt-4 border-t border-border md:hidden">
@@ -502,6 +630,7 @@ export default function ChatPanel() {
               </svg>
               Founder
             </Link>
+            <LegalLinks className="text-xs" linkClassName="hover:text-foreground" />
             <Link
               href="https://home.yieldai.app/"
               target="_blank"

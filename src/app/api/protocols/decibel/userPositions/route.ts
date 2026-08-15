@@ -1,10 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { normalizeAddress, toCanonicalAddress } from '@/lib/utils/addressNormalization';
+import { toCanonicalAddress } from '@/lib/utils/addressNormalization';
 
 const DECIBEL_API_KEY = process.env.DECIBEL_API_KEY;
 const DECIBEL_API_BASE_URL =
   process.env.DECIBEL_API_BASE_URL || 'https://api.testnet.aptoslabs.com/decibel';
 const DECIBEL_MAINNET_URL = 'https://api.mainnet.aptoslabs.com/decibel';
+
+type DecibelPositionRow = {
+  market?: string;
+  user?: string;
+  size?: number | string;
+  entry_price?: number | string;
+  [key: string]: unknown;
+};
 
 /**
  * GET /api/protocols/decibel/userPositions
@@ -64,7 +72,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    let positions: any[] = Array.isArray(data) ? data : [];
+    let positions: DecibelPositionRow[] = Array.isArray(data) ? (data as DecibelPositionRow[]) : [];
     const headers = {
       Authorization: `Bearer ${DECIBEL_API_KEY}`,
       'Content-Type': 'application/json',
@@ -81,22 +89,24 @@ export async function GET(request: NextRequest) {
         const subText = await subRes.text();
         const subList = subText ? JSON.parse(subText) : [];
         if (Array.isArray(subList)) {
-          for (const s of subList) {
-            const acc = s.subaccount_address ? String(s.subaccount_address).trim() : null;
-            if (!acc || acc === decibelAddr) continue;
+          const subaccounts = subList
+            .map((s) => (s.subaccount_address ? String(s.subaccount_address).trim() : null))
+            .filter((acc): acc is string => Boolean(acc && acc !== decibelAddr));
+          const subPositions = await Promise.allSettled(subaccounts.map(async (acc) => {
             const posUrl = `${baseUrl}/api/v1/account_positions?account=${encodeURIComponent(acc)}`;
             const posRes = await fetch(posUrl, { method: 'GET', headers });
-            if (posRes.ok) {
-              const posText = await posRes.text();
-              const arr = posText ? JSON.parse(posText) : [];
-              if (Array.isArray(arr)) {
-                for (const p of arr) {
-                  const key = `${p.market}-${p.user}-${p.size}-${p.entry_price}`;
-                  if (seen.has(key)) continue;
-                  seen.add(key);
-                  positions.push(p);
-                }
-              }
+            if (!posRes.ok) return [];
+            const posText = await posRes.text();
+            const arr = posText ? JSON.parse(posText) : [];
+            return Array.isArray(arr) ? arr : [];
+          }));
+          for (const result of subPositions) {
+            if (result.status !== 'fulfilled') continue;
+            for (const p of result.value) {
+              const key = `${p.market}-${p.user}-${p.size}-${p.entry_price}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              positions.push(p);
             }
           }
         }

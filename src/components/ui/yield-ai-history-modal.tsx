@@ -22,9 +22,12 @@ interface YieldAiHistoryModalProps {
     txVersion: string;
     timestamp: string;
     label: string;
+    actor?: "user" | "agent";
     legs: Array<{ direction: "in" | "out"; assetLabel: string; amountHuman: string }>;
   }[];
   currentValueUsd?: number | null;
+  /** Strategy fee APR (earned fees/rewards only, no price moves). Hyperion LP safes. */
+  feeAprPct?: number | null;
 }
 
 type TimelineRow = {
@@ -52,6 +55,7 @@ export function YieldAiHistoryModal({
   history,
   operations,
   currentValueUsd,
+  feeAprPct,
 }: YieldAiHistoryModalProps) {
   const entries = history?.entries ?? [];
   const pnl = history?.pnlStats?.pnl ?? null;
@@ -137,6 +141,11 @@ export function YieldAiHistoryModal({
                 Historical APR: {apr}%
               </Badge>
             )}
+            {feeAprPct != null && Number.isFinite(feeAprPct) && (
+              <Badge variant="outline" className="text-xs">
+                Fee APR: {formatNumber(feeAprPct, 2)}%
+              </Badge>
+            )}
             {holdingDays > 0 && (
               <Badge variant="outline" className="text-xs">
                 Period: {holdingDays}d
@@ -148,7 +157,8 @@ export function YieldAiHistoryModal({
               </Badge>
             )}
             <span className="text-xs text-muted-foreground">
-              APR is calculated using the Modified Dietz method.
+              Historical APR is mark-to-market (Modified Dietz) and includes price moves.
+              {feeAprPct != null ? " Fee APR counts only fees and rewards earned by open LP positions." : ""}
             </span>
           </div>
 
@@ -197,8 +207,8 @@ export function YieldAiHistoryModal({
             <div className="rounded-lg border overflow-hidden">
               <div className="flex items-center justify-between gap-2 bg-muted px-3 py-2">
                 <div className="text-xs font-medium text-muted-foreground">Executor operations</div>
-                <div className="text-[11px] text-muted-foreground">
-                  swaps · claims · deposits
+                <div className="hidden sm:block text-[11px] text-muted-foreground">
+                  swaps · claims · LP · deposits
                 </div>
               </div>
               <div className="max-h-[260px] overflow-y-auto">
@@ -210,7 +220,17 @@ export function YieldAiHistoryModal({
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-xs text-muted-foreground">{fmtDateTime(op.timestamp)}</div>
-                        <div className="font-medium">{op.label}</div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">{op.label}</span>
+                          {op.actor && (
+                            <Badge
+                              variant={op.actor === "user" ? "default" : "secondary"}
+                              className="h-4 px-1.5 text-[10px] leading-none"
+                            >
+                              {op.actor === "user" ? "You" : "Agent"}
+                            </Badge>
+                          )}
+                        </div>
                       </div>
                       <a
                         href={explorerTxUrl(op.txVersion)}
@@ -242,9 +262,9 @@ export function YieldAiHistoryModal({
 
           <div className="rounded-lg border overflow-hidden">
             <div className="grid grid-cols-12 gap-2 bg-muted px-3 py-2 text-xs font-medium text-muted-foreground">
-              <div className="col-span-5">Time</div>
-              <div className="col-span-3">Direction</div>
-              <div className="col-span-2 text-right">Amount</div>
+              <div className="col-span-4 sm:col-span-5">Time</div>
+              <div className="col-span-2 sm:col-span-3">Direction</div>
+              <div className="col-span-4 sm:col-span-2 text-right">Amount</div>
               <div className="col-span-2 text-right">Tx</div>
             </div>
             <div className="max-h-[340px] overflow-y-auto">
@@ -258,10 +278,10 @@ export function YieldAiHistoryModal({
                     key={`${e.txVersion}-${e.timestamp}-${e.amountRaw}`}
                     className="grid grid-cols-12 gap-2 px-3 py-2 text-sm border-t"
                   >
-                    <div className="col-span-5 text-muted-foreground">
+                    <div className="col-span-4 sm:col-span-5 text-muted-foreground break-words">
                       {fmtDateTime(e.timestamp)}
                     </div>
-                    <div className="col-span-3">
+                    <div className="col-span-2 sm:col-span-3">
                       <span
                         className={
                           e.direction === "deposit" ? "text-green-600" : "text-destructive"
@@ -270,7 +290,7 @@ export function YieldAiHistoryModal({
                         {e.direction === "deposit" ? "Deposit" : "Withdraw"}
                       </span>
                     </div>
-                    <div className="col-span-2 text-right tabular-nums">
+                    <div className="col-span-4 sm:col-span-2 text-right tabular-nums break-words">
                       {e.direction === "deposit" ? "+" : "-"}
                       {e.amount} USDC
                     </div>

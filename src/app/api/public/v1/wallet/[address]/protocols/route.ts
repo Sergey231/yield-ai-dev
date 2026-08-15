@@ -1,4 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
+import {
+  aggregateProtocolValues,
+  computeProtocolValueUsd,
+} from '@/lib/services/public/protocolValueUsd';
+import {
+  computeDecibelUsd,
+  computeEchelonUsd,
+  computeYieldAiSafesUsd,
+} from '@/lib/services/public/aptosDefiUsd';
+import { computeTramplinUsd } from '@/lib/services/public/solanaDefiUsd';
+import { getWalletBalance } from '@/lib/services/wallet-api';
+import { SolanaPortfolioService } from '@/lib/services/solana/portfolio';
 
 type ProtocolConfig = {
   key: string;
@@ -11,6 +23,10 @@ type ProtocolResult = {
   success: boolean;
   positionsCount: number;
   positions: unknown[];
+  /** Best-effort net USD for this protocol (positions only; rewards may be excluded per protocol). */
+  valueUSD: number;
+  /** False when USD could not be derived reliably (e.g. Echelon raw amounts without prices). */
+  valueUSDComplete: boolean;
   /** Passthrough from upstream route (e.g. Jupiter scaffold explanation, Kamino market counts). */
   meta?: unknown;
   status?: number;
@@ -38,8 +54,11 @@ const APTOS_PROTOCOLS: ProtocolConfig[] = [
 const SOLANA_PROTOCOLS: ProtocolConfig[] = [
   { key: 'jupiter', endpoint: '/api/protocols/jupiter/userPositions' },
   { key: 'kamino', endpoint: '/api/protocols/kamino/userPositions' },
+  { key: 'meteora', endpoint: '/api/protocols/meteora/userPositions' },
   { key: 'raydium', endpoint: '/api/protocols/raydium/userPositions' },
   { key: 'orca', endpoint: '/api/protocols/orca/userPositions' },
+  { key: 'tramplin', endpoint: '/api/protocols/tramplin/userPositions' },
+  { key: 'exponent', endpoint: '/api/protocols/exponent/userPositions' },
 ];
 
 function isRequireKey(): boolean {
@@ -162,6 +181,8 @@ async function fetchProtocolPositions(
         success: false,
         positionsCount: 0,
         positions: [],
+        valueUSD: 0,
+        valueUSDComplete: true,
         status,
         error: message,
       };
@@ -171,6 +192,11 @@ async function fetchProtocolPositions(
     const positionsCount = getPositionsCount(config.key, positions);
     const normalizedPositions =
       config.key === 'joule' && positionsCount === 0 ? [] : positions;
+    const { valueUSD, valueUSDComplete } = computeProtocolValueUsd(
+      config.key,
+      normalizedPositions,
+      payload
+    );
 
     return {
       protocol: config.key,
@@ -178,6 +204,8 @@ async function fetchProtocolPositions(
       success: true,
       positionsCount,
       positions: normalizedPositions,
+      valueUSD,
+      valueUSDComplete,
       meta: extractUpstreamMeta(payload),
       status,
     };
@@ -188,8 +216,31 @@ async function fetchProtocolPositions(
       success: false,
       positionsCount: 0,
       positions: [],
+      valueUSD: 0,
+      valueUSDComplete: true,
       error: error instanceof Error ? error.message : 'fetch_failed',
     };
+  }
+}
+
+/** Recompute the Echelon entry's USD from its raw positions (Panora-priced). */
+async function enrichEchelonUsd(
+  settled: ProtocolResult[],
+  address: string,
+  origin: string
+): Promise<void> {
+  const echelon = settled.find((p) => p.protocol === 'echelon');
+  if (!echelon || echelon.positionsCount === 0) return;
+  try {
+    const result = await computeEchelonUsd(
+      echelon.positions as Parameters<typeof computeEchelonUsd>[0],
+      address,
+      origin
+    );
+    echelon.valueUSD = result.valueUSD;
+    echelon.valueUSDComplete = result.valueUSDComplete;
+  } catch {
+    // Leave the conservative default (0 / incomplete) on failure.
   }
 }
 
@@ -213,22 +264,91 @@ export async function GET(
     }
 
     const protocolsToFetch = resolved.kind === 'aptos' ? APTOS_PROTOCOLS : SOLANA_PROTOCOLS;
+    const cleanAddress = resolved.clean as string;
+    const origin = request.nextUrl.origin;
 
     const settled = await Promise.all(
-      protocolsToFetch.map((protocol) => fetchProtocolPositions(request, resolved.clean as string, protocol))
+      protocolsToFetch.map((protocol) => fetchProtocolPositions(request, cleanAddress, protocol))
     );
+
+    // Aptos-only USD parity with the Sidebar: recompute protocols whose upstream
+    // routes return raw amounts without prices, then add the Yield AI safes total.
+    let walletValueUSD = 0;
+    if (resolved.kind === 'aptos') {
+      const [, decibelUsd, yieldAiUsd] = await Promise.all([
+        enrichEchelonUsd(settled, cleanAddress, origin),
+        computeDecibelUsd(cleanAddress, origin).catch(() => null),
+        computeYieldAiSafesUsd(cleanAddress, origin).catch(() => null),
+      ]);
+
+      const decibel = settled.find((p) => p.protocol === 'decibel');
+      if (decibel && decibelUsd) {
+        decibel.valueUSD = decibelUsd.valueUSD;
+        decibel.valueUSDComplete = decibelUsd.valueUSDComplete;
+      }
+
+      if (yieldAiUsd) {
+        settled.push({
+          protocol: 'yield-ai',
+          endpoint: '/api/protocols/yield-ai/safes',
+          success: true,
+          positionsCount: yieldAiUsd.safesCount,
+          positions: yieldAiUsd.positions,
+          valueUSD: yieldAiUsd.valueUSD,
+          valueUSDComplete: yieldAiUsd.valueUSDComplete,
+          status: 200,
+        });
+      }
+
+      try {
+        const balance = await getWalletBalance(cleanAddress);
+        walletValueUSD = (balance.tokens || []).reduce((sum, t) => sum + (t.valueUSD || 0), 0);
+      } catch {
+        walletValueUSD = 0;
+      }
+    } else {
+      // Tramplin's USD lives across two endpoints (stake + winnings), so recompute it.
+      const tramplinUsd = await computeTramplinUsd(cleanAddress, origin).catch(() => null);
+      const tramplin = settled.find((p) => p.protocol === 'tramplin');
+      if (tramplin && tramplinUsd) {
+        tramplin.valueUSD = tramplinUsd.valueUSD;
+        tramplin.valueUSDComplete = tramplinUsd.valueUSDComplete;
+        tramplin.positionsCount = tramplinUsd.hasPosition ? 1 : 0;
+        tramplin.positions = tramplinUsd.positions;
+      }
+
+      try {
+        const portfolio = await SolanaPortfolioService.getInstance().getPortfolio(cleanAddress);
+        const total = portfolio.totalValueUsd;
+        walletValueUSD =
+          typeof total === 'number' && Number.isFinite(total)
+            ? total
+            : (portfolio.tokens || []).reduce(
+                (sum, t) => sum + (t.value ? parseFloat(t.value) || 0 : 0),
+                0
+              );
+      } catch {
+        walletValueUSD = 0;
+      }
+    }
 
     const protocolsWithPositions = settled.filter((p) => p.positionsCount > 0).length;
     const failedProtocols = settled.filter((p) => !p.success).length;
+    const { totalDeFiValueUSD, totalDeFiValueUSDComplete } = aggregateProtocolValues(settled);
 
     return NextResponse.json(
       {
-        address: resolved.clean,
+        address: cleanAddress,
         chain: resolved.kind,
         timestamp: new Date().toISOString(),
         protocolsTotal: settled.length,
         protocolsWithPositions,
         failedProtocols,
+        walletValueUSD,
+        totalDeFiValueUSD,
+        totalDeFiValueUSDComplete,
+        totalAssetsUSD: walletValueUSD + totalDeFiValueUSD,
+        totalAssetsUSDComplete: totalDeFiValueUSDComplete,
         protocols: settled,
       },
       { status: 200 }

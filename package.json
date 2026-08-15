@@ -12,6 +12,9 @@
     "extract:docs": "node scripts/publish-dev-docs.js",
     "publish:docs:dev": "node scripts/publish-dev-docs.js",
     "verify:kamino-deps": "node scripts/verify-kamino-deps.mjs",
+    "dn-pilot:preflight": "npx tsx scripts/dn-pilot-preflight.mts",
+    "dn-pilot:open": "npx tsx scripts/dn-pilot-open.mts",
+    "dn-pilot:close": "npx tsx scripts/dn-pilot-close.mts",
     "postinstall": "node scripts/copy-lightprotocol-wasm.js && node scripts/verify-kamino-deps.mjs"
   },
   "dependencies": {
@@ -31,6 +34,9 @@
     "@dnd-kit/core": "^6.3.1",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
+    "@exponent-labs/exponent-clmm-idl": "^0.9.19",
+    "@exponent-labs/exponent-fetcher": "^0.9.19",
+    "@exponent-labs/exponent-sdk": "^0.9.19",
     "@hyperionxyz/sdk": "^0.1.1",
     "@jup-ag/lend-read": "^0.0.10",
     "@kamino-finance/farms-sdk": "^3.2.24",

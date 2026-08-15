@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 import Image from 'next/image';
 import { useWalletData } from '@/contexts/WalletContext';
 import { useYieldAiSafes } from '@/lib/query/hooks/protocols/yield-ai';
@@ -13,7 +13,6 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { YieldAiSafeSettingsForm } from '@/components/ui/yield-ai-safe-settings-form';
-import { AttachHyperionStrategyButton } from '@/components/ui/attach-hyperion-strategy-button';
 import { DepositModal } from '@/components/ui/deposit-modal';
 import { cn } from '@/lib/utils';
 import { getProtocolByName } from '@/lib/protocols/getProtocolsList';
@@ -23,10 +22,10 @@ import { LineChart, X } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useProtocol } from '@/lib/contexts/ProtocolContext';
 import { useMobileManagement } from '@/contexts/MobileManagementContext';
-import { useSafeAiAgentStrategy } from '@/lib/query/hooks/protocols/yield-ai/useSafeAiAgentStrategy';
 import { AI_AGENT_STRATEGIES } from '@/lib/protocols/yield-ai/strategyRegistry';
 import { useCardTokenDrop } from '@/hooks/useCardTokenDrop';
 import { useEchelonPools } from '@/lib/query/hooks/protocols/echelon/useEchelonPools';
+import { WalletConnectDialog } from '@/components/ui/wallet-connect-dialog';
 
 export interface YieldAiAgentWalletBlockProps {
   className?: string;
@@ -272,14 +271,6 @@ export function YieldAiAgentWalletBlock({ className }: YieldAiAgentWalletBlockPr
   const { setSelectedProtocol } = useProtocol();
   const { setActiveTab, scrollToTop } = useMobileManagement();
 
-  // Hidden entry point: reveal the "Create new safe" button (which opens the
-  // settings dialog with the strategy selector, incl. Hyperion LP) only when the
-  // page is opened with `?strategy=hyperion`. Kept out of the default UI.
-  const [showHyperionEntry] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    return new URLSearchParams(window.location.search).get('strategy') === 'hyperion';
-  });
-
   const { data: safeAddresses = [], isLoading: safesLoading, isFetched: safesFetched } = useYieldAiSafes(address, {
     enabled: Boolean(address),
     refetchOnMount: 'always',
@@ -375,6 +366,7 @@ export function YieldAiAgentWalletBlock({ className }: YieldAiAgentWalletBlockPr
   const hasAnySafe = normalizedAllSafes.length > 0;
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [walletDialogOpen, setWalletDialogOpen] = useState(false);
   const [depositOpen, setDepositOpen] = useState(false);
   const [openDepositAfterCreate, setOpenDepositAfterCreate] = useState(false);
   const [depositTokenSymbol, setDepositTokenSymbol] = useState('USDC');
@@ -408,9 +400,6 @@ export function YieldAiAgentWalletBlock({ className }: YieldAiAgentWalletBlockPr
     // below; the raw address is intentionally hidden from the main page.
     return '';
   }, [address, hasAnySafe, hasStablecoinSafe, isResolvingSafes]);
-
-  const { data: safeStrategy } = useSafeAiAgentStrategy(safeAddress ?? undefined, { enabled: Boolean(safeAddress) });
-  const activeStrategyId = safeStrategy?.activeStrategyId ?? null;
 
   // The stablecoin-compound strategy is hard-wired to the Echelon USD1
   // supply market (see strategyRegistry.ts). We surface that pool's live
@@ -487,147 +476,166 @@ export function YieldAiAgentWalletBlock({ className }: YieldAiAgentWalletBlockPr
     }
   };
 
+  const isCardClickable = hasStablecoinSafe && !isResolvingSafes;
+
+  const handleCardClick = () => {
+    if (!isCardClickable) return;
+    handleManagePosition();
+  };
+
+  const handleCardKeyDown = (e: KeyboardEvent) => {
+    if (!isCardClickable) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      handleManagePosition();
+    }
+  };
+
   return (
     <>
       <Card
         {...dragHandlers}
+        role={isCardClickable ? 'button' : undefined}
+        tabIndex={isCardClickable ? 0 : undefined}
+        aria-label={isCardClickable ? 'Manage Yield AI Stablecoin Agent' : undefined}
+        onClick={isCardClickable ? handleCardClick : undefined}
+        onKeyDown={isCardClickable ? handleCardKeyDown : undefined}
         className={cn(
           // Use an explicit emerald hue for drop-target feedback: the app's
           // `--success` token is greyscale (used for the dark Deposit button),
           // so success/* tints would render grey, not green.
-          'h-full min-w-0 overflow-hidden border border-primary/20 hover:shadow-md transition-all',
+          'h-full min-w-0 overflow-hidden border border-primary/20 transition-all',
+          isCardClickable
+            ? 'cursor-pointer hover:border-primary/40 hover:bg-muted/20 hover:shadow-md active:scale-[0.995]'
+            : 'hover:shadow-md',
           isDraggingAccepted && 'border-2 border-emerald-500 bg-emerald-500/15 ring-2 ring-emerald-500/40',
           isOver && 'border-2 border-emerald-500 bg-emerald-500/30 ring-4 ring-emerald-500',
           className
         )}
       >
-        <CardContent className="p-4 sm:p-6 flex flex-col h-full">
-          <div className="flex flex-col items-stretch gap-4 flex-1 xl:flex-row xl:items-center xl:justify-between">
-            <div className="flex items-start gap-3 min-w-0 w-full xl:items-center">
-              <div className="p-2 bg-primary/10 rounded-full shrink-0">
-                <div className="w-5 h-5 relative">
-                  {!logoError && protocol?.logoUrl ? (
-                    <Image
-                      src={protocol.logoUrl}
-                      alt={protocol.name ?? 'AI agent'}
-                      width={20}
-                      height={20}
-                      className="object-contain"
-                      onError={() => setLogoError(true)}
-                      unoptimized
-                    />
-                  ) : (
-                    <div className="w-5 h-5 flex items-center justify-center text-[10px] font-semibold text-primary">
-                      YA
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div className="min-w-0 flex-1">
-                <h3 className="text-lg font-semibold text-primary truncate">Yield AI stablecoin agent</h3>
-                <div className="mt-1 flex min-w-0 flex-col items-start gap-2 sm:flex-row sm:items-center sm:gap-1.5">
-                  {subtitle ? (
-                    <p className="max-w-full text-sm text-muted-foreground truncate">{subtitle}</p>
-                  ) : null}
-                  {/* Safe switcher and strategy tag moved into the Deposit
-                      modal — that is where they actually matter. The
-                      Manage-positions button always opens the last selected
-                      safe (persisted in localStorage). */}
-                </div>
+        <CardContent className="p-4 sm:p-5 flex flex-col h-full gap-3">
+          {/* Header: icon + title + subtitle (own row → no truncation). */}
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="p-2 bg-primary/10 rounded-full shrink-0">
+              <div className="w-5 h-5 relative">
+                {!logoError && protocol?.logoUrl ? (
+                  <Image
+                    src={protocol.logoUrl}
+                    alt={protocol.name ?? 'AI agent'}
+                    width={20}
+                    height={20}
+                    className="object-contain"
+                    onError={() => setLogoError(true)}
+                    unoptimized
+                  />
+                ) : (
+                  <div className="w-5 h-5 flex items-center justify-center text-[10px] font-semibold text-primary">
+                    YA
+                  </div>
+                )}
               </div>
             </div>
-
-            <div className="shrink-0 flex w-full items-center gap-3 xl:w-auto">
-              {/* Stacked USDC + USD1 logos — shown unconditionally so it is
-                  obvious which stablecoins this agent accepts. */}
-              <div className="relative h-7 w-12 shrink-0" aria-label="Accepts USDC and USD1">
-                <Image
-                  src={USDC_LOGO_APTOS}
-                  alt="USDC"
-                  width={28}
-                  height={28}
-                  className="absolute left-0 top-0 h-7 w-7 rounded-full ring-2 ring-background"
-                  unoptimized
-                />
-                <Image
-                  src={USD1_LOGO_APTOS}
-                  alt="USD1"
-                  width={28}
-                  height={28}
-                  className="absolute left-5 top-0 h-7 w-7 rounded-full ring-2 ring-background"
-                  unoptimized
-                />
-              </div>
-              {stablecoinCompoundApr != null ? (
-                <div className="flex shrink-0 flex-col items-center leading-none">
-                  <span className="text-xl font-bold tabular-nums text-foreground">
-                    {stablecoinCompoundApr.toFixed(2)}%
-                  </span>
-                  <span className="mt-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                    Total APR
-                  </span>
-                </div>
+            <div className="min-w-0 flex-1">
+              <h3 className="text-base font-semibold text-primary leading-tight">Yield AI Stablecoin Agent</h3>
+              {subtitle ? (
+                <p className="mt-1.5 text-sm text-muted-foreground">{subtitle}</p>
               ) : null}
-              {isResolvingSafes ? (
-                <Button size="sm" variant="outline" disabled className="flex-1 xl:flex-none xl:w-auto">
-                  Checking…
-                </Button>
-              ) : !hasStablecoinSafe ? (
+              <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
+                {/* Stacked USDC + USD1 logos — shown unconditionally so it is
+                    obvious which stablecoins this agent accepts. */}
+                <div className="relative h-7 w-12 shrink-0" aria-label="Accepts USDC and USD1">
+                  <Image
+                    src={USDC_LOGO_APTOS}
+                    alt="USDC"
+                    width={28}
+                    height={28}
+                    className="absolute left-0 top-0 h-7 w-7 rounded-full ring-2 ring-background"
+                    unoptimized
+                  />
+                  <Image
+                    src={USD1_LOGO_APTOS}
+                    alt="USD1"
+                    width={28}
+                    height={28}
+                    className="absolute left-5 top-0 h-7 w-7 rounded-full ring-2 ring-background"
+                    unoptimized
+                  />
+                </div>
+                {stablecoinCompoundApr != null ? (
+                  <div className="flex shrink-0 items-baseline gap-1 leading-none">
+                    <span className="text-xl font-bold tabular-nums text-foreground">
+                      {stablecoinCompoundApr.toFixed(2)}%
+                    </span>
+                    <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Total APR
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+              {/* Safe switcher and strategy tag moved into the Deposit modal —
+                  that is where they actually matter. The Manage-positions button
+                  always opens the last selected safe (persisted in localStorage). */}
+            </div>
+          </div>
+
+          {/* Footer actions, pinned to the bottom so cards align in the row. */}
+          <div
+            className="mt-auto flex items-center justify-end gap-2 pt-1"
+            onClick={isCardClickable ? (e) => e.stopPropagation() : undefined}
+          >
+            {isResolvingSafes ? (
+              <Button size="sm" variant="outline" disabled className="w-full">
+                Checking…
+              </Button>
+            ) : !hasStablecoinSafe ? (
+              <Button
+                size="sm"
+                onClick={() => {
+                  if (!address) {
+                    setWalletDialogOpen(true);
+                    return;
+                  }
+                  setSettingsOpen(true);
+                }}
+                disabled={safesLoading}
+                className="w-full bg-black text-white hover:bg-black/90"
+              >
+                Create AI agent wallet
+              </Button>
+            ) : (
+              <>
+                {safeAddress && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-9 w-9 shrink-0 p-0"
+                        onClick={handleManagePosition}
+                        disabled={!address || !safeAddress}
+                        aria-label="Manage positions"
+                      >
+                        <LineChart className="h-4 w-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Manage positions</p>
+                    </TooltipContent>
+                  </Tooltip>
+                )}
                 <Button
                   size="sm"
-                  onClick={() => setSettingsOpen(true)}
-                  disabled={!address || safesLoading}
-                  className="flex-1 bg-black text-white hover:bg-black/90 xl:flex-none xl:w-auto"
+                  className="flex-1 bg-success text-success-foreground hover:bg-success/90"
+                  onClick={() => {
+                    setDepositTokenSymbol('USDC');
+                    setDepositOpen(true);
+                  }}
+                  disabled={!address || !safeAddress}
                 >
-                  Create AI agent wallet
+                  Deposit
                 </Button>
-              ) : (
-                <>
-                  {/* Hidden by default; revealed via `?strategy=hyperion` so a
-                      user with an existing safe can still create a Hyperion LP safe. */}
-                  {showHyperionEntry && (
-                    <Button size="sm" variant="outline" onClick={() => setSettingsOpen(true)} disabled={!address}>
-                      Create new safe
-                    </Button>
-                  )}
-                  {/* Retry attach for a safe whose create-time attach was skipped
-                      (indexer race) — it resolves as the default stablecoin tag. */}
-                  {showHyperionEntry && safeAddress && activeStrategyId !== 'hyperion_lp' && (
-                    <AttachHyperionStrategyButton safeAddress={safeAddress} className="w-full xl:w-auto" />
-                  )}
-                  {safeAddress && (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-9 w-9 shrink-0 p-0"
-                          onClick={handleManagePosition}
-                          disabled={!address || !safeAddress}
-                          aria-label="Manage positions"
-                        >
-                          <LineChart className="h-4 w-4" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p>Manage positions</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  )}
-                  <Button
-                    size="sm"
-                    className="flex-1 bg-success text-success-foreground hover:bg-success/90 xl:flex-none xl:w-auto"
-                    onClick={() => {
-                      setDepositTokenSymbol('USDC');
-                      setDepositOpen(true);
-                    }}
-                    disabled={!address || !safeAddress}
-                  >
-                    Deposit
-                  </Button>
-                </>
-              )}
-            </div>
+              </>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -680,7 +688,10 @@ export function YieldAiAgentWalletBlock({ className }: YieldAiAgentWalletBlockPr
         yieldAiSafeAddress={safeAddress ?? undefined}
         yieldAiSafeOptions={yieldAiSafeOptions}
         onYieldAiSafeChange={handleYieldAiSafeChange}
+        onDepositSuccess={handleManagePosition}
       />
+
+      <WalletConnectDialog open={walletDialogOpen} onOpenChange={setWalletDialogOpen} />
     </>
   );
 }

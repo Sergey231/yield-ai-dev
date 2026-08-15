@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createErrorResponse, createSuccessResponse } from "@/lib/utils/http";
-import { runHyperionOpen, runHyperionOpenDual } from "@/lib/protocols/yield-ai/hyperionLpActions";
+import {
+  runHyperionOpen,
+  runHyperionOpenDual,
+  runHyperionOpenZapTokenA,
+} from "@/lib/protocols/yield-ai/hyperionLpActions";
 import {
   HyperionManageAuthError,
   assertHyperionManageOwnerAuth,
@@ -23,8 +27,10 @@ function parseBigIntPositive(raw: unknown): bigint {
  * POST /api/protocols/yield-ai/hyperion-lp/manage/open
  *
  * User-facing proxy: opens a Hyperion LP position. Two modes:
- *  - `mode: "zap"` (default): from USDC only; the contract swaps part to the
- *    non-USDC leg (charges the safe's USDC swap limits).
+ *  - `mode: "zap"` (default): from a single token. USDC (default) uses the
+ *    contract zap; `inputToken: "tokenA"` + `amountBaseUnits` funds from the
+ *    pool's non-USDC token (e.g. USDt) — the executor swaps part to USDC then
+ *    opens dual.
  *  - `mode: "dual"`: from BOTH legs already in the safe (no swap); body carries
  *    `amountABaseUnits` + `amountBBaseUnits`.
  * No cron secret in the browser. Live actions require a wallet owner signature;
@@ -65,7 +71,6 @@ export async function POST(request: NextRequest) {
             amountABaseUnits: amountA.toString(),
             amountBBaseUnits: amountB.toString(),
             poolKey: typeof body.poolKey === "string" && body.poolKey.trim() ? body.poolKey.trim() : null,
-            halfWidthTicks: optionalNumber(body.halfWidthTicks),
             tickLower: optionalNumber(body.tickLower),
             tickUpper: optionalNumber(body.tickUpper),
             dryRun,
@@ -87,7 +92,51 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(createSuccessResponse(result));
     }
 
-    // mode === "zap"
+    // mode === "zap" — fund with USDC (default) or with the pool's non-USDC
+    // token_a (e.g. a safe holding only USDt for the USDt/USDC pool).
+    if (body.inputToken === "tokenA") {
+      let amountIn: bigint;
+      try {
+        amountIn = parseBigIntPositive(body.amountBaseUnits);
+      } catch {
+        return NextResponse.json(
+          createErrorResponse(new Error("amountBaseUnits must be a positive u64 string")),
+          { status: 400 }
+        );
+      }
+
+      if (!dryRun) {
+        await assertHyperionManageOwnerAuth({
+          safeAddress,
+          action: "hyperion_lp_manage_open",
+          fields: {
+            safeAddress,
+            mode,
+            inputToken: "tokenA",
+            amountBaseUnits: amountIn.toString(),
+            poolKey: typeof body.poolKey === "string" && body.poolKey.trim() ? body.poolKey.trim() : null,
+            tickLower: optionalNumber(body.tickLower),
+            tickUpper: optionalNumber(body.tickUpper),
+            slippageBps: optionalNumber(body.slippageBps),
+            dryRun,
+          },
+          auth: body.auth,
+        });
+      }
+
+      const result = await runHyperionOpenZapTokenA({
+        safeAddress,
+        amountBaseUnits: amountIn,
+        poolKey: (body.poolKey as HyperionPoolKey) || undefined,
+        halfWidthTicks: body.halfWidthTicks,
+        tickLower: body.tickLower,
+        tickUpper: body.tickUpper,
+        slippageBps: body.slippageBps,
+        dryRun,
+      });
+      return NextResponse.json(createSuccessResponse(result));
+    }
+
     let usdcAmountIn: bigint;
     try {
       usdcAmountIn = BigInt(String(body.usdcAmountInBaseUnits ?? "").trim());
@@ -106,7 +155,6 @@ export async function POST(request: NextRequest) {
           safeAddress,
           usdcAmountInBaseUnits: usdcAmountIn.toString(),
           poolKey: typeof body.poolKey === "string" && body.poolKey.trim() ? body.poolKey.trim() : null,
-          halfWidthTicks: optionalNumber(body.halfWidthTicks),
           tickLower: optionalNumber(body.tickLower),
           tickUpper: optionalNumber(body.tickUpper),
           slippageBps: optionalNumber(body.slippageBps),

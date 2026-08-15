@@ -10,6 +10,9 @@ const nextConfig = {
     '@orca-so/whirlpools',
     '@orca-so/whirlpools-client',
     '@kamino-finance/kliquidity-sdk',
+    '@exponent-labs/exponent-fetcher',
+    '@exponent-labs/exponent-sdk',
+    '@exponent-labs/exponent-clmm-idl',
   ],
   // Optimize chunk loading for Vercel deployment
   webpack: (config, { isServer }) => {
@@ -112,6 +115,24 @@ const nextConfig = {
         port: '',
         pathname: '/images/**',
       },
+      {
+        protocol: 'https',
+        hostname: 'arweave.net',
+        port: '',
+        pathname: '/**',
+      },
+      {
+        protocol: 'https',
+        hostname: 'ipfs.io',
+        port: '',
+        pathname: '/**',
+      },
+      {
+        protocol: 'https',
+        hostname: 'static.jup.ag',
+        port: '',
+        pathname: '/**',
+      },
     ],
     domains: [
       'hyperion.xyz',
@@ -125,7 +146,10 @@ const nextConfig = {
       'app.auro.finance',
       'app.kofi.finance',
       'app.earnium.io',
-      'www.orca.so'
+      'www.orca.so',
+      'arweave.net',
+      'ipfs.io',
+      'static.jup.ag',
     ],
     // Add image optimization settings
     formats: ['image/webp', 'image/avif'],

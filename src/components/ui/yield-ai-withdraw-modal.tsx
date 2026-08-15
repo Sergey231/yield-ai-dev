@@ -18,6 +18,8 @@ import { buildVaultWithdrawPayload } from "@/lib/protocols/yield-ai/vaultDeposit
 import { showTransactionSuccessToast } from "@/components/ui/transaction-toast";
 import { useAmountInput } from "@/hooks/useAmountInput";
 import { TokenAmountInput } from "@/shared/DepositAmountInput";
+import { submitAptosTransaction } from "@/lib/mobile/submitAptosTransaction";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 /** FA metadata address from token (safe asset_type). APT is not supported for vault::withdraw. */
 function getMetadataAddress(token: Token): string | null {
@@ -60,7 +62,8 @@ export function YieldAIWithdrawModal({
   token,
   safeAddress,
 }: YieldAIWithdrawModalProps) {
-  const { signAndSubmitTransaction } = useWallet();
+  const { account, signAndSubmitTransaction } = useWallet();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const amountInputRef = useRef<HTMLInputElement>(null);
@@ -85,8 +88,9 @@ export function YieldAIWithdrawModal({
 
   const metadataAddress = token ? getMetadataAddress(token) : null;
   const isApt = token?.address === APTOS_COIN_TYPE;
+  const effectiveAptosAddress = account?.address?.toString() ?? injectedAptosAddress ?? null;
   const canSubmitTx =
-    !!safeAddress && !!metadataAddress && !!signAndSubmitTransaction;
+    !!safeAddress && !!metadataAddress && (!!signAndSubmitTransaction || !!effectiveAptosAddress);
 
   // Default to max when opening (withdraw all).
   useEffect(() => {
@@ -140,13 +144,18 @@ export function YieldAIWithdrawModal({
         metadata: metadataAddress,
         amountBaseUnits: amount,
       });
-      const result = await signAndSubmitTransaction({
-        data: {
-          function: payload.function as `${string}::${string}::${string}`,
-          typeArguments: payload.typeArguments,
-          functionArguments: payload.functionArguments,
+      const result = await submitAptosTransaction({
+        transaction: {
+          data: {
+            function: payload.function as `${string}::${string}::${string}`,
+            typeArguments: payload.typeArguments,
+            functionArguments: payload.functionArguments,
+          },
+          options: { maxGasAmount: 20000 },
         },
-        options: { maxGasAmount: 20000 },
+        signAndSubmitTransaction: signAndSubmitTransaction as any,
+        connected: !!account,
+        address: effectiveAptosAddress,
       });
       if (result?.hash) {
         showTransactionSuccessToast({

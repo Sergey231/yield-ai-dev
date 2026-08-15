@@ -13,6 +13,8 @@ import { useWalletStore } from '@/lib/stores/walletStore';
 import { ToastAction } from '@/components/ui/toast';
 import { getClientBaseUrl } from '@/lib/utils/config';
 import type { ClaimableRewardsSummary } from '@/lib/stores/walletStore';
+import { submitAptosTransaction } from '@/lib/mobile/submitAptosTransaction';
+import { useNativeWalletStore } from '@/lib/stores/nativeWalletStore';
 
 interface ClaimAllRewardsModalProps {
   isOpen: boolean;
@@ -32,6 +34,8 @@ interface ClaimResult {
 
 export function ClaimAllRewardsModal({ isOpen, onClose, summary, positions }: ClaimAllRewardsModalProps) {
   const { account, signAndSubmitTransaction } = useWallet();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
+  const effectiveAptosAddress = account?.address?.toString() ?? injectedAptosAddress ?? null;
   const { toast } = useToast();
 
   // Early return if summary is invalid
@@ -82,7 +86,7 @@ export function ClaimAllRewardsModal({ isOpen, onClose, summary, positions }: Cl
   const progress = totalPositions > 0 ? ((results.length + 1) / totalPositions) * 100 : 0;
 
   const handleClaimAll = async () => {
-    if (!account?.address || totalPositions === 0) return;
+    if (!effectiveAptosAddress || totalPositions === 0) return;
 
     setIsProcessing(true);
     setResults([]);
@@ -147,7 +151,7 @@ export function ClaimAllRewardsModal({ isOpen, onClose, summary, positions }: Cl
 
   // Special handling for Hyperion using SDK
   const handleHyperionClaim = async () => {
-    if (!signAndSubmitTransaction || !account?.address) {
+    if (!effectiveAptosAddress || (!signAndSubmitTransaction && !injectedAptosAddress)) {
       throw new Error('Wallet not connected');
     }
 
@@ -191,19 +195,27 @@ export function ClaimAllRewardsModal({ isOpen, onClose, summary, positions }: Cl
             
             const payload = await sdk.Position.claimAllRewardsTransactionPayload({
               positionId: position.position.objectId,
-              recipient: account.address.toString()
+              recipient: effectiveAptosAddress
             });
 
-            const response = await signAndSubmitTransaction({
-              data: {
-                function: payload.function as `${string}::${string}::${string}`,
-                typeArguments: payload.typeArguments,
-                functionArguments: payload.functionArguments
+            const response = await submitAptosTransaction({
+              transaction: {
+                data: {
+                  function: payload.function as `${string}::${string}::${string}`,
+                  typeArguments: payload.typeArguments,
+                  functionArguments: payload.functionArguments
+                },
+                options: {
+                  maxGasAmount: 20000,
+                },
               },
-              options: {
-                maxGasAmount: 20000,
-              },
+              signAndSubmitTransaction: signAndSubmitTransaction as any,
+              connected: !!account,
+              address: effectiveAptosAddress,
             });
+            if (!response.hash) {
+              throw new Error("Transaction was submitted without hash");
+            }
 
             totalClaimed++;
             
@@ -254,7 +266,7 @@ export function ClaimAllRewardsModal({ isOpen, onClose, summary, positions }: Cl
     // Just refresh positions data after successful claim
     if (totalClaimed > 0) {
       try {
-        await useWalletStore.getState().fetchPositions(account.address.toString(), ['hyperion'], true);
+        await useWalletStore.getState().fetchPositions(effectiveAptosAddress, ['hyperion'], true);
       } catch (error) {
         console.error('Error refreshing positions after claim:', error);
       }
@@ -263,16 +275,16 @@ export function ClaimAllRewardsModal({ isOpen, onClose, summary, positions }: Cl
 
   // Special handling for Echelon - use claim_all_rewards for rewards_pool, claim separately for farming rewards
   const handleEchelonClaim = async () => {
-    if (!account?.address) {
+    if (!effectiveAptosAddress) {
       throw new Error('Wallet not connected');
     }
 
-    console.log('[ClaimAll] Starting Echelon claim for address:', account.address);
+    console.log('[ClaimAll] Starting Echelon claim for address:', effectiveAptosAddress);
 
     // Load Echelon rewards directly from API
     let echelonRewards: any[] = [];
     try {
-      const response = await fetch(`${getClientBaseUrl()}/api/protocols/echelon/rewards?address=${account.address}`);
+      const response = await fetch(`${getClientBaseUrl()}/api/protocols/echelon/rewards?address=${effectiveAptosAddress}`);
       const data = await response.json();
       
       if (data.success && Array.isArray(data.data)) {
@@ -298,14 +310,22 @@ export function ClaimAllRewardsModal({ isOpen, onClose, summary, positions }: Cl
       try {
         const REWARDS_POOL_ADDRESS = "0xfdb653ffa48e91f39396ce87c656406f9b5e7a6686475446d92e79b098f0f4b5";
         
-        const result = await signAndSubmitTransaction({
-          data: {
-            function: `${REWARDS_POOL_ADDRESS}::rewards_pool::claim_all_rewards` as `${string}::${string}::${string}`,
-            typeArguments: [],
-            functionArguments: []
+        const result = await submitAptosTransaction({
+          transaction: {
+            data: {
+              function: `${REWARDS_POOL_ADDRESS}::rewards_pool::claim_all_rewards` as `${string}::${string}::${string}`,
+              typeArguments: [],
+              functionArguments: []
+            },
+            options: { maxGasAmount: 20000 },
           },
-          options: { maxGasAmount: 20000 },
+          signAndSubmitTransaction: signAndSubmitTransaction as any,
+          connected: !!account,
+          address: effectiveAptosAddress,
         });
+        if (!result.hash) {
+          throw new Error("Transaction was submitted without hash");
+        }
 
         if (result.hash) {
           // Wait for transaction confirmation
@@ -370,13 +390,17 @@ export function ClaimAllRewardsModal({ isOpen, onClose, summary, positions }: Cl
       
       try {
         const result = await claimRewards('echelon', [reward.farmingId], [reward.tokenType]);
+        const hash = result.hash;
+        if (!hash) {
+          throw new Error("Transaction was submitted without hash");
+        }
         
         totalClaimed++;
         
         setResults(prev => [...prev, {
           protocol: 'echelon',
           success: true,
-          hash: result.hash
+          hash
         }]);
         
         const rewardValue = reward.amountUSD ? parseFloat(reward.amountUSD) : 0;
@@ -384,7 +408,7 @@ export function ClaimAllRewardsModal({ isOpen, onClose, summary, positions }: Cl
         
         toast({
           title: "Echelon reward claimed!",
-          description: `${reward.token}: ${result.hash.slice(0, 8)}...${result.hash.slice(-8)}`,
+          description: `${reward.token}: ${hash.slice(0, 8)}...${hash.slice(-8)}`,
         });
         
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -406,7 +430,7 @@ export function ClaimAllRewardsModal({ isOpen, onClose, summary, positions }: Cl
     // Update data after claiming
     if (totalClaimed > 0 && account?.address) {
       try {
-        await useWalletStore.getState().fetchRewards(account.address.toString(), ['echelon'], true);
+        await useWalletStore.getState().fetchRewards(effectiveAptosAddress, ['echelon'], true);
       } catch (error) {
         console.error('Error refreshing rewards after claim:', error);
       }

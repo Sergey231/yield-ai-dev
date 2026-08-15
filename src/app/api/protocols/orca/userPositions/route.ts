@@ -13,6 +13,7 @@ import { getServerSolanaConnection } from "@/app/api/jupiter/_lib";
 import { getSolanaRpcUrl } from "@/app/api/jupiter/_lib";
 import { JupiterTokenMetadataService } from "@/lib/services/solana/tokenMetadata";
 import { lookupWellKnownToken } from "@/lib/solana/wellKnownTokens";
+import { fetchOrcaPoolAprMap } from "@/app/api/protocols/orca/_lib/fetchPoolApr";
 
 export const dynamic = "force-dynamic";
 
@@ -314,7 +315,8 @@ function enrichPosition(
   position: WalletNft & DecodedPosition,
   whirlpool: DecodedWhirlpool,
   tokenMap: Record<string, TokenInfo>,
-  liveHarvestQuote?: LiveHarvestQuote
+  liveHarvestQuote?: LiveHarvestQuote,
+  poolApr?: { aprPct: number; apr24hPct: number }
 ) {
   const tokenA = tokenMap[whirlpool.tokenMintA] ?? {
     mint: whirlpool.tokenMintA,
@@ -392,6 +394,8 @@ function enrichPosition(
     liquidity: position.liquidity.toString(),
     poolLiquidity: whirlpool.liquidity.toString(),
     feeRate: whirlpool.feeRate / 1_000_000,
+    aprPct: poolApr && poolApr.aprPct > 0 ? poolApr.aprPct : undefined,
+    apr24hPct: poolApr && poolApr.apr24hPct > 0 ? poolApr.apr24hPct : undefined,
     valueUsd: principalUsd + feesUsd + rewardsUsd,
     principalUsd,
     feesUsd,
@@ -442,14 +446,23 @@ export async function GET(request: NextRequest) {
       const whirlpool = whirlpools.get(position.whirlpool);
       return whirlpool ? [whirlpool.tokenMintA, whirlpool.tokenMintB, ...whirlpool.rewardMints] : [];
     });
-    const [tokenMap, liveHarvestQuotes] = await Promise.all([
+    const [tokenMap, liveHarvestQuotes, poolAprMap] = await Promise.all([
       buildTokenMap(mints),
       fetchLiveHarvestQuotes(address, decodedPositions),
+      fetchOrcaPoolAprMap(decodedPositions.map((position) => position.whirlpool)),
     ]);
     const positions = decodedPositions
       .map((position) => {
         const whirlpool = whirlpools.get(position.whirlpool);
-        return whirlpool ? enrichPosition(position, whirlpool, tokenMap, liveHarvestQuotes.get(position.address)) : null;
+        return whirlpool
+          ? enrichPosition(
+              position,
+              whirlpool,
+              tokenMap,
+              liveHarvestQuotes.get(position.address),
+              poolAprMap.get(whirlpool.address)
+            )
+          : null;
       })
       .filter((position): position is NonNullable<typeof position> => Boolean(position))
       .sort((a, b) => finite(b.valueUsd) - finite(a.valueUsd));
@@ -472,6 +485,7 @@ export async function GET(request: NextRequest) {
           onChain: WHIRLPOOL_PROGRAM_ID.toBase58(),
           prices: "https://api.jup.ag/price/v3",
           tokenMetadata: "https://api.jup.ag/tokens/v2/search",
+          poolApr: "https://api.orca.so/v2/solana/pools/{address}",
         },
         limitations: {
           fees:

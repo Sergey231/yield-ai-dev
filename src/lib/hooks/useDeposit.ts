@@ -3,10 +3,11 @@ import { executeDeposit, type ExecuteDepositOptions } from '../transactions/Depo
 import { ProtocolKey } from '../transactions/types';
 import { useToast } from '@/components/ui/use-toast';
 import { showTransactionSuccessToast } from '@/components/ui/transaction-toast';
-import { ToastAction } from '@/components/ui/toast';
 import { protocols } from '../protocols/protocolsRegistry';
 import { useWallet } from '@aptos-labs/wallet-adapter-react';
 import { GasStationService } from '@/lib/services/gasStation';
+import { submitAptosTransaction } from '@/lib/mobile/submitAptosTransaction';
+import { useNativeWalletStore } from '@/lib/stores/nativeWalletStore';
 
 async function getAptosExpireTimestampSecs(ttlSeconds: number): Promise<number | undefined> {
   try {
@@ -27,6 +28,7 @@ export function useDeposit() {
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
   const gasStationAvailable = GasStationService.getInstance().isAvailable();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
 
   const deposit = useCallback(async (
     protocolKey: ProtocolKey,
@@ -52,7 +54,11 @@ export function useDeposit() {
         throw new Error(`Protocol ${protocolKey} does not have buildDeposit method`);
       }
 
-      const payload = await executeDeposit(protocolInstance, token, amount, wallet, options);
+      const effectiveAptosAddress = wallet.account?.address?.toString() ?? injectedAptosAddress ?? null;
+      const payload = await executeDeposit(protocolInstance, token, amount, wallet, {
+        ...options,
+        signerAddress: effectiveAptosAddress ?? undefined,
+      });
       console.log('Generated payload:', payload);
 
       if (!payload || typeof payload !== 'object') {
@@ -62,10 +68,10 @@ export function useDeposit() {
       console.log('Submitting transaction with payload:', payload);
       const isAptreeDeposit = protocolKey === 'aptree';
 
-      if (!wallet.connected) {
+      if (!wallet.connected && !effectiveAptosAddress) {
         throw new Error('Wallet not connected');
       }
-      if (!wallet.signAndSubmitTransaction) {
+      if (!wallet.signAndSubmitTransaction && !effectiveAptosAddress) {
         throw new Error('Wallet does not support signAndSubmitTransaction');
       }
 
@@ -124,10 +130,15 @@ export function useDeposit() {
           throw new Error('Gas Station is not available. Configure NEXT_PUBLIC_APTOS_GAS_STATION_KEY.');
         }
         try {
-          response = await wallet.signAndSubmitTransaction({
-            ...txInput,
-            transactionSubmitter: gasStationSubmitter as any,
-          } as any);
+          response = await submitAptosTransaction({
+            transaction: {
+              ...txInput,
+              transactionSubmitter: gasStationSubmitter as any,
+            } as any,
+            signAndSubmitTransaction: wallet.signAndSubmitTransaction as any,
+            connected: wallet.connected,
+            address: effectiveAptosAddress,
+          });
         } catch (gasError) {
           const ge = gasError as any;
           const statusCode = ge?.statusCode ?? ge?.response?.status ?? 'unknown';
@@ -145,7 +156,12 @@ export function useDeposit() {
         }
       } else {
         try {
-          response = await wallet.signAndSubmitTransaction(txInput);
+          response = await submitAptosTransaction({
+            transaction: txInput,
+            signAndSubmitTransaction: wallet.signAndSubmitTransaction as any,
+            connected: wallet.connected,
+            address: effectiveAptosAddress,
+          });
         } catch (submitError) {
           const message = submitError instanceof Error ? submitError.message : String(submitError);
           const isGasStationRuleMissing =
@@ -157,10 +173,15 @@ export function useDeposit() {
           }
 
           // Fallback path for wallets without signTransaction support.
-          response = await wallet.signAndSubmitTransaction({
-            ...txInput,
-            transactionSubmitter: null,
-          } as any);
+          response = await submitAptosTransaction({
+            transaction: {
+              ...txInput,
+              transactionSubmitter: null,
+            } as any,
+            signAndSubmitTransaction: wallet.signAndSubmitTransaction as any,
+            connected: wallet.connected,
+            address: effectiveAptosAddress,
+          });
         }
       }
       console.log('Transaction response:', response);
@@ -193,9 +214,16 @@ export function useDeposit() {
                   : {}),
               });
               if (protocolKey === 'yield-ai') {
+                // `yieldAiSuccessDescription`: undefined → default rebalance note
+                // (stablecoin agent); '' → no description (Decibel/Hyperion agents
+                // that don't auto-rebalance — just confirm the deposit landed).
+                const successDescription =
+                  options?.yieldAiSuccessDescription !== undefined
+                    ? options.yieldAiSuccessDescription
+                    : 'The AI agent will rebalance your funds every hour.';
                 toast({
                   title: 'Thanks for your deposit',
-                  description: 'The AI agent will rebalance your funds every hour.',
+                  ...(successDescription ? { description: successDescription } : {}),
                 });
               }
               if (typeof window !== 'undefined') {
@@ -257,7 +285,7 @@ export function useDeposit() {
     } finally {
       setIsLoading(false);
     }
-  }, [wallet, toast, gasStationAvailable]);
+  }, [wallet, toast, gasStationAvailable, injectedAptosAddress]);
 
   return {
     deposit,

@@ -35,6 +35,10 @@
       "echelon": {
         "packageAddress": "0xc6bc659f1649553c1a3fa05d9727433dc03843baac29473c817d06d39e7621ba",
         "adapterAddressView": "adapter_echelon::get_echelon_adapter_address"
+      },
+      "thala": {
+        "packageAddress": "0x75b4890de3e312d9425408c43d9a9752b64ab3562a30e89a55bdc568c645920",
+        "adapterAddress": "0x1bf4a0b27821eba74626848727d6e9870ee1cfb5c354cf9ffecc9f65cf224509"
       }
     },
     "dexDefaults": {
@@ -55,12 +59,17 @@
         "echelon": {
           "marketObj": "0xbb8f38636896c629ff9ef0bf916791a992e12ab4f1c6e26279ee9c6979646963",
           "farmingId": "@0xbb8f38636896c629ff9ef0bf916791a992e12ab4f1c6e26279ee9c6979646963200"
+        },
+        "thala": {
+          "elonUsdcPool": "0xf6ada118eaa45ddca28f74f1965b6f1f994bef5ebaf651c268238c2ea9ca5695"
         }
       },
       "defaults": {
         "minClaimBaseUnits": 10000000,
+        "minElonClaimBaseUnits": 1000000000,
         "minSwapRewardBaseUnits": 10000000,
-        "minUsdcSwapToUsd1": 1000000,
+        "minElonSwapRewardBaseUnits": 1000000000,
+        "minUsdcSwapToUsd1": 100000,
         "minUsd1DepositToEchelon": 100000,
         "usd1ReserveInSafe": 0
       },
@@ -130,20 +139,24 @@
           "condition": {
             "leftRef": "state.echelonClaimable.ELON",
             "op": ">=",
-            "rightRef": "defaults.minClaimBaseUnits"
+            "rightRef": "defaults.minElonClaimBaseUnits"
           },
           "onError": "continue"
         },
         {
           "id": "swapThalaAptToUsdc",
-          "type": "swapFaToFa",
-          "description": "Swap ThalaAPT → USDC via Hyperion (USDC-hub allowlist)",
-          "enabled": false,
+          "type": "swapFaToFaHyperionBatch",
+          "description": "Swap ThalaAPT → APT → USDC via Hyperion batch route (allowlisted two-pool path)",
+          "enabled": true,
           "dependsOn": ["claimEchelonThalaApt"],
           "params": {
-            "entryFunction": "vault::execute_swap_fa_to_fa",
+            "entryFunction": "vault::execute_swap_fa_to_fa_hyperion_batch",
             "fromAsset": "ThalaAPT",
-            "toAsset": "USDC"
+            "toAsset": "USDC",
+            "lpPath": [
+              "0x692ba87730279862aa1a93b5fef9a175ea0cccc1f29dfc84d3ec7fbe1561aef3",
+              "0x925660b8618394809f89f8002e2926600c775221f43bf1919782b297a79400d8"
+            ]
           },
           "condition": {
             "leftRef": "state.safeBalance.ThalaAPT",
@@ -153,20 +166,21 @@
           "onError": "continue"
         },
         {
-          "id": "swapElonToUsdc",
-          "type": "swapFaToFa",
-          "description": "Swap ELON → USDC via Hyperion (USDC-hub allowlist)",
-          "enabled": false,
+          "id": "swapElonToUsdcThala",
+          "type": "swapFaToFaThala",
+          "description": "Swap ELON → USDC via Thala CLMM (30bps pool, chunk by impact)",
+          "enabled": true,
           "dependsOn": ["claimEchelonElon"],
           "params": {
-            "entryFunction": "vault::execute_swap_fa_to_fa",
+            "entryFunction": "vault::execute_swap_fa_to_fa_thala",
             "fromAsset": "ELON",
-            "toAsset": "USDC"
+            "toAsset": "USDC",
+            "maxImpactBps": 100
           },
           "condition": {
             "leftRef": "state.safeBalance.ELON",
             "op": ">=",
-            "rightRef": "defaults.minSwapRewardBaseUnits"
+            "rightRef": "defaults.minElonSwapRewardBaseUnits"
           },
           "onError": "continue"
         },

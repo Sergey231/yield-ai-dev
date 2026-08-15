@@ -37,27 +37,47 @@ function toWeb3Ix(ix: ApiIx): TransactionInstruction {
   });
 }
 
+type JupiterQuoteResponse = {
+  outputMint?: string;
+  inputMint?: string;
+  inAmount?: string;
+  outAmount?: string;
+  swapMode?: string;
+};
+
+type JupiterBuildPayload = {
+  inputMint?: string;
+  outputMint?: string;
+  inAmount?: string;
+  outAmount?: string;
+  computeBudgetInstructions?: ApiIx[];
+  setupInstructions?: ApiIx[];
+  swapInstruction?: ApiIx;
+  cleanupInstruction?: ApiIx | null;
+  otherInstructions?: ApiIx[];
+  addressesByLookupTableAddress?: Record<string, string[]>;
+  addressLookupTableAddresses?: string[];
+};
+
+function asQuoteResponse(value: unknown): JupiterQuoteResponse | null {
+  if (!value || typeof value !== "object") return null;
+  return value as JupiterQuoteResponse;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as {
-      inputMint: string;
-      outputMint: string;
-      amount: string;
+      inputMint?: string;
+      outputMint?: string;
+      amount?: string;
       taker: string;
       slippageBps?: number;
+      quoteResponse?: unknown;
     };
 
-    const inputMint = stripEnv(body?.inputMint || "");
-    const outputMint = stripEnv(body?.outputMint || "");
-    const amount = stripEnv(body?.amount || "");
     const taker = stripEnv(body?.taker || "");
-    const slippageBps = Number(body?.slippageBps ?? 100);
-
-    if (!inputMint || !outputMint || !amount || !taker) {
-      return NextResponse.json(
-        { error: "inputMint, outputMint, amount, taker are required" },
-        { status: 400 },
-      );
+    if (!taker) {
+      return NextResponse.json({ error: "taker is required" }, { status: 400 });
     }
 
     const connection = getServerSolanaConnection();
@@ -65,46 +85,113 @@ export async function POST(request: NextRequest) {
     const payer = payerKeypair.publicKey;
     const feeOwner = getFeeOwner();
     const platformFeeBps = getPlatformFeeBps();
-
-    // Fee account: ATA of fee owner for outputMint (fee is charged in output token for /build platform fees).
-    const outputMintPk = new PublicKey(outputMint);
-    const feeAccount = await deriveAtaAddress({ owner: feeOwner, mint: outputMintPk });
-
-    const base = getJupiterSwapBaseUrl();
     const apiKey = getJupiterApiKey();
-    const params = new URLSearchParams({
-      inputMint,
-      outputMint,
-      amount,
-      taker,
-      payer: payer.toBase58(),
-      slippageBps: String(Number.isFinite(slippageBps) ? Math.max(0, Math.min(5000, Math.floor(slippageBps))) : 100),
-    });
-    if (platformFeeBps > 0) {
-      params.set("platformFeeBps", String(platformFeeBps));
-      params.set("feeAccount", feeAccount.toBase58());
+
+    const quoteResponse = body?.quoteResponse;
+    const isExactOutBuild = Boolean(quoteResponse);
+    const parsedQuote = asQuoteResponse(quoteResponse);
+
+    let build: JupiterBuildPayload;
+    if (isExactOutBuild) {
+      const outputMint = stripEnv(
+        String(parsedQuote?.outputMint || body?.outputMint || ""),
+      );
+      if (!outputMint) {
+        return NextResponse.json({ error: "quoteResponse.outputMint is required" }, { status: 400 });
+      }
+
+      const outputMintPk = new PublicKey(outputMint);
+      const feeAccount = await deriveAtaAddress({ owner: feeOwner, mint: outputMintPk });
+
+      const swapBody: Record<string, unknown> = {
+        userPublicKey: taker,
+        quoteResponse,
+        payer: payer.toBase58(),
+        wrapAndUnwrapSol: true,
+        dynamicComputeUnitLimit: true,
+      };
+      if (platformFeeBps > 0) {
+        swapBody.feeAccount = feeAccount.toBase58();
+      }
+
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (apiKey) headers["x-api-key"] = apiKey;
+
+      const res = await fetch("https://api.jup.ag/swap/v1/swap-instructions", {
+        method: "POST",
+        headers,
+        cache: "no-store",
+        body: JSON.stringify(swapBody),
+      });
+      if (!res.ok) {
+        return NextResponse.json(
+          { error: `/swap-instructions failed: ${res.status}`, details: await res.text() },
+          { status: 502 },
+        );
+      }
+      build = (await res.json()) as JupiterBuildPayload;
+      build.inAmount = parsedQuote?.inAmount;
+      build.outAmount = parsedQuote?.outAmount;
+    } else {
+      const inputMint = stripEnv(body?.inputMint || "");
+      const outputMint = stripEnv(body?.outputMint || "");
+      const amount = stripEnv(body?.amount || "");
+      const slippageBps = Number(body?.slippageBps ?? 100);
+
+      if (!inputMint || !outputMint || !amount) {
+        return NextResponse.json(
+          { error: "inputMint, outputMint, amount are required" },
+          { status: 400 },
+        );
+      }
+
+      const outputMintPk = new PublicKey(outputMint);
+      const feeAccount = await deriveAtaAddress({ owner: feeOwner, mint: outputMintPk });
+
+      const base = getJupiterSwapBaseUrl();
+      const params = new URLSearchParams({
+        inputMint,
+        outputMint,
+        amount,
+        taker,
+        payer: payer.toBase58(),
+        slippageBps: String(Number.isFinite(slippageBps) ? Math.max(0, Math.min(5000, Math.floor(slippageBps))) : 100),
+      });
+      if (platformFeeBps > 0) {
+        params.set("platformFeeBps", String(platformFeeBps));
+        params.set("feeAccount", feeAccount.toBase58());
+      }
+
+      const res = await fetch(`${base}/build?${params.toString()}`, {
+        headers: apiKey ? { "x-api-key": apiKey } : undefined,
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        return NextResponse.json(
+          { error: `/build failed: ${res.status}`, details: await res.text() },
+          { status: 502 },
+        );
+      }
+      build = (await res.json()) as JupiterBuildPayload;
     }
 
-    const res = await fetch(`${base}/build?${params.toString()}`, {
-      headers: apiKey ? { "x-api-key": apiKey } : undefined,
-      cache: "no-store",
-    });
-    if (!res.ok) {
-      return NextResponse.json(
-        { error: `/build failed: ${res.status}`, details: await res.text() },
-        { status: 502 },
-      );
-    }
-    const build = (await res.json()) as any;
+    const outputMintForAta = stripEnv(
+      String(build.outputMint || parsedQuote?.outputMint || body?.outputMint || ""),
+    );
+    const outputMintPk = outputMintForAta ? new PublicKey(outputMintForAta) : null;
+    const feeAccount =
+      outputMintPk && platformFeeBps > 0
+        ? await deriveAtaAddress({ owner: feeOwner, mint: outputMintPk })
+        : null;
 
     const ixs: TransactionInstruction[] = [];
 
     // Ensure feeAccount ATA exists (paid by payer). This instruction is safe to include even if ATA exists? No.
     // So we only include if missing.
-    if (platformFeeBps > 0) {
+    if (platformFeeBps > 0 && feeAccount) {
       const feeAccInfo = await connection.getAccountInfo(feeAccount);
       if (!feeAccInfo) {
-        ixs.push(createAtaIx({ payer, owner: feeOwner, mint: outputMintPk, ata: feeAccount }));
+        ixs.push(createAtaIx({ payer, owner: feeOwner, mint: outputMintPk!, ata: feeAccount }));
       }
     }
 
@@ -130,12 +217,15 @@ export async function POST(request: NextRequest) {
     ixs.push(...otherInstructions);
 
     // Resolve ALT accounts if present.
-    const altMap = (build.addressesByLookupTableAddress ?? null) as Record<string, string[]> | null;
+    const altAddresses = build.addressesByLookupTableAddress
+      ? Object.keys(build.addressesByLookupTableAddress)
+      : Array.isArray(build.addressLookupTableAddresses)
+        ? build.addressLookupTableAddresses
+        : [];
     const alts: AddressLookupTableAccount[] = [];
-    if (altMap && typeof altMap === "object") {
-      const altKeys = Object.keys(altMap);
+    if (altAddresses.length > 0) {
       const altInfos = await Promise.all(
-        altKeys.map(async (k) => {
+        altAddresses.map(async (k: string) => {
           const pk = new PublicKey(k);
           const info = await connection.getAccountInfo(pk);
           return { pk, info };
@@ -165,7 +255,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       transaction: Buffer.from(tx.serialize()).toString("base64"),
       lastValidBlockHeight,
-      feeAccount: feeAccount.toBase58(),
+      feeAccount: feeAccount?.toBase58() ?? null,
       platformFeeBps,
       outAmount: build.outAmount,
       inAmount: build.inAmount,

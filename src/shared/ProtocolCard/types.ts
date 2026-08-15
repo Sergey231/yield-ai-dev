@@ -32,3 +32,19 @@ export interface ProtocolPosition {
   /** Флаг, что позиция используется как коллатерал (для отображения спец. бейджа) */
   isCollateral?: boolean;
 }
+
+/** Группа позиций внутри карточки (например, один safe AI agent): заголовок + позиции + свёрнутая «пыль» */
+export interface ProtocolPositionGroup {
+  key: string;
+  /** Название группы (например, лейбл стратегии safe) */
+  title: string;
+  /** Доп. подпись после названия (например, слайс адреса safe) */
+  subtitle?: string;
+  /** Субитог группы в USD */
+  subtotal: number;
+  positions: ProtocolPosition[];
+  /** Мелкие токены, свёрнутые в одну строку «Other · N tokens» */
+  dust?: { count: number; valueUsd: number };
+  /** Клик по заголовку группы (например, открыть Manage Positions с выбранным safe) */
+  onClick?: () => void;
+}

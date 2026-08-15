@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 import Image from "next/image";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -12,7 +12,7 @@ import { ProtocolCardSkeleton } from "./ProtocolCardSkeleton/ProtocolCardSkeleto
 import { ProtocolCardPosition } from "./ProtocolCardPosition/ProtocolCardPosition";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Protocol } from "@/lib/protocols/getProtocolsList";
-import type { ProtocolPosition } from "./types";
+import type { ProtocolPosition, ProtocolPositionGroup } from "./types";
 import styles from "./ProtocolCard.module.css";
 
 export interface ProtocolCardProps {
@@ -33,6 +33,11 @@ export interface ProtocolCardProps {
    */
   rewardsEchelonStyle?: boolean;
   positions?: ProtocolPosition[];
+  /**
+   * Optional grouping (e.g. one group per AI agent safe). When non-empty,
+   * groups are rendered instead of the flat `positions` list.
+   */
+  groups?: ProtocolPositionGroup[];
   isLoading?: boolean;
   className?: string;
   /** When false, hides the "Manage positions" button (e.g. on portfolio grid). Default true. */
@@ -53,6 +58,7 @@ export function ProtocolCard({
   belowRewardsContent,
   rewardsEchelonStyle = false,
   positions = [],
+  groups,
   isLoading = false,
   className,
   showManageButton = true,
@@ -97,10 +103,61 @@ export function ProtocolCard({
 
       {expanded && (
         <div className={styles.content}>
-          {positions.length > 0 &&
-            positions.map((pos, i) => (
-              <ProtocolCardPosition key={pos.id ?? i} position={pos} />
-            ))}
+          {groups && groups.length > 0
+            ? groups.map((group) => (
+                <div key={group.key}>
+                  <div
+                    className={cn(
+                      "flex items-center justify-between gap-2 mt-1 border-t border-border pt-2",
+                      group.onClick &&
+                        "cursor-pointer -mx-1.5 rounded-md px-1.5 py-1 transition-colors hover:bg-muted/40 active:bg-muted/55"
+                    )}
+                    {...(group.onClick
+                      ? {
+                          onClick: (e: MouseEvent) => {
+                            e.stopPropagation();
+                            group.onClick?.();
+                          },
+                          role: "button",
+                          tabIndex: 0,
+                          onKeyDown: (e: KeyboardEvent) => {
+                            if (e.key === "Enter") {
+                              e.stopPropagation();
+                              group.onClick?.();
+                            }
+                          },
+                        }
+                      : {})}
+                  >
+                    <span className="text-xs font-medium text-muted-foreground truncate">
+                      {group.title}
+                      {group.subtitle && (
+                        <span className="ml-1.5 font-mono text-[10px] font-normal text-muted-foreground/70">
+                          {group.subtitle}
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">
+                      {formatUsd(group.subtotal, 2)}
+                    </span>
+                  </div>
+                  {group.positions.map((pos, i) => (
+                    <ProtocolCardPosition key={pos.id ?? i} position={pos} />
+                  ))}
+                  {group.dust && group.dust.count > 0 && (
+                    <div className="flex items-center justify-between py-1 text-xs text-muted-foreground/70">
+                      <span>
+                        Other · {group.dust.count} {group.dust.count === 1 ? "token" : "tokens"}
+                      </span>
+                      <span>{formatUsd(group.dust.valueUsd, 2)}</span>
+                    </div>
+                  )}
+                </div>
+              ))
+            : positions.length > 0 &&
+              positions.map((pos, i) => (
+                <ProtocolCardPosition key={pos.id ?? i} position={pos} />
+              ))}
           {extraContent}
           {totalRewardsUsd &&
             (rewardsBreakdown ? (

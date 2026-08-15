@@ -52,6 +52,9 @@ function tokenNormalizedFaAddress(token: Token): string {
 
 const APT_FA_METADATA_MAINNET =
   '0x000000000000000000000000000000000000000000000000000000000000000a';
+/** USDt (Tether) FA metadata — leg of the USDt/USDC stable LP; shown in the safe card. */
+const USDT_FA_METADATA_MAINNET =
+  '0x357b0b74bc833e95a115ad22604854d6b0fca151cecd94111770e5d6ffc9dc2b';
 
 /** FA balances shown in AI agent safe card (allowlist). */
 function isAllowedSafeDisplayToken(token: Token): boolean {
@@ -60,6 +63,7 @@ function isAllowedSafeDisplayToken(token: Token): boolean {
   return (
     n === normalizeAddress(USDC_FA_METADATA_MAINNET) ||
     n === normalizeAddress(USD1_FA_METADATA_MAINNET) ||
+    n === normalizeAddress(USDT_FA_METADATA_MAINNET) ||
     n === normalizeAddress(WBTC_FA_METADATA_MAINNET) ||
     n === normalizeAddress(XBTC_FA_METADATA_MAINNET) ||
     n === normalizeAddress(APT_FA_METADATA_MAINNET) ||
@@ -67,6 +71,8 @@ function isAllowedSafeDisplayToken(token: Token): boolean {
     n === normalizeAddress(THAPT_FA_METADATA_MAINNET) ||
     token.symbol === 'USDC' ||
     token.symbol === 'USD1' ||
+    token.symbol === 'USDt' ||
+    token.symbol === 'USDT' ||
     token.symbol === 'WBTC' ||
     token.symbol === 'xBTC' ||
     token.symbol === 'APT' ||

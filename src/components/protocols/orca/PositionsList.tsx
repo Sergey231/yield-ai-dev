@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
+import { useSearchParams } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { ProtocolCard } from "@/shared/ProtocolCard";
@@ -12,6 +13,7 @@ import {
   computeOrcaTotalUsd,
   mapOrcaToProtocolPositions,
 } from "@/components/protocols/orca/mapOrcaToProtocolPositions";
+import { isLikelySolanaAddress } from "@/lib/kamino/kvaultVaultAddress";
 
 type OrcaPositionsListProps = {
   address?: string;
@@ -28,13 +30,29 @@ export function PositionsList({
 }: OrcaPositionsListProps) {
   const protocol = getProtocolByName("Orca");
   const queryClient = useQueryClient();
+  const searchParams = useSearchParams();
   const onValueRef = useRef(onPositionsValueChange);
   onValueRef.current = onPositionsValueChange;
   const onCheckCompleteRef = useRef(onPositionsCheckComplete);
   onCheckCompleteRef.current = onPositionsCheckComplete;
   const hasCompletedCheckRef = useRef<string | null>(null);
 
-  const effectiveAddress = (address ?? "").trim();
+  const mockEnabled =
+    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "1" ||
+    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "true";
+
+  const effectiveAddress = useMemo(() => {
+    const base = (address ?? "").trim();
+    if (!mockEnabled) return base;
+    const raw = (
+      searchParams?.get("orcaAddress") ||
+      searchParams?.get("address") ||
+      searchParams?.get("solanaAddress") ||
+      ""
+    ).trim();
+    if (raw && isLikelySolanaAddress(raw)) return raw;
+    return base;
+  }, [address, mockEnabled, searchParams]);
 
   const {
     data: orcaPositions = [],

@@ -186,34 +186,28 @@ export function useEchelonLendingCardModel({
       icon: "percent",
       value: netApy != null ? `${netApy.toFixed(2)}%` : "—",
     });
-    out.push({
-      id: "health",
-      title: "Health Factor",
-      titleShort: "Health",
-      icon: "health",
-      tone:
-        healthTile && Number.isFinite(healthTile.healthFactor)
-          ? toneForHealthFactor(healthTile.healthFactor)
-          : "default",
-      value:
-        healthTile && Number.isFinite(healthTile.healthFactor)
-          ? healthTile.healthFactor.toFixed(2)
-          : "—",
-      subRows: healthTile
-        ? [
-            {
-              label: "Collateral:",
-              labelShort: "Coll.",
-              value: maskUsd(formatUsd(healthTile.collateralUsd, 2)),
-            },
-            {
-              label: "Liabilities:",
-              labelShort: "Debt",
-              value: maskUsd(formatUsd(healthTile.liabilitiesUsd, 2)),
-            },
-          ]
-        : undefined,
-    });
+    if (healthTile && Number.isFinite(healthTile.healthFactor)) {
+      out.push({
+        id: "health",
+        title: "Health Factor",
+        titleShort: "Health",
+        icon: "health",
+        tone: toneForHealthFactor(healthTile.healthFactor),
+        value: healthTile.healthFactor.toFixed(2),
+        subRows: [
+          {
+            label: "Collateral:",
+            labelShort: "Coll.",
+            value: maskUsd(formatUsd(healthTile.collateralUsd, 2)),
+          },
+          {
+            label: "Liabilities:",
+            labelShort: "Debt",
+            value: maskUsd(formatUsd(healthTile.liabilitiesUsd, 2)),
+          },
+        ],
+      });
+    }
     const rewardsUsd = calculateRewardsValue();
     out.push({
       id: "rewards",

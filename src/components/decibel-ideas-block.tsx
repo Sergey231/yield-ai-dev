@@ -1,8 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   Tooltip,
@@ -15,14 +14,9 @@ import { formatNumber } from '@/lib/utils/numberFormat';
 import Image from 'next/image';
 import { DecibelOpenPositionModal } from '@/components/decibel/decibel-open-position-modal';
 import { fetchFundingApr, type FundingAprResult } from '@/lib/protocols/decibel/fundingApr';
+import { MARKET_LOGOS } from '@/lib/protocols/decibel/marketIcon';
 import { cn } from '@/lib/utils';
 import { DecibelCTABlock } from '@/components/ui/decibel-cta-block';
-
-/** Logo URLs for fixed perp markets (BTC from Decibel app; APT from Panora). */
-const MARKET_LOGOS: Record<string, string> = {
-  'BTC/USD': 'https://app.decibel.trade/images/icons/btc.svg?dpl=dpl_FECfRSDXc1wiUcCXB6MPHgx2CzKp',
-  'APT/USD': 'https://assets.panora.exchange/tokens/aptos/apt.svg',
-};
 
 interface DecibelMarket {
   market_addr?: string;
@@ -88,18 +82,23 @@ export function DecibelIdeasBlock() {
   }, []);
 
   // BTC/USD (center), APT/USD (right); Decibel CTA is always the left column.
-  const normalizedMarkets = markets.map((m) => ({
-    ...m,
-    key: m.market_addr != null ? normalizeAddress(String(m.market_addr)) : '',
-  }));
-  const btcMarket = normalizedMarkets.find(
-    (m) => (m.market_name || '').toUpperCase().includes('BTC/USD') || (m.market_name || '').toUpperCase() === 'BTC/USD'
-  );
-  const aptMarket = normalizedMarkets.find(
-    (m) => (m.market_name || '').toUpperCase().includes('APT/USD') || (m.market_name || '').toUpperCase() === 'APT/USD'
+  const normalizedMarkets = useMemo(
+    () => markets.map((m) => ({
+      ...m,
+      key: m.market_addr != null ? normalizeAddress(String(m.market_addr)) : '',
+    })),
+    [markets]
   );
 
-  const perpMarkets = [btcMarket, aptMarket].filter(Boolean) as typeof normalizedMarkets;
+  const perpMarkets = useMemo(() => {
+    const btcMarket = normalizedMarkets.find(
+      (m) => (m.market_name || '').toUpperCase().includes('BTC/USD') || (m.market_name || '').toUpperCase() === 'BTC/USD'
+    );
+    const aptMarket = normalizedMarkets.find(
+      (m) => (m.market_name || '').toUpperCase().includes('APT/USD') || (m.market_name || '').toUpperCase() === 'APT/USD'
+    );
+    return [btcMarket, aptMarket].filter(Boolean) as typeof normalizedMarkets;
+  }, [normalizedMarkets]);
   const marketKeysStr = perpMarkets.map((m) => m.key).filter(Boolean).join(',');
 
   // Fetch 24h funding APR per market (cached 10 min)
@@ -114,7 +113,7 @@ export function DecibelIdeasBlock() {
       });
     });
     return () => { cancelled = true; };
-  }, [marketKeysStr]);
+  }, [marketKeysStr, perpMarkets]);
 
   if (loading) {
     return (

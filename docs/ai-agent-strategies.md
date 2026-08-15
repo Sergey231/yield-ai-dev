@@ -62,6 +62,13 @@ Configured in `config/strategy-usd1-echelon-compound.json`.
 
 **Automation:** no stablecoin-compound cron actions should run for this safe. The executor performs explicit open/close flows.
 
+### 3) `hyperion_lp`
+**User intent:** manage Hyperion concentrated-liquidity LP positions from a safe.
+
+**On-chain tag:** `hyperion_lp` (UTF-8 bytes).
+
+**Automation:** handled by the Hyperion LP cron, not the stablecoin-compound worker. Current actions are claim and optional re-center. Future actions can add or remove liquidity in slices when the range, fees, and execution price make that attractive.
+
 ---
 
 ## Default behavior (important)
@@ -130,6 +137,66 @@ The UI should allow:
 6) Executor closes the position and records results (in Delta Neutral V2)
 7) Tag can be detached when strategy is no longer used
 
+### Hyperion LP lifecycle
+1) User creates a safe
+2) Tag is attached: `hyperion_lp`
+3) User deposits USDC and/or LP legs into the safe
+4) Executor opens a Hyperion LP position
+5) Cron may claim rewards/fees, re-center the range, or later add/remove liquidity in slices
+6) Executor closes or converts the position and event history is used for PnL
+
+---
+
+## Roadmap: incremental position management
+
+The intended agent behavior is not limited to one large open and one full close. For both
+delta-neutral and LP strategies, the agent should be able to act in smaller slices when conditions
+are attractive.
+
+### Delta-neutral slice actions
+
+Examples:
+
+- **Add $100** when Decibel funding is attractive and the Hyperion spot hedge quote is acceptable.
+  The executor opens/increases the Decibel short and buys the matching spot leg inside the safe.
+- **Reduce $100** when closing is favorable, funding turns unattractive, or the spot/perp basis
+  creates a good exit. The executor closes part of the Decibel short and sells only the matching
+  spot delta from the safe.
+- **Rebalance only** when the existing hedge is materially off target. The executor buys/sells a
+  small spot delta or adjusts the perp leg, subject to max drift and max execution loss limits.
+
+Decision inputs:
+
+- Decibel funding APR and expected carry over the next window
+- Decibel mark/index price vs Hyperion spot quote
+- Hyperion quote loss/slippage in USD and bps
+- current hedge mismatch (`actual_spot_out` vs `filled_short_size`)
+- min notional per slice, max daily turnover, and max allowed execution loss
+
+Accounting requirement:
+
+- Each slice must be recorded as its own event/ledger row: `increase`, `decrease`, `rebalance`, or
+  `close`.
+- For each row store the actual spot input/output, Decibel filled size, Decibel tx version, spot tx
+  version, estimated execution loss, and resulting position size.
+- PnL should be computed from cumulative costs/proceeds, not from a single "position opened at"
+  number. This is the same model used for LP event totals.
+
+### Hyperion LP slice actions
+
+The same product pattern should extend to LP positions:
+
+- **Add liquidity** when the range is active, projected fees justify the swap cost, and the zap/dual
+  preview loss is under the configured limit.
+- **Remove partial liquidity** when the range is unattractive, price approaches an edge, or converting
+  the withdrawn leg is favorable.
+- **Re-center** by closing/removing, converting only the delta returned by that action, then opening a
+  new range.
+
+The implementation should share the same guardrails as delta-neutral: per-slice notional, max
+slippage/loss, cooldowns, and event-based PnL. This avoids building separate accounting models for
+Decibel and Hyperion.
+
 ---
 
 ## Authorization note (future-proofing)
@@ -145,4 +212,5 @@ If/when that happens, we should migrate UI to user-signed writes, and treat exec
 ## References
 
 - Strategy Registry + Delta Neutral V2 integration guide: `docs/strategy-registry-and-dn-v2.md`
+- Hyperion LP frontend/automation handoff: `docs/HYPERION_LP_FRONTEND.md`
 - Cron engine notes: `docs/yield-ai-cron.md`

@@ -21,17 +21,18 @@ import { MeteoraPositions } from "./protocols/MeteoraPositions";
 import { RaydiumPositions } from "./protocols/RaydiumPositions";
 import { OrcaPositions } from "./protocols/OrcaPositions";
 import { TramplinPositions } from "./protocols/TramplinPositions";
+import { ExponentPositions } from "./protocols/ExponentPositions";
 import { ThalaPositions } from "./protocols/ThalaPositions";
 import { EchoPositions } from "./protocols/EchoPositions";
 import { DecibelPositions } from "./protocols/DecibelPositions";
 import { YieldAIPositions } from "./protocols/YieldAIPositions";
 import { RefreshCw, Info, ExternalLink, Gift, X } from "lucide-react";
-import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { useState } from "react";
 import { useToast } from "@/components/ui/use-toast";
 import { ProtocolSocialLinks } from "@/components/ui/protocol-social-links";
 import { AirdropInfoTooltip } from "@/components/ui/airdrop-info-tooltip";
 import { useSolanaPortfolio } from "@/hooks/useSolanaPortfolio";
+import { useEffectiveWalletAddresses } from "@/lib/hooks/useEffectiveWalletAddresses";
 
 interface ManagePositionsProps {
   protocol: Protocol;
@@ -39,7 +40,7 @@ interface ManagePositionsProps {
 }
 
 export function ManagePositions({ protocol, onClose }: ManagePositionsProps) {
-  const { account } = useWallet();
+  const { effectiveAptosAddress } = useEffectiveWalletAddresses();
   const { protocolsAddress: solanaProtocolsAddress } = useSolanaPortfolio();
   const [isRefreshing, setIsRefreshing] = useState(false);
   const { toast } = useToast();
@@ -52,8 +53,9 @@ export function ManagePositions({ protocol, onClose }: ManagePositionsProps) {
     const isRaydium = protocolNameLower.includes('raydium');
     const isOrca = protocolNameLower.includes('orca');
     const isTramplin = protocolNameLower.includes('tramplin');
-    const isSolanaProtocol = isJupiter || isKamino || isMeteora || isRaydium || isOrca || isTramplin;
-    if (!account?.address && !isSolanaProtocol) return;
+    const isExponent = protocolNameLower.includes('exponent');
+    const isSolanaProtocol = isJupiter || isKamino || isMeteora || isRaydium || isOrca || isTramplin || isExponent;
+    if (!effectiveAptosAddress && !isSolanaProtocol) return;
     if (isSolanaProtocol && !solanaProtocolsAddress) return;
     
     try {
@@ -129,11 +131,14 @@ export function ManagePositions({ protocol, onClose }: ManagePositionsProps) {
       } else if (protocol.name.toLowerCase().includes('tramplin')) {
         apiPath = 'tramplin';
         endpoint = 'userPositions';
+      } else if (protocol.name.toLowerCase().includes('exponent')) {
+        apiPath = 'exponent';
+        endpoint = 'userPositions';
       }
       
       const refreshAddress = isSolanaProtocol
         ? String(solanaProtocolsAddress || "")
-        : String(account?.address || "");
+        : String(effectiveAptosAddress || "");
       const response = await fetch(`/api/protocols/${apiPath}/${endpoint}?address=${encodeURIComponent(refreshAddress)}`);
       
       if (!response.ok) {
@@ -214,6 +219,8 @@ export function ManagePositions({ protocol, onClose }: ManagePositionsProps) {
         return <OrcaPositions />;
       case 'tramplin':
         return <TramplinPositions />;
+      case 'exponent':
+        return <ExponentPositions />;
       case 'thala':
         return <ThalaPositions />;
       case 'echo protocol':

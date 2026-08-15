@@ -27,19 +27,41 @@ export type AiAgentStrategyId =
   | "decibel_delta_neutral"
   | "hyperion_lp";
 
+export const AI_AGENT_STRATEGY_BADGE_CLASS: Record<AiAgentStrategyId, string> = {
+  stablecoin_compound:
+    "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
+  decibel_delta_neutral:
+    "bg-purple-500/10 text-purple-700 dark:text-purple-300 border-purple-500/30",
+  hyperion_lp: "bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/30",
+};
+
 export const AI_AGENT_STRATEGIES: Record<
   AiAgentStrategyId,
-  { id: AiAgentStrategyId; label: string; description: string }
+  {
+    id: AiAgentStrategyId;
+    label: string;
+    description: string;
+    /** One-line summary shown next to the strategy badge in Manage Positions. */
+    tagline: string;
+    /** Expanded behavior copy for the info tooltip. */
+    tooltip: string;
+  }
 > = {
   stablecoin_compound: {
     id: "stablecoin_compound",
     label: "Stablecoin compound",
     description: "Auto-compound stable yield strategy (current implementation: USD1 + Echelon).",
+    tagline: "Monitors hourly · auto-compounds Echelon rewards",
+    tooltip:
+      "Every hour the agent checks your safe for claimable Echelon farming rewards. APT and ThalaAPT rewards are claimed once each reward balance is at least 0.1. ELON is cheaper, so it is claimed and swapped only once it reaches at least 10 ELON. Claimed rewards are swapped to USDC. USDC is converted to USD1 once the safe holds at least 0.1 USDC, then redeposited into Echelon when USD1 reaches at least 0.1 — all within your safe's swap limits. You can deposit or withdraw anytime; compounding runs only when balances clear these thresholds.",
   },
   decibel_delta_neutral: {
     id: "decibel_delta_neutral",
     label: "Decibel delta-neutral",
     description: "Manual delta-neutral strategy on Decibel (no auto-compound cron actions).",
+    tagline: "Manual open/close · earns Decibel funding while hedged",
+    tooltip:
+      "You open and close delta-neutral positions yourself. The executor opens a Decibel short perp hedged with a spot long in your safe (via Hyperion). While the position is open, funding accrues on the short when longs pay shorts. Entry and exit use live spread previews — the agent does not auto-open, resize, or close positions yet. Complete Decibel setup once, then use Open / Close when conditions look good.",
   },
   hyperion_lp: {
     id: "hyperion_lp",
@@ -47,6 +69,9 @@ export const AI_AGENT_STRATEGIES: Record<
     // Pool-agnostic: a safe may hold several concentrated-liquidity LP positions
     // across the whitelisted USDC-leg pools. Pool is chosen at open time.
     description: "Concentrated-liquidity LP on Hyperion (USDC-leg pools, executor-managed).",
+    tagline: "Monitors hourly · auto re-centers stable positions",
+    tooltip:
+      "Every hour the agent checks each LP position against the live price. A stable-pool position (USDt/USDC, USD1/USDC) that has drifted out of range is re-centered at ±0.1% around the current price — only once it is at least 1h old and accrued fees cover the re-center cost. Accrued fees are claimed to the safe automatically (hourly, above a small threshold) and before every re-center; the Claim button works anytime. Volatile pools (WBTC/USDC) are monitored but managed manually for now.",
   },
 };
 

@@ -4,6 +4,7 @@ export {
 } from './useEchelonPositions';
 export { useEchelonRewards, type EchelonReward } from './useEchelonRewards';
 export { useEchelonPools, type EchelonPool } from './useEchelonPools';
+export { useEchelonAccountEmode } from './useEchelonAccountEmode';
 export {
   useEchelonProtocolCardModel,
   type EchelonModalRow,

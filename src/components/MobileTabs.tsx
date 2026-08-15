@@ -27,6 +27,7 @@ import { PositionsList as MeteoraPositionsList } from "./protocols/meteora/Posit
 import { PositionsList as RaydiumPositionsList } from "./protocols/raydium/PositionsList";
 import { PositionsList as OrcaPositionsList } from "./protocols/orca/PositionsList";
 import { PositionsList as TramplinPositionsList } from "./protocols/tramplin/PositionsList";
+import { PositionsList as ExponentPositionsList } from "./protocols/exponent/PositionsList";
 import { PositionsList as YieldAIPositionsList } from "./protocols/yield-ai/PositionsList";
 import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { useAptosNativeRestore } from "@/hooks/useAptosNativeRestore";
@@ -43,6 +44,12 @@ import { useEffectiveWalletAddresses } from "@/lib/hooks/useEffectiveWalletAddre
 import { formatCurrency } from "@/lib/utils/numberFormat";
 import { useAptosHasTransactions } from "@/lib/query/hooks/aptos/useAptosHasTransactions";
 import { isDerivedAptosWalletReliable } from "@/lib/aptosWalletUtils";
+import { Checkbox } from "./ui/checkbox";
+import { Label } from "./ui/label";
+import { Button } from "./ui/button";
+import { RefreshCw } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { CollapsibleControls } from "./ui/collapsible-controls";
 
 function MobileTabsContent() {
   const [tab, setTab] = useState<"ideas" | "assets" | "chat">("assets");
@@ -89,12 +96,15 @@ function MobileTabsContent() {
   const [raydiumValue, setRaydiumValue] = useState<number>(0);
   const [orcaValue, setOrcaValue] = useState<number>(0);
   const [tramplinValue, setTramplinValue] = useState<number>(0);
+  const [exponentValue, setExponentValue] = useState<number>(0);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [refreshKey, setRefreshKey] = useState<number>(0);
   const [checkingAptosProtocols, setCheckingAptosProtocols] = useState<string[]>([]);
   const [checkingSolanaProtocols, setCheckingSolanaProtocols] = useState<string[]>([]);
   const [aptosCheckRunId, setAptosCheckRunId] = useState(0);
   const [solanaCheckRunId, setSolanaCheckRunId] = useState(0);
+  // Shared "hide small assets" state for both wallet cards (mirrors desktop Sidebar)
+  const [hideSmallAssets, setHideSmallAssets] = useState(true);
 
   const APTOS_PROTOCOL_NAMES = [
     "Hyperion",
@@ -114,7 +124,7 @@ function MobileTabsContent() {
     "APTree",
     "AI agent",
   ];
-  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino", "Meteora", "Raydium", "Orca", "Tramplin"];
+  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino", "Meteora", "Raydium", "Orca", "Tramplin", "Exponent"];
 
   const resetAptosChecking = useCallback(() => {
     setAptosCheckRunId((x) => x + 1);
@@ -173,13 +183,14 @@ function MobileTabsContent() {
         }, 0);
 
         setTokens(portfolio.tokens);
-        setTotalValue((total + hyperionValue + echelonValue + ariesValue + jouleValue + tappValue + mesoValue + auroValue + earniumValue + aaveValue + moarValue + thalaValue + echoValue + decibelValue + aptreeValue + yieldAIValue).toFixed(2));
+        // Wallet tokens only — protocol position values are added once in aptosTotalMobile.
+        setTotalValue(total.toFixed(2));
       } catch {
       }
     }
 
     loadPortfolio();
-  }, [effectiveAptosAddress, hyperionValue, echelonValue, ariesValue, jouleValue, tappValue, mesoValue, auroValue, earniumValue, aaveValue, moarValue, thalaValue, echoValue, decibelValue, aptreeValue, yieldAIValue]);
+  }, [effectiveAptosAddress]);
 
   // In WebView mode, refresh read-only data after native wallet_connected.
   useEffect(() => {
@@ -208,6 +219,40 @@ function MobileTabsContent() {
     }
     resetSolanaChecking();
   }, [resetSolanaChecking, solanaAddress]);
+
+  useEffect(() => {
+    if (!solanaProtocolsAddress) {
+      setJupiterValue(0);
+      setKaminoValue(0);
+      setMeteoraValue(0);
+      setRaydiumValue(0);
+      setOrcaValue(0);
+      setTramplinValue(0);
+      setExponentValue(0);
+    }
+  }, [solanaProtocolsAddress]);
+
+  const resetProtocolValues = useCallback(() => {
+    setHyperionValue(0);
+    setEchelonValue(0);
+    setAriesValue(0);
+    setJouleValue(0);
+    setTappValue(0);
+    setMesoValue(0);
+    setAuroValue(0);
+    setEarniumValue(0);
+    setAaveValue(0);
+    setMoarValue(0);
+    setThalaValue(0);
+    setEchoValue(0);
+    setDecibelValue(0);
+    setAptreeValue(0);
+    setYieldAIValue(0);
+  }, []);
+
+  useEffect(() => {
+    resetProtocolValues();
+  }, [effectiveAptosAddress, resetProtocolValues]);
 
   // Обработчики изменения суммы позиций в протоколах
   const handleHyperionValueChange = (value: number) => {
@@ -288,22 +333,7 @@ function MobileTabsContent() {
 
       setTokens(portfolio.tokens);
       
-      // Reset protocol values and bump refreshKey so protocol cards refetch
-      setHyperionValue(0);
-      setEchelonValue(0);
-      setAriesValue(0);
-      setJouleValue(0);
-      setTappValue(0);
-      setMesoValue(0);
-      setAuroValue(0);
-      setEarniumValue(0);
-      setAaveValue(0);
-      setMoarValue(0);
-      setThalaValue(0);
-      setEchoValue(0);
-      setDecibelValue(0);
-      setAptreeValue(0);
-      setYieldAIValue(0);
+      resetProtocolValues();
       if (effectiveAptosAddress) resetAptosChecking();
       if (solanaAddress) resetSolanaChecking();
       setRefreshKey((k) => k + 1);
@@ -315,6 +345,29 @@ function MobileTabsContent() {
       setIsRefreshing(false);
     }
   };
+
+  const handleGlobalRefresh = async () => {
+    if (effectiveAptosAddress) await handleRefresh();
+    if (solanaAddress) await refreshSolana();
+  };
+
+  const aptosTotalMobile =
+    (parseFloat(totalValue || "0") || 0) +
+    [
+      hyperionValue, echelonValue, ariesValue, jouleValue, tappValue, mesoValue,
+      auroValue, amnisValue, earniumValue, aaveValue, moarValue, thalaValue,
+      echoValue, decibelValue, aptreeValue, yieldAIValue,
+    ].reduce((sum, v) => sum + (Number.isFinite(v) ? v : 0), 0);
+  const solanaTotalMobile =
+    (Number.isFinite(solanaTotalValue) ? (solanaTotalValue ?? 0) : 0) +
+    [jupiterValue, kaminoValue, meteoraValue, raydiumValue, orcaValue, tramplinValue, exponentValue]
+      .reduce((sum, v) => sum + (Number.isFinite(v) ? v : 0), 0);
+  // Richer wallet first; on a tie (e.g. both empty) the wallet the user
+  // connected themselves wins — a derived Aptos wallet goes below Solana.
+  const aptosFirstMobile =
+    aptosTotalMobile !== solanaTotalMobile
+      ? aptosTotalMobile > solanaTotalMobile
+      : !isAptosDerived;
 
   return (
     <MobileManagementProvider setActiveTab={setTab} scrollToTop={scrollToTop}>
@@ -343,25 +396,61 @@ function MobileTabsContent() {
               <DashboardPanel />
             </div>
             <div className={tab === "assets" ? "block w-full max-w-full" : "hidden w-full max-w-full"}>
-              <div className="p-4 space-y-4 w-full max-w-full">
+              <div className="p-4 flex flex-col gap-4 w-full max-w-full">
+                {/* Global Assets header for both wallets (mirrors desktop Sidebar) */}
+                {(effectiveAptosAddress || solanaAddress) && (
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-lg font-medium">Assets</span>
+                      <span className="text-lg font-medium">
+                        {formatCurrency(aptosTotalMobile + solanaTotalMobile, 2)}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                        <Checkbox
+                          id="hideSmallAssetsMobile"
+                          checked={hideSmallAssets}
+                          onCheckedChange={(checked) => setHideSmallAssets(!!checked)}
+                        />
+                        <Label htmlFor="hideSmallAssetsMobile" className="text-sm">
+                          Hide assets {'<'}1$
+                        </Label>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={handleGlobalRefresh}
+                          disabled={isRefreshing || isSolanaLoading}
+                          className="h-4 w-4 p-0 text-muted-foreground hover:bg-transparent hover:text-foreground/60 opacity-80 transition-colors"
+                        >
+                          <RefreshCw
+                            className={cn(
+                              "h-3 w-3",
+                              (isRefreshing || isSolanaLoading) && "animate-spin"
+                            )}
+                          />
+                        </Button>
+                        <CollapsibleControls />
+                      </div>
+                    </div>
+                  </div>
+                )}
                 {/* Aptos wallet card and protocols - only when Aptos is connected */}
                 {effectiveAptosAddress && (
-                  <>
+                  <div className={cn("space-y-4", aptosFirstMobile ? "order-1" : "order-2")}>
                     <PortfolioCard
-                      totalValue={(
-                        parseFloat(totalValue || "0") +
-                        (Number.isFinite(solanaTotalValue) ? (solanaTotalValue ?? 0) : 0) +
-                        (Number.isFinite(jupiterValue) ? jupiterValue : 0) +
-                        (Number.isFinite(kaminoValue) ? kaminoValue : 0) +
-                        (Number.isFinite(meteoraValue) ? meteoraValue : 0) +
-                        (Number.isFinite(raydiumValue) ? raydiumValue : 0) +
-                        (Number.isFinite(orcaValue) ? orcaValue : 0) +
-                        (Number.isFinite(tramplinValue) ? tramplinValue : 0)
-                      ).toFixed(2)}
-                      tokens={tokens} 
+                      totalValue={totalValue}
+                      tokens={tokens}
                       onRefresh={handleRefresh}
                       isRefreshing={isRefreshing}
                       hasSolanaWallet={!!solanaAddress}
+                      isDerived={isAptosDerived}
+                      address={effectiveAptosAddress}
+                      hideSmallAssets={hideSmallAssets}
+                      onHideSmallAssetsChange={setHideSmallAssets}
+                      showHeaderControls={false}
                     />
                     {checkingAptosProtocols.length > 0 && (
                       <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
@@ -412,9 +501,22 @@ function MobileTabsContent() {
                           : protocolItems;
                       return listToRender
                         .sort((a, b) => b.value - a.value)
-                        .map(({ component: Component, name, handler }) => (
-                          <Component
+                        .map(({ component: Component, name, handler, value }) => (
+                          <div
                             key={name}
+                            // Hide small (<$1) cards when the toggle is on;
+                            // collapse empty (no-position) wrappers with
+                            // `contents` so they add no layout gap. The
+                            // component stays mounted to keep reporting value.
+                            className={cn(
+                              hideSmallAssets && value < 1
+                                ? "hidden"
+                                : value === 0
+                                  ? "contents"
+                                  : undefined
+                            )}
+                          >
+                          <Component
                             address={effectiveAptosAddress}
                             onPositionsValueChange={handler}
                             walletTokens={tokens}
@@ -428,37 +530,22 @@ function MobileTabsContent() {
                               });
                             }}
                           />
+                          </div>
                         ));
                     })() : null}
-                  </>
+                  </div>
                 )}
-                
+
                 {/* Solana wallet card - INDEPENDENT of Aptos */}
                 {solanaAddress && (
-                  <div className="space-y-2">
-                    {/* Show Solana-only Assets total header when Aptos is not connected */}
-                    {!effectiveAptosAddress && (
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-lg font-medium">Assets</span>
-                        <span className="text-lg font-medium">
-                          {formatCurrency(
-                            (Number.isFinite(solanaTotalValue) ? (solanaTotalValue ?? 0) : 0) +
-                              (Number.isFinite(jupiterValue) ? jupiterValue : 0) +
-                              (Number.isFinite(kaminoValue) ? kaminoValue : 0) +
-                              (Number.isFinite(meteoraValue) ? meteoraValue : 0) +
-                              (Number.isFinite(raydiumValue) ? raydiumValue : 0) +
-                              (Number.isFinite(orcaValue) ? orcaValue : 0) +
-                              (Number.isFinite(tramplinValue) ? tramplinValue : 0),
-                            2,
-                          )}
-                        </span>
-                      </div>
-                    )}
+                  <div className={cn("space-y-2", aptosFirstMobile ? "order-2" : "order-1")}>
                     <SolanaWalletCard
                       tokens={solanaTokens}
                       totalValueUsd={solanaTotalValue}
                       onRefresh={refreshSolana}
                       isRefreshing={isSolanaLoading}
+                      hideSmallAssets={hideSmallAssets}
+                      onHideSmallAssetsChange={setHideSmallAssets}
                     />
                     {checkingSolanaProtocols.length > 0 && (
                       <div className="flex items-center gap-2 px-2 py-1 text-xs text-muted-foreground">
@@ -573,11 +660,41 @@ function MobileTabsContent() {
                             />
                           ),
                         },
+                        {
+                          name: "Exponent" as const,
+                          value: exponentValue,
+                          component: (
+                            <ExponentPositionsList
+                              key="Exponent"
+                              address={solanaProtocolsAddress ?? undefined}
+                              onPositionsValueChange={(v) => setExponentValue(Number.isFinite(v) ? v : 0)}
+                              onPositionsCheckComplete={() => {
+                                const runId = solanaCheckRunId;
+                                setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Exponent") : prev));
+                              }}
+                            />
+                          ),
+                        },
                       ] as const
                     )
                       .slice()
                       .sort((a, b) => b.value - a.value)
-                      .map((x) => x.component)}
+                      .map((x) => (
+                        <div
+                          key={x.name}
+                          // See Aptos block above: hide <$1 cards when the
+                          // toggle is on, collapse empty wrappers so no gap.
+                          className={cn(
+                            hideSmallAssets && x.value < 1
+                              ? "hidden"
+                              : x.value === 0
+                                ? "contents"
+                                : undefined
+                          )}
+                        >
+                          {x.component}
+                        </div>
+                      ))}
                     <SolanaSignMessageButton />
                   </div>
                 )}

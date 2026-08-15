@@ -1,6 +1,21 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { YIELD_AI_HYPERION_POOLS, type HyperionPoolKey } from '@/lib/constants/yieldAiVault';
+import { toCanonicalAddress } from '@/lib/utils/addressNormalization';
+
+const POOL_KEYS = Object.keys(YIELD_AI_HYPERION_POOLS) as HyperionPoolKey[];
+
+/** Resolve the non-USDC leg's symbol + decimals for a position by its tokenA. */
+function resolveLeg(tokenA: string): { symbol: string; decimals: number } {
+  const t = toCanonicalAddress(tokenA);
+  for (const k of POOL_KEYS) {
+    const p = YIELD_AI_HYPERION_POOLS[k];
+    if (toCanonicalAddress(p.tokenA) === t) return { symbol: p.symbolA, decimals: p.decimalsA };
+    if (toCanonicalAddress(p.tokenB) === t) return { symbol: p.symbolB, decimals: p.decimalsB };
+  }
+  return { symbol: 'A', decimals: 8 };
+}
 
 type PositionView = {
   position: string;
@@ -19,7 +34,6 @@ type PositionView = {
 };
 
 const USDC_DECIMALS = 6;
-const WBTC_DECIMALS = 8;
 
 function fmt(raw: string, decimals: number): string {
   try {
@@ -33,6 +47,7 @@ function fmt(raw: string, decimals: number): string {
 export default function HyperionLpAdminPage() {
   const [secret, setSecret] = useState('');
   const [safe, setSafe] = useState('');
+  const [poolKey, setPoolKey] = useState<HyperionPoolKey>('usdt_usdc');
   const [usdcAmount, setUsdcAmount] = useState('10'); // human USDC
   const [halfWidthTicks, setHalfWidthTicks] = useState('250');
   const [slippageBps, setSlippageBps] = useState('100');
@@ -77,6 +92,7 @@ export default function HyperionLpAdminPage() {
           headers: { 'Content-Type': 'application/json', 'x-cron-secret': secret.trim() },
           body: JSON.stringify({
             safeAddress: safe.trim(),
+            poolKey,
             usdcAmountInBaseUnits: usdcBaseUnits(),
             halfWidthTicks: Number(halfWidthTicks),
             slippageBps: Number(slippageBps),
@@ -96,7 +112,7 @@ export default function HyperionLpAdminPage() {
         setBusy(false);
       }
     },
-    [secret, safe, usdcBaseUnits, halfWidthTicks, slippageBps, pushLog, loadPositions]
+    [secret, safe, poolKey, usdcBaseUnits, halfWidthTicks, slippageBps, pushLog, loadPositions]
   );
 
   const closePosition = useCallback(
@@ -124,7 +140,7 @@ export default function HyperionLpAdminPage() {
 
   return (
     <div className="container mx-auto px-4 py-6 max-w-4xl">
-      <h1 className="text-lg font-semibold mb-1">Hyperion LP — WBTC/USDC strategy</h1>
+      <h1 className="text-lg font-semibold mb-1">Hyperion LP — CLMM strategy (multi-pool)</h1>
       <p className="text-sm text-gray-500 mb-4">
         Executor-signed CLMM LP for an AI agent safe. Open zaps USDC into a centered range; close
         claims fees (perf cut) then removes all liquidity back to the safe. Gated by the cron secret.
@@ -150,6 +166,20 @@ export default function HyperionLpAdminPage() {
             className="w-full border rounded px-2 py-1 mt-1 font-mono text-xs"
             placeholder="0x..."
           />
+        </label>
+        <label className="text-sm col-span-2">
+          Pool
+          <select
+            value={poolKey}
+            onChange={(e) => setPoolKey(e.target.value as HyperionPoolKey)}
+            className="w-full border rounded px-2 py-1 mt-1"
+          >
+            {POOL_KEYS.map((k) => (
+              <option key={k} value={k}>
+                {YIELD_AI_HYPERION_POOLS[k].label} ({k}, tier {YIELD_AI_HYPERION_POOLS[k].feeTier})
+              </option>
+            ))}
+          </select>
         </label>
         <label className="text-sm">
           USDC amount
@@ -227,7 +257,11 @@ export default function HyperionLpAdminPage() {
               )}
             </div>
             <div className="text-gray-600">
-              WBTC: {fmt(p.amountA, WBTC_DECIMALS)} · USDC: {fmt(p.amountB, USDC_DECIMALS)} · principal:{' '}
+              {(() => {
+                const leg = resolveLeg(p.tokenA);
+                return `${leg.symbol}: ${fmt(p.amountA, leg.decimals)}`;
+              })()}{' '}
+              · USDC: {fmt(p.amountB, USDC_DECIMALS)} · principal:{' '}
               {fmt(p.principalUsdc, USDC_DECIMALS)} USDC · liq: {p.liquidity}
             </div>
           </div>

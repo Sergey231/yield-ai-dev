@@ -28,6 +28,19 @@ export interface ThalaRewardItem {
   valueUSD: number;
 }
 
+export interface ThalaFeeLeg {
+  symbol: string;
+  amountRaw: string;
+  amount: number;
+  valueUSD: number;
+}
+
+export interface ThalaPositionFees {
+  token0: ThalaFeeLeg;
+  token1: ThalaFeeLeg;
+  feesValueUSD: number;
+}
+
 export interface ThalaPosition {
   positionId: string;
   positionAddress: string;
@@ -37,6 +50,8 @@ export interface ThalaPosition {
   token0: ThalaTokenAmount;
   token1: ThalaTokenAmount;
   inRange: boolean;
+  fees?: ThalaPositionFees;
+  feesValueUSD?: number;
   rewards: ThalaRewardItem[];
   positionValueUSD: number;
   rewardsValueUSD: number;

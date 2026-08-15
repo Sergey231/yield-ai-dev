@@ -161,6 +161,20 @@ export const queryKeys = {
     decibel: {
       userPositions: (address: string) =>
         ['protocols', 'decibel', 'userPositions', address] as const,
+      accountOverview: (address: string) =>
+        ['protocols', 'decibel', 'accountOverview', address] as const,
+      predepositorBalance: (address: string) =>
+        ['protocols', 'decibel', 'predepositorBalance', address] as const,
+      vaultPerformance: (address: string) =>
+        ['protocols', 'decibel', 'vaultPerformance', address] as const,
+      amps: (address: string) =>
+        ['protocols', 'decibel', 'amps', address] as const,
+      markets: () =>
+        ['protocols', 'decibel', 'markets'] as const,
+      prices: (market?: string) =>
+        ['protocols', 'decibel', 'prices', market ?? 'all'] as const,
+      openOrders: (subaccounts: string[]) =>
+        ['protocols', 'decibel', 'openOrders', subaccounts] as const,
       marketPrice: (market: string) =>
         ['protocols', 'decibel', 'marketPrice', market] as const,
       positionLedger: (
@@ -228,6 +242,8 @@ export const queryKeys = {
         ['protocols', 'yield-ai', 'depositHistory', safeAddress, currentValue ?? null] as const,
       deltaNeutralState: (safeAddress: string) =>
         ['protocols', 'yield-ai', 'deltaNeutralState', safeAddress] as const,
+      deltaNeutralCycles: (safeAddress: string) =>
+        ['protocols', 'yield-ai', 'deltaNeutralCycles', safeAddress] as const,
       deltaNeutralHistory: (safeAddress: string, limit?: number) =>
         ['protocols', 'yield-ai', 'deltaNeutralHistory', safeAddress, limit ?? 100] as const,
       safePaused: (safeAddress: string) =>
@@ -240,6 +256,8 @@ export const queryKeys = {
         ['protocols', 'yield-ai', 'vaultFaSwapLimits', safeAddress] as const,
       hyperionLpPositions: (safeAddress: string) =>
         ['protocols', 'yield-ai', 'hyperionLpPositions', safeAddress] as const,
+      hyperionLpEarningsSummary: (safeAddress: string) =>
+        ['protocols', 'yield-ai', 'hyperionLpEarningsSummary', safeAddress] as const,
     },
 
     /**
@@ -296,6 +314,8 @@ export const queryKeys = {
         ['protocols', 'echelon', 'userPositions', address] as const,
       rewards: (address: string) =>
         ['protocols', 'echelon', 'rewards', address] as const,
+      accountEmode: (address: string) =>
+        ['protocols', 'echelon', 'accountEmode', address] as const,
     },
 
     /**
@@ -385,6 +405,14 @@ export const queryKeys = {
         ['protocols', 'tramplin', 'userPositions', address] as const,
       rewards: (address: string) =>
         ['protocols', 'tramplin', 'rewards', address] as const,
+    },
+
+    /**
+     * Exponent (Solana) yield markets + strategy vaults
+     */
+    exponent: {
+      userPositions: (address: string) =>
+        ['protocols', 'exponent', 'userPositions', address] as const,
     },
   },
 

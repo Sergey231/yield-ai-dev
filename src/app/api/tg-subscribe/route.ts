@@ -103,8 +103,15 @@ export async function POST(req: NextRequest) {
 
     // Check TG API response: error 0 = success, error 1 = show message to user
     if (apiData.error !== 0) {
+      const message = apiData.message || 'Subscription failed';
+      const isTechnicalError = /^Server error \d+/i.test(message);
       return NextResponse.json(
-        { error: apiData.message || 'Subscription failed' },
+        {
+          error: isTechnicalError
+            ? 'Telegram subscription is temporarily unavailable. Please try again later.'
+            : message,
+          ...(isTechnicalError ? { details: message } : {}),
+        },
         { status: 400 }
       );
     }

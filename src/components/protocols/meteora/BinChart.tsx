@@ -34,7 +34,37 @@ interface BinChartProps {
   extraRanges?: Array<{ lowerPrice: number; upperPrice: number; label?: string; inRange?: boolean }>;
   /** Mirrors `chain` param of /api/birdeye/history. */
   chain?: "solana" | "aptos";
+  /**
+   * `birdeye` (default) loads `/api/birdeye/history`.
+   * `hyperion-pool` loads our stable-pool tick snapshots via
+   * `/api/protocols/yield-ai/hyperion-stable-pool-price/history` (requires `poolKey`).
+   */
+  priceSource?: "birdeye" | "hyperion-pool";
+  /** Required when `priceSource="hyperion-pool"` (e.g. usdt_usdc). */
+  poolKey?: string;
   height?: number;
+  /**
+   * Decimals for price labels (axis, range lines, header). Default 2 suits
+   * volatile pairs; stable pairs need 4 — at 2 decimals the whole chart reads
+   * as a flat "1.00".
+   */
+  priceDecimals?: number;
+}
+
+function toHyperionPeriod(days: number): string {
+  if (days <= 0.05) return "1h";
+  if (days <= 1.5) return "1d";
+  if (days <= 8) return "7d";
+  if (days <= 35) return "30d";
+  return "90d";
+}
+
+function toHyperionDownsample(birdeyeType: string): string {
+  const t = birdeyeType.trim().toLowerCase();
+  if (t === "1h") return "1h";
+  if (t === "4h") return "4h";
+  if (t === "1m" || t === "5m" || t === "15m" || t === "1d" || t === "raw") return t;
+  return "1h";
 }
 
 const PERIODS = [
@@ -71,12 +101,24 @@ export function BinChart({
   activeLabel = "Current Price",
   extraRanges,
   chain = "solana",
+  priceSource = "birdeye",
+  poolKey,
   height = 320,
+  priceDecimals = 2,
 }: BinChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
+  /**
+   * Prices the autoscale must keep visible (primary range band + current
+   * price). Without this the Y axis fits the series data only, and a range
+   * band wider than recent price history (typical for narrow stable bands)
+   * ends up partly off-screen. A ref, not state: the series autoscale
+   * provider closure must always read the latest values without re-creating
+   * the chart.
+   */
+  const scaleAnchorsRef = useRef<number[]>([]);
 
   const [activePeriod, setActivePeriod] = useState<(typeof PERIODS)[number]>(PERIODS[2]);
   const [loading, setLoading] = useState(true);
@@ -159,16 +201,34 @@ export function BinChart({
       if (attempt === 0) setError(null);
       let scheduledRetry = false;
       try {
-        const timeTo = Math.floor(Date.now() / 1000);
-        const timeFrom = timeTo - Math.ceil(activePeriod.days * 24 * 60 * 60);
-        const params = new URLSearchParams({
-          chain,
-          address: tokenXMint,
-          type: activePeriod.type,
-          time_from: String(timeFrom),
-          time_to: String(timeTo),
-        });
-        const resp = await fetch(`/api/birdeye/history?${params.toString()}`, { cache: "no-store" });
+        let resp: Response;
+        if (priceSource === "hyperion-pool") {
+          if (!poolKey) {
+            setError("Missing poolKey for hyperion-pool chart");
+            setPriceData([]);
+            return;
+          }
+          const params = new URLSearchParams({
+            poolKey,
+            period: toHyperionPeriod(activePeriod.days),
+            type: toHyperionDownsample(activePeriod.type),
+          });
+          resp = await fetch(
+            `/api/protocols/yield-ai/hyperion-stable-pool-price/history?${params.toString()}`,
+            { cache: "no-store" }
+          );
+        } else {
+          const timeTo = Math.floor(Date.now() / 1000);
+          const timeFrom = timeTo - Math.ceil(activePeriod.days * 24 * 60 * 60);
+          const params = new URLSearchParams({
+            chain,
+            address: tokenXMint,
+            type: activePeriod.type,
+            time_from: String(timeFrom),
+            time_to: String(timeTo),
+          });
+          resp = await fetch(`/api/birdeye/history?${params.toString()}`, { cache: "no-store" });
+        }
         const json = (await resp.json().catch(() => null)) as HistoryResponse | null;
         if (cancelled) return;
         if (!json?.success || !Array.isArray(json.data?.items)) {
@@ -181,11 +241,20 @@ export function BinChart({
             }, 900 + Math.floor(Math.random() * 400));
             return;
           }
-          setError(isRateLimit ? "Birdeye rate-limited" : rawMsg || "Failed to load price history");
+          setError(
+            isRateLimit
+              ? "Birdeye rate-limited"
+              : rawMsg || "Failed to load price history"
+          );
           setPriceData([]);
           return;
         }
         const items = json.data!.items as Array<{ unixTime?: number; value?: number }>;
+        if (items.length === 0 && priceSource === "hyperion-pool") {
+          setPriceData([]);
+          setError("No pool snapshots yet");
+          return;
+        }
         const formatted = items
           .map((it) => ({
             time: Math.floor(Number(it.unixTime)) as UTCTimestamp,
@@ -205,7 +274,7 @@ export function BinChart({
       cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [tokenXMint, activePeriod, chain, requestNonce]);
+  }, [tokenXMint, activePeriod, chain, requestNonce, priceSource, poolKey]);
 
   // Create / update chart
   useEffect(() => {
@@ -237,6 +306,20 @@ export function BinChart({
       topColor: "rgba(59, 130, 246, 0.35)",
       bottomColor: "rgba(59, 130, 246, 0.0)",
       lineWidth: 2,
+      priceFormat: { type: "price", precision: priceDecimals, minMove: 1 / 10 ** priceDecimals },
+      autoscaleInfoProvider: (original: () => { priceRange: { minValue: number; maxValue: number } } | null) => {
+        const base = original();
+        const anchors = scaleAnchorsRef.current;
+        if (!anchors.length) return base;
+        let min = Math.min(...anchors);
+        let max = Math.max(...anchors);
+        if (base?.priceRange) {
+          min = Math.min(min, base.priceRange.minValue);
+          max = Math.max(max, base.priceRange.maxValue);
+        }
+        const pad = (max - min) * 0.1 || Math.abs(max) * 0.001 || 1;
+        return { priceRange: { minValue: min - pad, maxValue: max + pad } };
+      },
     });
     series.setData(priceData as { time: Time; value: number }[]);
     chart.timeScale().fitContent();
@@ -266,7 +349,7 @@ export function BinChart({
       chartRef.current = null;
       seriesRef.current = null;
     };
-  }, [priceData, loading, error, height, syncBands]);
+  }, [priceData, loading, error, height, syncBands, priceDecimals]);
 
   // lightweight-charts does not expose a dedicated subscription for every price-scale
   // zoom/pan change, so keep the shaded range aligned with a lightweight sync loop.
@@ -289,6 +372,13 @@ export function BinChart({
 
   // Sync price lines (min/max/active bin) onto the series whenever they change.
   useEffect(() => {
+    // Keep the primary band + current price inside the autoscaled Y range
+    // (read by the series' autoscaleInfoProvider), then nudge a re-scale.
+    scaleAnchorsRef.current = [lowerBinPrice, upperBinPrice, activeBinPrice].filter(
+      (v): v is number => v != null && Number.isFinite(v)
+    );
+    chartRef.current?.priceScale("right").applyOptions({ autoScale: true });
+
     const series = seriesRef.current;
     if (!series) return;
     // Remove existing
@@ -317,7 +407,7 @@ export function BinChart({
           lineWidth: 1,
           lineStyle: LineStyle.Solid,
           axisLabelVisible: true,
-          title: `${lowerLabel} ${formatNumber(lowerBinPrice, 2)}`,
+          title: `${lowerLabel} ${formatNumber(lowerBinPrice, priceDecimals)}`,
         })
       );
     }
@@ -329,7 +419,7 @@ export function BinChart({
           lineWidth: 1,
           lineStyle: LineStyle.Solid,
           axisLabelVisible: true,
-          title: `${upperLabel} ${formatNumber(upperBinPrice, 2)}`,
+          title: `${upperLabel} ${formatNumber(upperBinPrice, priceDecimals)}`,
         })
       );
     }
@@ -347,7 +437,7 @@ export function BinChart({
               lineWidth: 1,
               lineStyle: LineStyle.Dashed,
               axisLabelVisible: false,
-              title: `${tag}min ${formatNumber(r.lowerPrice, 2)}`,
+              title: `${tag}min ${formatNumber(r.lowerPrice, priceDecimals)}`,
             })
           );
         }
@@ -361,7 +451,7 @@ export function BinChart({
               // Show the position tag (e.g. "#1") on the axis so it can be
               // matched to the position card; price stays in the title text.
               axisLabelVisible: Boolean(r.label),
-              title: r.label ? `${r.label} ${formatNumber(r.upperPrice, 2)}` : `max ${formatNumber(r.upperPrice, 2)}`,
+              title: r.label ? `${r.label} ${formatNumber(r.upperPrice, priceDecimals)}` : `max ${formatNumber(r.upperPrice, priceDecimals)}`,
             })
           );
         }
@@ -377,12 +467,12 @@ export function BinChart({
           lineWidth: 2,
           lineStyle: LineStyle.Solid,
           axisLabelVisible: true,
-          title: `${activeLabel} ${formatNumber(activeBinPrice, 2)}`,
+          title: `${activeLabel} ${formatNumber(activeBinPrice, priceDecimals)}`,
         })
       );
     }
     requestAnimationFrame(syncBands);
-  }, [lowerBinPrice, upperBinPrice, activeBinPrice, lowerLabel, upperLabel, activeLabel, extraRanges, priceData, syncBands]);
+  }, [lowerBinPrice, upperBinPrice, activeBinPrice, lowerLabel, upperLabel, activeLabel, extraRanges, priceData, syncBands, priceDecimals]);
 
   const stats = useMemo(() => {
     if (priceData.length === 0) return null;
@@ -437,7 +527,7 @@ export function BinChart({
           {stats && (
             <>
               <span className="font-medium tabular-nums">
-                ${formatNumber(stats.last, 2)}
+                ${formatNumber(stats.last, priceDecimals)}
               </span>
               <span
                 className={`text-xs tabular-nums ${stats.percent >= 0 ? "text-green-600" : "text-red-500"}`}

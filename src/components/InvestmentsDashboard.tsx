@@ -20,7 +20,7 @@ import tokenList from "@/lib/data/tokenList.json";
 import { Input } from "@/components/ui/input";
 import { Search, Funnel, X } from "lucide-react";
 import { ExternalLink, Gift } from "lucide-react";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { DepositButton } from "@/components/ui/deposit-button";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import Image from "next/image";
@@ -36,6 +36,7 @@ import { useWallet } from "@aptos-labs/wallet-adapter-react";
 import { AirdropInfoTooltip } from "@/components/ui/airdrop-info-tooltip";
 import { YieldAiAgentWalletBlock, YieldAiStablecoinAgentAction } from "@/components/ui/yield-ai-agent-wallet-block";
 import { DecibelAiAgentWalletBlock } from "@/components/ui/decibel-ai-agent-wallet-block";
+import { HyperionAiAgentWalletBlock } from "@/components/ui/hyperion-ai-agent-wallet-block";
 import { Settings } from "lucide-react";
 import {
   DropdownMenu,
@@ -53,7 +54,7 @@ import { normalizeAddress } from "@/lib/utils/addressNormalization";
 
 // Ideas exclusions for protocols and Echelon assets that must not accept new deposits.
 const HIDDEN_IDEAS_PROTOCOLS = new Set(["Earnium", "Auro Finance", "Aries", "Meso Finance", "Moar Market", "Tapp Exchange", "Kofi Finance", "Joule", "Panora"]);
-const EXCLUDED_ECHELON_IDEA_SYMBOLS = new Set(['kapt', 'stkapt']);
+const EXCLUDED_ECHELON_IDEA_SYMBOLS = new Set(['kapt', 'stkapt', 'goapt']);
 const EXCLUDED_ECHELON_IDEA_TOKENS = new Set([
   "0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa::asset::USDT",
   "0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa::asset::USDC",
@@ -62,6 +63,7 @@ const EXCLUDED_ECHELON_IDEA_TOKENS = new Set([
   "0x54fc0d5fa5ad975ede1bf8b1c892ae018745a1afd4a4da9b70bb6e5448509fc0",
   "0x821c94e69bc7ca058c913b7b5e6b0a5c9fd1523d58723a966fb8c1f5ea888105",
   "0x42556039b88593e768c97ab1a3ab0c6a17230825769304482dff8fdebe4c002b",
+  "0x5b5c9ec5e88ddd6697b5b2f9f0a8e03eae1186c47fa4d934798632dc2987b249",
 ]);
 const USDC_LOGO_APTOS = "https://assets.panora.exchange/tokens/aptos/USDC.svg";
 const MIN_VISIBLE_TVL_USD = 10000;
@@ -104,11 +106,13 @@ function getChainLogoForProtocol(protocolName: string): { src: string; alt: stri
   const isSolana =
     normalizedProtocol === "jupiter" ||
     normalizedProtocol === "kamino" ||
+    normalizedProtocol === "orca" ||
     normalizedProtocol === "tramplin";
   return isSolana
     ? { src: "/chain_ico/solana.png?v=1", alt: "Solana" }
     : { src: "/chain_ico/aptos.png?v=1", alt: "Aptos" };
 }
+
 
 function getChainForProtocol(protocolName: string): ChainFilter {
   return getChainLogoForProtocol(protocolName).alt === "Solana" ? "Solana" : "Aptos";
@@ -165,6 +169,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
     'APTree': true,
     'Jupiter': true,
     'Kamino': true,
+    'Orca': true,
   });
   const [protocolsError, setProtocolsError] = useState<Record<string, string | null>>({});
   const [protocolsData, setProtocolsData] = useState<Record<string, InvestmentData[]>>({});
@@ -179,6 +184,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
     'APTree': '/protocol_ico/aptree.png',
     'Jupiter': '/protocol_ico/jupiter.png',
     'Kamino': '/protocol_ico/kamino.png',
+    'Orca': '/protocol_ico/orca.ico',
   });
   // For Echelon (e.g. DLP) tokenList.json may not contain the token.
   // Resolve missing token metadata from /api/tokens/info to show correct icons and decimals.
@@ -195,7 +201,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
   }, [echelonPoolsResp]);
 
   const [showSearchOptions, setShowSearchOptions] = useState(false);
-  const [searchByProtocols, setSearchByProtocols] = useState(false);
+  const [protocolFilterSearch, setProtocolFilterSearch] = useState('');
   const [selectedFilterProtocols, setSelectedFilterProtocols] = useState<string[]>([]);
   const [selectedPoolTypeFilters, setSelectedPoolTypeFilters] = useState<PoolTypeFilter[]>([]);
   const [selectedChainFilters, setSelectedChainFilters] = useState<ChainFilter[]>([]);
@@ -226,7 +232,8 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
 
   const hasAptosWallet = Boolean(account?.address);
   const hasSolanaWallet = Boolean(solanaConnectedAddress);
-  const isSolanaProtocolName = (name: string) => name === "Jupiter" || name === "Kamino";
+  const isSolanaProtocolName = (name: string) =>
+    name === "Jupiter" || name === "Kamino" || name === "Orca";
   const uiProtocolsLoading = (() => {
     // Ideas "Checking pools" indicator should reflect connected chains:
     // - only Solana connected -> show only Solana protocols
@@ -291,18 +298,11 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
   };
 
   const handleProtocolSelect = (protocolName: string) => {
-    setSelectedFilterProtocols(prev => {
-      if (prev.includes(protocolName)) {
-        // Удаляем протокол, если уже выбран
-        return prev.filter(p => p !== protocolName);
-      } else {
-        // Добавляем протокол
-        return [...prev, protocolName];
-      }
-    });
-	setSearchByProtocols(true);
-    setSearchQuery(''); // Очищаем поле поиска
-    setShowSearchOptions(false); // Закрываем окно опций
+    setSelectedFilterProtocols(prev =>
+      prev.includes(protocolName)
+        ? prev.filter(p => p !== protocolName)
+        : [...prev, protocolName]
+    );
   };
 
   const handleSearchChange = (value: string) => {
@@ -311,8 +311,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
 
   const clearSearchByProtocols = () => {
     setSelectedFilterProtocols([]);
-	setSearchByProtocols(false);
-	setShowSearchOptions(false);
+    setProtocolFilterSearch('');
   };
 
   // Start loading immediately when component mounts
@@ -662,6 +661,30 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
                 originalPool: pool.originalPool,
               }));
             }
+          },
+          {
+            name: 'Orca',
+            url: '/api/protocols/orca/pools',
+            logoUrl: '/protocol_ico/orca.ico',
+            transform: (data: any) => {
+              const pools = Array.isArray(data?.data) ? data.data : [];
+              return pools.map((pool: any) => ({
+                asset: pool.asset || 'Unknown',
+                provider: 'Orca',
+                totalAPY: typeof pool.totalAPY === 'number' ? pool.totalAPY : 0,
+                depositApy: typeof pool.depositApy === 'number' ? pool.depositApy : 0,
+                borrowAPY: typeof pool.borrowAPY === 'number' ? pool.borrowAPY : 0,
+                token: pool.token || '',
+                protocol: 'Orca',
+                tvlUSD: typeof pool.tvlUSD === 'number' ? pool.tvlUSD : 0,
+                dailyVolumeUSD: typeof pool.dailyVolumeUSD === 'number' ? pool.dailyVolumeUSD : 0,
+                poolType: pool.poolType || 'DEX',
+                feeTier: typeof pool.feeTier === 'number' ? pool.feeTier : undefined,
+                token1Info: pool.token1Info,
+                token2Info: pool.token2Info,
+                originalPool: pool.originalPool,
+              }));
+            }
           }
         ];
 
@@ -851,8 +874,11 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
     }
 
     if (hideSmallTvlPools) {
+      // Treat a missing/zero TVL as "unknown" rather than "small": some
+      // protocols (e.g. APTree) don't report TVL, so they arrive as 0. Only
+      // hide pools that report a real, positive TVL below the threshold.
       const tvl = typeof item.tvlUSD === "number" ? item.tvlUSD : 0;
-      if (tvl < MIN_VISIBLE_TVL_USD) return false;
+      if (tvl > 0 && tvl < MIN_VISIBLE_TVL_USD) return false;
     }
 
     if (
@@ -973,6 +999,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
   ]
     .filter((name) => name && !HIDDEN_IDEAS_PROTOCOLS.has(name))
     .sort((a, b) => a.localeCompare(b));
+  const searchByProtocols = selectedFilterProtocols.length > 0;
   const proVisibleData = activeTab === "pro"
     ? currentTabData
         .filter(item => {
@@ -985,7 +1012,7 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
           const hasDexTokens = !!(item.token1Info && item.token2Info) || !!(item as any).tokensInfo?.length;
 
           // Include whitelisted protocols that may not resolve tokenInfo yet.
-          return hasAssetColon || hasTokenInfo || hasDexTokens || item.protocol === 'Echelon' || item.protocol === 'Decibel' || item.protocol === 'Echo Protocol' || item.protocol === 'APTree' || item.protocol === 'Jupiter' || item.protocol === 'Kamino';
+          return hasAssetColon || hasTokenInfo || hasDexTokens || item.protocol === 'Echelon' || item.protocol === 'Decibel' || item.protocol === 'Echo Protocol' || item.protocol === 'APTree' || item.protocol === 'Jupiter' || item.protocol === 'Kamino' || item.protocol === 'Orca';
         })
         .sort((a, b) => b.totalAPY - a.totalAPY)
     : [];
@@ -1020,9 +1047,14 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
         </CollapsibleProvider>
       )}
 
-      <div className="mb-6 grid gap-4 md:grid-cols-2 items-stretch">
+      {/* These cards live in the constrained middle dashboard panel whose width
+          varies with the Tools panel, so we let the grid auto-fit columns by
+          available width instead of guessing viewport breakpoints. Falls back to
+          1 column on narrow panels and goes up to 3 when there's room. */}
+      <div className="mb-6 grid gap-4 grid-cols-[repeat(auto-fit,minmax(280px,1fr))] items-stretch">
         <YieldAiAgentWalletBlock />
         <DecibelAiAgentWalletBlock />
+        <HyperionAiAgentWalletBlock />
       </div>
 
       <div className="mb-4 pl-4">
@@ -1234,163 +1266,166 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
 
         {activeTab === "pro" && (
           <>
-          <div className="flex flex-wrap items-center gap-2 mb-4">
+          <div className="flex flex-wrap items-center gap-2 mb-2">
 
-		  <div className="relative flex-1 max-w-md" onBlur={(e) => {
-		    // Закрываем, если фокус ушёл за пределы контейнера
-		    if (!e.currentTarget.contains(e.relatedTarget as Node)) setShowSearchOptions(false);
-		  }}>
-
-		  <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
-
-		  <div className="flex gap-1 min-w-[200px] w-full sm:min-w-0 sm:w-auto flex-none">
-			<Input
-		      placeholder="Search tokens..."
-			  value={searchQuery}
-		      onChange={(e) => handleSearchChange(e.target.value)}
-			  onFocus={() => setShowSearchOptions(true)}
-			  onClick={() => setShowSearchOptions(true)}
-			  className="pl-8 max-w-[100%] min-w-[200px]"
-	        />
-
-			{showSearchOptions && (
-			  <div
-			    className="absolute left-0 top-full mt-1 w-full rounded-md border bg-background shadow-md z-50 p-3"
-			    tabIndex={-1}
-			  >
-			    <div className="flex items-center space-x-2 relative">
-
-				  <div className="absolute -top-2 right-4 z-10">
-				    <TooltipProvider>
-				      <Tooltip>
-				        <TooltipTrigger asChild>
-					      <button
-					        key={"Clear Protocol"}
-					        onClick={() => clearSearchByProtocols()}
-						    className={`text-sm transition-colors cursor-pointer`}
-					      >
-						    Clear
-					      </button>
-						</TooltipTrigger>
-						  <TooltipContent>
-						    <p>Clear filter by protocol</p>
-						  </TooltipContent>
-					    </Tooltip>
-					  </TooltipProvider>
-				  </div>
-				  <div className="absolute -top-2 -right-4 z-10">
-					  <TooltipProvider>
-				        <Tooltip>
-				          <TooltipTrigger asChild>
-							<Button
-						      variant="ghost"
-						      size="sm"
-						      onClick={() => setShowSearchOptions(false)}
-						      className="h-4 w-4 py-0 hover:bg-transparent hover:text-foreground/60 opacity-80 transition-colors cursor-pointer"
-						    >
-						      <X className={cn(
-							   "h-3 w-3"
-						      )} />
-						    </Button>
-						  </TooltipTrigger>
-						  <TooltipContent>
-						    <p>Close filter by protocol</p>
-						  </TooltipContent>
-					    </Tooltip>
-					  </TooltipProvider>
-				  </div>
-				  <div className="flex flex-wrap gap-2 pt-10">
-				    {protocolNames.map((protocolName) => (
-				      <button
-					    key={protocolName}
-					    onClick={() => handleProtocolSelect(protocolName)}
-						className={`px-3 py-1 text-sm border rounded-md transition-colors ${selectedFilterProtocols.includes(protocolName) ? 'bg-blue-500 text-white border-blue-500' : 'hover:bg-gray-100'}`}
-					  >
-				        {protocolName}
-					  </button>
-				    ))}
-			      </div>
-			    </div>
-			  </div>
-			)}
-			</div>
+            {/* Token search */}
+            <div className="relative flex-1 min-w-[180px] max-w-xs">
+              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" />
+              <Input
+                placeholder="Search tokens…"
+                value={searchQuery}
+                onChange={(e) => handleSearchChange(e.target.value)}
+                className="pl-8"
+              />
             </div>
+
+            {/* Quick token shortcuts */}
             <div className="flex gap-1 flex-none">
-              {['USD', 'APT', 'BTC'].map((token) => (
+              {(['USD', 'APT', 'BTC'] as const).map((token) => (
                 <Button
                   key={token}
-                  variant="outline"
+                  variant={searchQuery.toUpperCase().includes(token) ? 'default' : 'outline'}
                   size="sm"
-                  onClick={() => handleSearchChange(token)}
-                  className="h-9 px-2"
+                  onClick={() => handleSearchChange(searchQuery.toUpperCase().includes(token) ? '' : token)}
+                  className="h-9 px-3 text-xs font-medium"
                 >
                   {token}
                 </Button>
               ))}
             </div>
-            <div className="flex flex-wrap items-center gap-3 flex-none rounded-md border bg-muted/20 px-2 py-1.5">
-              <div className="flex items-center gap-1.5">
-                <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Type</span>
-                <div className="flex gap-1">
-                  {(['Lending', 'DEX'] as PoolTypeFilter[]).map((filter) => (
-                    <Button
-                      key={filter}
-                      variant={selectedPoolTypeFilters.includes(filter) ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => togglePoolTypeFilter(filter)}
-                      className="h-8 px-2"
-                    >
-                      {filter}
-                    </Button>
-                  ))}
+
+            {/* Protocol faceted filter */}
+            <Popover open={showSearchOptions} onOpenChange={setShowSearchOptions}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className={cn(
+                    'h-9 gap-1.5 border-dashed',
+                    selectedFilterProtocols.length > 0 && 'border-solid border-primary/50 bg-primary/5'
+                  )}
+                >
+                  <Funnel className="h-3.5 w-3.5" />
+                  Protocols
+                  {selectedFilterProtocols.length > 0 && (
+                    <Badge variant="secondary" className="ml-0.5 rounded-sm px-1 py-0 text-xs font-medium">
+                      {selectedFilterProtocols.length}
+                    </Badge>
+                  )}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-60 p-3">
+                <div className="space-y-2">
+                  <div className="relative">
+                    <Search className="absolute left-2 top-2.5 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+                    <Input
+                      placeholder="Search protocols…"
+                      value={protocolFilterSearch}
+                      onChange={(e) => setProtocolFilterSearch(e.target.value)}
+                      className="pl-7 h-8 text-sm"
+                    />
+                  </div>
+                  <div className="max-h-56 overflow-y-auto space-y-0.5 pr-0.5">
+                    {protocolNames
+                      .filter((name) => name.toLowerCase().includes(protocolFilterSearch.toLowerCase()))
+                      .map((protocolName) => {
+                        const proto = getProtocolByName(protocolName);
+                        const isSelected = selectedFilterProtocols.includes(protocolName);
+                        return (
+                          <button
+                            key={protocolName}
+                            onClick={() => handleProtocolSelect(protocolName)}
+                            className={cn(
+                              'w-full flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors text-left',
+                              isSelected
+                                ? 'bg-primary/10 text-primary font-medium'
+                                : 'hover:bg-accent text-foreground/80'
+                            )}
+                          >
+                            {proto?.logoUrl ? (
+                              <Image
+                                src={proto.logoUrl}
+                                alt={protocolName}
+                                width={16}
+                                height={16}
+                                className="rounded-sm shrink-0 object-contain"
+                                unoptimized
+                              />
+                            ) : (
+                              <div className="h-4 w-4 rounded-sm bg-muted shrink-0" />
+                            )}
+                            <span className="truncate flex-1">{protocolName}</span>
+                            {isSelected && (
+                              <span className="ml-auto text-primary text-xs shrink-0">✓</span>
+                            )}
+                          </button>
+                        );
+                      })}
+                  </div>
+                  {selectedFilterProtocols.length > 0 && (
+                    <>
+                      <div className="h-px bg-border" />
+                      <button
+                        onClick={clearSearchByProtocols}
+                        className="w-full text-center text-xs text-muted-foreground hover:text-foreground transition-colors py-0.5"
+                      >
+                        Clear {selectedFilterProtocols.length} selected
+                      </button>
+                    </>
+                  )}
                 </div>
-              </div>
-              <div className="hidden h-6 w-px bg-border sm:block" />
-              <div className="flex items-center gap-1.5">
-                <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Chain</span>
-                <div className="flex gap-1">
-                  {(['Solana', 'Aptos'] as ChainFilter[]).map((filter) => (
-                    <Button
-                      key={filter}
-                      variant={selectedChainFilters.includes(filter) ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => toggleChainFilter(filter)}
-                      className="h-8 px-2"
-                    >
-                      {filter}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="stable-pools"
-                checked={showOnlyStablePools}
-                onCheckedChange={(checked) => setShowOnlyStablePools(checked as boolean)}
-              />
-              <label
-                htmlFor="stable-pools"
-                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-              >
-                Show only stable pools
-              </label>
+              </PopoverContent>
+            </Popover>
+
+            {/* Type filter */}
+            <div className="flex gap-1 flex-none">
+              {(['Lending', 'DEX'] as PoolTypeFilter[]).map((filter) => (
+                <Button
+                  key={filter}
+                  variant={selectedPoolTypeFilters.includes(filter) ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => togglePoolTypeFilter(filter)}
+                  className="h-9 px-3 text-xs"
+                >
+                  {filter}
+                </Button>
+              ))}
             </div>
 
+            {/* Chain filter */}
+            <div className="flex gap-1 flex-none">
+              {(['Aptos', 'Solana'] as ChainFilter[]).map((filter) => (
+                <Button
+                  key={filter}
+                  variant={selectedChainFilters.includes(filter) ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => toggleChainFilter(filter)}
+                  className="h-9 px-3 text-xs"
+                >
+                  {filter}
+                </Button>
+              ))}
+            </div>
+
+            {/* Stables toggle */}
+            <Button
+              variant={showOnlyStablePools ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setShowOnlyStablePools(!showOnlyStablePools)}
+              className="h-9 px-3 text-xs flex-none"
+            >
+              Stables only
+            </Button>
+
+            {/* Column settings */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-9 w-9 flex-none"
-                >
+                <Button variant="ghost" size="icon" className="h-9 w-9 flex-none">
                   <Settings className="h-4 w-4" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-44">
-                <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
-                  Columns
-                </div>
+                <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">Columns</div>
                 <DropdownMenuCheckboxItem
                   checked={hideSmallTvlPools}
                   onCheckedChange={(checked) => setHideSmallTvlPools(!!checked)}
@@ -1419,6 +1454,52 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
+
+          {/* Active filter chips */}
+          {(selectedFilterProtocols.length > 0 || selectedPoolTypeFilters.length > 0 || selectedChainFilters.length > 0) && (
+            <div className="flex flex-wrap items-center gap-1.5 mb-3">
+              {selectedFilterProtocols.map((name) => (
+                <button
+                  key={name}
+                  onClick={() => handleProtocolSelect(name)}
+                  className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/5 px-2.5 py-0.5 text-xs font-medium text-primary hover:bg-primary/10 transition-colors"
+                >
+                  {name}
+                  <X className="h-3 w-3 shrink-0" />
+                </button>
+              ))}
+              {selectedPoolTypeFilters.map((f) => (
+                <button
+                  key={f}
+                  onClick={() => togglePoolTypeFilter(f)}
+                  className="inline-flex items-center gap-1 rounded-full border border-border bg-muted px-2.5 py-0.5 text-xs font-medium hover:bg-accent transition-colors"
+                >
+                  {f}
+                  <X className="h-3 w-3 shrink-0" />
+                </button>
+              ))}
+              {selectedChainFilters.map((f) => (
+                <button
+                  key={f}
+                  onClick={() => toggleChainFilter(f)}
+                  className="inline-flex items-center gap-1 rounded-full border border-border bg-muted px-2.5 py-0.5 text-xs font-medium hover:bg-accent transition-colors"
+                >
+                  {f}
+                  <X className="h-3 w-3 shrink-0" />
+                </button>
+              ))}
+              <button
+                onClick={() => {
+                  clearSearchByProtocols();
+                  setSelectedPoolTypeFilters([]);
+                  setSelectedChainFilters([]);
+                }}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors ml-1"
+              >
+                Clear all
+              </button>
+            </div>
+          )}
 
           {isMobileProLayout && (
           <div className="space-y-3">
@@ -1571,6 +1652,8 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
                           onClick={() => {
                             if (item.protocol === 'Hyperion') {
                               window.open(`https://hyperion.xyz/pool/${item.token}`, '_blank');
+                            } else if (item.protocol === 'Orca') {
+                              window.open(`https://www.orca.so/pools/${item.token}`, '_blank');
                             } else if (item.protocol === 'Tapp Exchange') {
                               window.open(`https://tapp.exchange/pool`, '_blank');
                             } else if (item.protocol === 'Thala') {
@@ -1960,6 +2043,8 @@ export function InvestmentsDashboard({ className }: InvestmentsDashboardProps) {
                                   onClick={() => {
                                     if (item.protocol === 'Hyperion') {
                                       window.open(`https://hyperion.xyz/pool/${item.token}`, '_blank');
+                                    } else if (item.protocol === 'Orca') {
+                                      window.open(`https://www.orca.so/pools/${item.token}`, '_blank');
                                     } else if (item.protocol === 'Tapp Exchange') {
                                       window.open(`https://tapp.exchange/pool`, '_blank');
                                     } else if (item.protocol === 'Thala') {

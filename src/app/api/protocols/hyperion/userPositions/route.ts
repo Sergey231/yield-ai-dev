@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import { sdk } from "@/lib/hyperion";
-import { buildHyperionStableChart } from "@/lib/protocols/hyperion/stableChart";
 
 /**
  * @swagger
@@ -70,41 +69,9 @@ export async function GET(request: Request) {
       positionsType: typeof positions
     });
     
-    const enrichedPositions = Array.isArray(positions)
-      ? positions.map((position) => {
-          if (!position || typeof position !== "object") return position;
-
-          const row = position as {
-            position?: {
-              tickLower?: number;
-              tickUpper?: number;
-              pool?: {
-                currentTick?: number;
-                token1?: string;
-                token2?: string;
-                token1Info?: { symbol?: string };
-                token2Info?: { symbol?: string };
-              };
-            };
-          };
-
-          const chart = buildHyperionStableChart({
-            token1Address: row.position?.pool?.token1,
-            token2Address: row.position?.pool?.token2,
-            token1Symbol: row.position?.pool?.token1Info?.symbol,
-            token2Symbol: row.position?.pool?.token2Info?.symbol,
-            tickLower: row.position?.tickLower,
-            tickUpper: row.position?.tickUpper,
-            currentTick: row.position?.pool?.currentTick,
-          });
-
-          return chart ? { ...position, chart } : position;
-        })
-      : [];
-
     return NextResponse.json({
       success: true,
-      data: enrichedPositions
+      data: Array.isArray(positions) ? positions : []
     }, {
       headers: {
         'Cache-Control': 'public, max-age=2, s-maxage=2, stale-while-revalidate=4',

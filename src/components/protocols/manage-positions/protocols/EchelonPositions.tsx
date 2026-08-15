@@ -20,6 +20,7 @@ import {
   useEchelonPositions,
   useEchelonRewards,
   useEchelonPools,
+  useEchelonAccountEmode,
 } from "@/lib/query/hooks/protocols/echelon";
 import type { EchelonPosition } from "@/lib/query/hooks/protocols/echelon/useEchelonPositions";
 import { CACHE_TIME, STALE_TIME } from "@/lib/query/config";
@@ -62,6 +63,10 @@ export function EchelonPositions() {
     }
   );
   const { data: poolsResponse } = useEchelonPools();
+  // Active Echelon efficiency mode (e.g. 2 = stable) — boosts the liquidation threshold for
+  // eligible markets (USD1/USDt: 82% base → 95% in eMode 2). Health Factor must use the
+  // eMode-adjusted LT when the account has actually opted in, or it understates HF.
+  const { data: accountEmodeId } = useEchelonAccountEmode(walletAddress);
 
   const loading = positionsLoading || rewardsLoading;
   const error = positionsError ? "Failed to load Echelon positions" : null;
@@ -247,8 +252,11 @@ export function EchelonPositions() {
       if (!poolData && tokenInfo?.symbol) {
         poolData = apyData[tokenInfo.symbol];
       }
-      const lt = poolData?.lt || 0.75; // fallback к 75% если LT недоступен
-      
+      // eMode boosts the liquidation threshold on eligible markets (e.g. USD1/USDt 82% → 95%
+      // in eMode 2) — only apply it when the account is actually opted into that eMode.
+      const isEmodeActive = Boolean(accountEmodeId && accountEmodeId > 0);
+      const lt = (isEmodeActive ? poolData?.emodeLt : undefined) ?? poolData?.lt ?? 0.75; // fallback 75%
+
       accountMargin += value * lt;
     });
 
@@ -273,7 +281,7 @@ export function EchelonPositions() {
       totalLiabilities,
       isLiquidatable: healthFactor < 1
     };
-  }, [positions, apyData, tokenPrices]);
+  }, [positions, apyData, tokenPrices, accountEmodeId]);
 
   // Получаем цены токенов через Panora API с fallback к Echelon API
   useEffect(() => {

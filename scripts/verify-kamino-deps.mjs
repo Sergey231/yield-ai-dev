@@ -31,6 +31,9 @@ async function main() {
   await import("@kamino-finance/klend-sdk");
   console.log("[verify-kamino-deps] OK: dynamic import @kamino-finance/klend-sdk");
 
+  await import("@kamino-finance/farms-sdk");
+  console.log("[verify-kamino-deps] OK: dynamic import @kamino-finance/farms-sdk");
+
   console.log("[verify-kamino-deps] All checks passed.");
 }
 

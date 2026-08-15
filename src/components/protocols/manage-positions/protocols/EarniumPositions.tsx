@@ -8,6 +8,8 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/use-toast";
 import { ToastAction } from "@/components/ui/toast";
+import { submitAptosTransaction } from "@/lib/mobile/submitAptosTransaction";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 function findToken(address: string) {
   // Normalize addresses by removing leading zeros after 0x
@@ -56,6 +58,8 @@ function normalizePriceMap(list: any[]): Record<string, number> {
 
 export function EarniumPositionsManaging() {
   const { account, signAndSubmitTransaction } = useWallet();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
+  const walletAddress = account?.address?.toString() ?? injectedAptosAddress ?? null;
   const { toast } = useToast();
   const [pools, setPools] = useState<any[]>([]);
   const [rewardsUSD, setRewardsUSD] = useState(0);
@@ -65,13 +69,13 @@ export function EarniumPositionsManaging() {
   const [earniumRewardsData, setEarniumRewardsData] = useState<any[]>([]);
 
   const load = useCallback(async () => {
-    if (!account?.address) return;
+    if (!walletAddress) return;
     
     try {
       setLoading(true);
       
       // Загружаем данные о наградах
-      const resp = await fetch(`/api/protocols/earnium/rewards?address=${account.address}`);
+      const resp = await fetch(`/api/protocols/earnium/rewards?address=${walletAddress}`);
       const json = await resp.json();
       const data: any[] = Array.isArray(json.data) ? json.data : [];
       setEarniumRewardsData(data);
@@ -154,7 +158,7 @@ export function EarniumPositionsManaging() {
     } finally {
       setLoading(false);
     }
-  }, [account?.address]);
+  }, [walletAddress]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -177,7 +181,7 @@ export function EarniumPositionsManaging() {
   }, [load]);
 
   const claimAll = async () => {
-    if (!signAndSubmitTransaction) return;
+    if (!walletAddress || (!signAndSubmitTransaction && !injectedAptosAddress)) return;
     try {
       setClaiming(true);
       
@@ -200,10 +204,18 @@ export function EarniumPositionsManaging() {
         typeArguments: [] as string[],
         functionArguments: [finalPoolIndices] as any[] // Array of pool indices as strings
       } as const;
-      const tx = await signAndSubmitTransaction({ 
-        data: payload,
-        options: { maxGasAmount: 5000 } // Match successful transaction (4730 used, set 5000 for safety)
-      } as any);
+      const tx = await submitAptosTransaction({
+        transaction: {
+          data: payload,
+          options: { maxGasAmount: 5000 },
+        } as any,
+        signAndSubmitTransaction: signAndSubmitTransaction as any,
+        connected: !!account,
+        address: walletAddress,
+      });
+      if (!tx.hash) {
+        throw new Error("Transaction was submitted without hash");
+      }
 
       // Show success toast
       toast({
@@ -237,7 +249,7 @@ export function EarniumPositionsManaging() {
     return <div className="text-center py-4">Loading Earnium positions...</div>;
   }
 
-  if (!account?.address || (pools.length === 0 && rewardsUSD === 0)) return null;
+  if (!walletAddress || (pools.length === 0 && rewardsUSD === 0)) return null;
 
   return (
     <TooltipProvider>

@@ -229,6 +229,42 @@ Recommended sequencing:
   - `usdc_received_on_close: u64`
   - `close_swap_tx_version: u64`
 
+### Partial add/reduce roadmap
+
+The current V2 shape is enough for a simple lifecycle: one open snapshot, then one final close with
+close-side USDC proceeds. It is not enough by itself for an agent that repeatedly adds or reduces
+the same delta-neutral position in $50/$100/$N slices.
+
+For automated slice management, add an append-only rebalance ledger on top of the current state:
+
+| Action | Meaning | Required recorded facts |
+|---|---|---|
+| `increase` | Add more Decibel short + matching safe spot hedge | Decibel filled short delta, spot asset bought, USDC spent, Decibel tx version, spot tx version, execution loss bps |
+| `decrease` | Close part of Decibel short + sell matching safe spot delta | Decibel closed short delta, spot asset sold, USDC received, Decibel tx version, spot tx version, execution loss bps |
+| `rebalance` | Fix hedge drift without changing target notional materially | target delta, actual spot/perp delta before/after, tx versions, USDC spent/received |
+| `close` | Final full unwind | final closed short size, final spot proceeds, tx versions |
+
+Keep the existing view as the current position summary, but compute history/PnL from the ledger:
+
+```text
+net_short_size     = sum(increase.short_delta) - sum(decrease.short_delta) - final_close_delta
+net_spot_size      = sum(spot_bought) - sum(spot_sold)
+spot_cost_usdc     = sum(spot_usdc_spent) - sum(spot_usdc_received)
+realized_pnl_usdc  = decibel_realized_pnl + spot_usdc_received - spot_cost_usdc + funding
+execution_loss_usd = sum(preview_mid_value - executed_value)
+```
+
+Suggested Move additions:
+
+- `record_rebalance_v2(safe, perp_market, action, short_delta, spot_delta, usdc_in, usdc_out,
+  decibel_tx_version, spot_tx_version, execution_loss_bps, client_order_id_bytes)`
+- `get_rebalance_count_v2(safe, perp_market) -> u64`
+- `get_rebalance_v2(safe, perp_market, index) -> DeltaNeutralRebalanceView`
+- events mirroring every ledger append so off-chain history can index without scanning all views
+
+This mirrors the Hyperion LP accounting model: cumulative events are the source of truth, while the
+current view is only a convenient snapshot.
+
 ### Delta-neutral V2 views (read-only)
 
 Frontend can render state directly from views:

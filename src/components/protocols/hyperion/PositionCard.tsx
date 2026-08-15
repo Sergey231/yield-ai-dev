@@ -9,6 +9,8 @@ import { sdk } from "@/lib/hyperion";
 import { useToast } from "@/components/ui/use-toast";
 import { ToastAction } from "@/components/ui/toast";
 import { formatCurrency } from "@/lib/utils/numberFormat";
+import { submitAptosTransaction } from "@/lib/mobile/submitAptosTransaction";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 interface PositionProps {
   position: {
@@ -59,6 +61,8 @@ interface PositionProps {
 
 export function PositionCard({ position, isManageView = false }: PositionProps) {
   const { signAndSubmitTransaction, account } = useWallet();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
+  const effectiveAptosAddress = account?.address?.toString() ?? injectedAptosAddress ?? null;
   const [isClaiming, setIsClaiming] = useState(false);
   const { toast } = useToast();
   const token1 = position.position.pool.token1Info;
@@ -76,25 +80,33 @@ export function PositionCard({ position, isManageView = false }: PositionProps) 
   const totalRewards = farmRewards + feeRewards;
 
   const handleClaimRewards = async () => {
-    if (!signAndSubmitTransaction || !account?.address) return;
+    if ((!signAndSubmitTransaction && !effectiveAptosAddress) || !effectiveAptosAddress) return;
     
     try {
       setIsClaiming(true);
       const payload = await sdk.Position.claimAllRewardsTransactionPayload({
         positionId: position.position.objectId,
-        recipient: account.address.toString()
+        recipient: effectiveAptosAddress
       });
 
-      const response = await signAndSubmitTransaction({
-        data: {
-          function: payload.function as `${string}::${string}::${string}`,
-          typeArguments: payload.typeArguments,
-          functionArguments: payload.functionArguments
+      const response = await submitAptosTransaction({
+        transaction: {
+          data: {
+            function: payload.function as `${string}::${string}::${string}`,
+            typeArguments: payload.typeArguments,
+            functionArguments: payload.functionArguments
+          },
+          options: {
+            maxGasAmount: 20000,
+          },
         },
-        options: {
-          maxGasAmount: 20000, // Network limit is 20000
-        },
+        signAndSubmitTransaction: signAndSubmitTransaction as any,
+        connected: !!account,
+        address: effectiveAptosAddress,
       });
+      if (!response.hash) {
+        throw new Error("Transaction was submitted without hash");
+      }
 
       // console.log('Transaction hash:', response.hash);
       toast({

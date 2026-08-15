@@ -12,6 +12,7 @@ A comprehensive DeFi investment dashboard built on the Aptos blockchain that all
 - **Yield Discovery**: Find the best APY opportunities across different protocols
 - **One-Click Deposits**: Seamless deposit functionality with native and external protocol integration
 - **Swap & Deposit**: Automatically swap tokens and deposit to earn yield
+- **Cross-chain Swap**: Aptos swaps via [Panora](https://docs.panora.exchange/developer/swap); Solana swaps via [Jupiter Swap API v2](https://dev.jup.ag/docs/swap-api/) — see [docs/swap-integration.md](./docs/swap-integration.md)
 - **Position Management**: View and manage your existing positions across all protocols
 - **Wallet Integration**: Connect Aptos wallets to view balances and execute transactions
 - **Mobile wallet Solana (MWA)**: In the mobile layout, a smartphone-icon button next to the main wallet control lets you connect a Solana wallet via the **Mobile Wallet Adapter (MWA)**—primarily for **Solana Seeker** on Android Chrome. The button is shown only on Android Chrome and opens the Solana wallet picker.
@@ -135,7 +136,17 @@ A comprehensive DeFi investment dashboard built on the Aptos blockchain that all
 - `GET /api/panora/prices` - Get token prices
 - `GET /api/panora/tokenList` - Get available tokens
 - `GET /api/panora/tokenPrices` - Get specific token prices
-- `GET /api/panora/swap` - Execute token swaps
+- `POST /api/panora/swap-quote` - Get Aptos swap quote (Panora)
+- `POST /api/panora/execute-swap` - Build Aptos swap transaction payload from quote
+
+### Jupiter Swap Endpoints (Solana)
+- `POST /api/jupiter/quote` - Jupiter Swap v2 quote/build preview (gasless)
+- `POST /api/jupiter/quoteV1` - Jupiter Swap v1 quote (user pays gas)
+- `POST /api/jupiter/build` - Build unsigned v0 swap transaction
+- `POST /api/jupiter/execute` - Fee-payer sign + broadcast (gasless)
+- `POST /api/jupiter/swapTx` - v1 swap transaction (user pays gas)
+
+See [docs/swap-integration.md](./docs/swap-integration.md) for the full swap flow.
 
 ### Protocol Endpoints
 - `GET /api/protocols/{protocol}/pools` - Get protocol-specific pools

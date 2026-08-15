@@ -22,6 +22,9 @@ import {
 } from '@/components/ui/select';
 import { useWalletData } from '@/contexts/WalletContext';
 import { useWallet } from '@aptos-labs/wallet-adapter-react';
+import { useNativeWalletStore } from '@/lib/stores/nativeWalletStore';
+import { isYieldAiNativeAppNow } from '@/lib/mobile/nativeBridge';
+import { submitAptosTransaction } from '@/lib/mobile/submitAptosTransaction';
 import { isUserRejectedError } from '@/lib/utils/errors';
 import { Token } from '@/lib/types/panora';
 import tokenList from '@/lib/data/tokenList.json';
@@ -42,7 +45,24 @@ interface TransferModalProps {
 export function TransferModal({ isOpen, onClose }: TransferModalProps) {
   const { tokens, address: userAddress, refreshPortfolio } = useWalletData();
   const { signAndSubmitTransaction, connected, account } = useWallet();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
   const { toast } = useToast();
+
+  const effectiveAptosAddress =
+    injectedAptosAddress ?? userAddress ?? account?.address?.toString() ?? null;
+
+  const [isNativeApp, setIsNativeApp] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const evaluate = () => setIsNativeApp(isYieldAiNativeAppNow());
+    evaluate();
+    window.addEventListener("yieldai:native-ready", evaluate);
+    return () => window.removeEventListener("yieldai:native-ready", evaluate);
+  }, []);
+
+  const nativeAptosFlowActive =
+    isNativeApp && !!effectiveAptosAddress?.trim();
+  const walletReady = connected || nativeAptosFlowActive;
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -190,7 +210,7 @@ export function TransferModal({ isOpen, onClose }: TransferModalProps) {
 
   const canTransfer = useMemo(() => {
     return (
-      connected &&
+      walletReady &&
       selectedToken &&
       amount &&
       Number(amount) > 0 &&
@@ -199,10 +219,10 @@ export function TransferModal({ isOpen, onClose }: TransferModalProps) {
       !amountError &&
       !loading
     );
-  }, [connected, selectedToken, amount, recipientAddress, addressError, amountError, loading]);
+  }, [walletReady, selectedToken, amount, recipientAddress, addressError, amountError, loading]);
 
   const executeTransfer = async () => {
-    if (!connected) {
+    if (!walletReady) {
       setError('Wallet not connected. Please connect your wallet first.');
       toast({
         variant: "destructive",
@@ -212,7 +232,7 @@ export function TransferModal({ isOpen, onClose }: TransferModalProps) {
       return;
     }
 
-    if (!selectedToken || !amount || !recipientAddress || !account) {
+    if (!selectedToken || !amount || !recipientAddress || !effectiveAptosAddress) {
       setError('Please fill in all fields');
       return;
     }
@@ -260,12 +280,16 @@ export function TransferModal({ isOpen, onClose }: TransferModalProps) {
 
       if (isAPT) {
         // --- 1. Transfer APT ---
-        transactionData.data.function = '0x1::aptos_account::transfer';
-        transactionData.data.typeArguments = [];
-        transactionData.data.functionArguments = [
-          recipient,
-          amountInSmallestUnit.toString()
-        ];
+        // Petra mobile deeplink expects coin::transfer with numeric amount (see petra.app/docs/mobile-deeplinks).
+        transactionData.data.function = nativeAptosFlowActive
+          ? '0x1::coin::transfer'
+          : '0x1::aptos_account::transfer';
+        transactionData.data.typeArguments = nativeAptosFlowActive
+          ? ['0x1::aptos_coin::AptosCoin']
+          : [];
+        transactionData.data.functionArguments = nativeAptosFlowActive
+          ? [recipient, Number(amountInSmallestUnit)]
+          : [recipient, amountInSmallestUnit.toString()];
         transactionData.options.maxGasAmount = 2000;
       } else if (isLegacyCoin) {
         // --- 2. Transfer Legacy Coin (USDT LayerZero, etc.) ---
@@ -290,11 +314,13 @@ export function TransferModal({ isOpen, onClose }: TransferModalProps) {
         // IMPORTANT: FA tokens require type argument '0x1::fungible_asset::Metadata'
         // Without this, you get "expected 1, received 0" error
         transactionData.data.typeArguments = ['0x1::fungible_asset::Metadata'];
-        transactionData.data.functionArguments = [
-          assetAddress, // FA token address (e.g., 0xbae207...)
-          recipient,   // Recipient address
-          amountInSmallestUnit.toString() // Amount
-        ];
+        transactionData.data.functionArguments = nativeAptosFlowActive
+          ? [assetAddress, recipient, Number(amountInSmallestUnit)]
+          : [
+              assetAddress,
+              recipient,
+              amountInSmallestUnit.toString(),
+            ];
       } else {
         throw new Error('Unable to determine token type');
       }
@@ -312,8 +338,13 @@ export function TransferModal({ isOpen, onClose }: TransferModalProps) {
         recipient,
       });
 
-      // Execute transaction
-      const tx = await signAndSubmitTransaction(transactionData);
+      const tx = await submitAptosTransaction({
+        transaction: transactionData,
+        signAndSubmitTransaction: signAndSubmitTransaction as any,
+        connected,
+        address: effectiveAptosAddress,
+        isNativeApp: nativeAptosFlowActive,
+      });
       txHash = tx.hash || 'Transaction submitted successfully';
 
       setTransferResult({

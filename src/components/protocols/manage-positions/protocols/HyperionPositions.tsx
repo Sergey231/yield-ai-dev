@@ -23,7 +23,8 @@ import { useWithdraw } from "@/lib/hooks/useWithdraw";
 import { ProtocolKey } from "@/lib/transactions/types";
 import { queryKeys } from "@/lib/query/queryKeys";
 import { useHyperionPositions, useHyperionVaultData } from "@/lib/query/hooks/protocols/hyperion";
-import { BinChart } from "@/components/protocols/meteora/BinChart";
+import { submitAptosTransaction } from "@/lib/mobile/submitAptosTransaction";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 interface HyperionPositionProps {
   position: any;
@@ -39,6 +40,8 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
   const [loadingPoolDetails, setLoadingPoolDetails] = useState(false);
   const [poolAPR, setPoolAPR] = useState({ feeAPR: 0, farmAPR: 0 });
   const { signAndSubmitTransaction, account } = useWallet();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
+  const effectiveAptosAddress = account?.address?.toString() ?? injectedAptosAddress ?? null;
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -81,21 +84,29 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
   const totalAPR = poolAPR.feeAPR + poolAPR.farmAPR;
 
   const handleClaimRewards = async () => {
-    if (!signAndSubmitTransaction || !account?.address) return;
+    if ((!signAndSubmitTransaction && !effectiveAptosAddress) || !effectiveAptosAddress) return;
     try {
       setIsClaiming(true);
       const payload = await sdk.Position.claimAllRewardsTransactionPayload({
         positionId: position.position.objectId,
-        recipient: account.address.toString()
+        recipient: effectiveAptosAddress
       });
-      const response = await signAndSubmitTransaction({
-        data: {
-          function: payload.function as `${string}::${string}::${string}`,
-          typeArguments: payload.typeArguments,
-          functionArguments: payload.functionArguments
+      const response = await submitAptosTransaction({
+        transaction: {
+          data: {
+            function: payload.function as `${string}::${string}::${string}`,
+            typeArguments: payload.typeArguments,
+            functionArguments: payload.functionArguments
+          },
+          options: { maxGasAmount: 20000 },
         },
-        options: { maxGasAmount: 20000 }, // Network limit is 20000
+        signAndSubmitTransaction: signAndSubmitTransaction as any,
+        connected: !!account,
+        address: effectiveAptosAddress,
       });
+      if (!response.hash) {
+        throw new Error("Transaction was submitted without hash");
+      }
       toast({ 
         title: "Success", 
         description: `Transaction hash: ${response.hash.slice(0, 6)}...${response.hash.slice(-4)}`,
@@ -105,7 +116,7 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
           </ToastAction>
         ),
       });
-      const walletAddress = account.address.toString();
+      const walletAddress = effectiveAptosAddress;
       queryClient.invalidateQueries({
         queryKey: queryKeys.protocols.hyperion.userPositions(walletAddress),
       });
@@ -161,7 +172,7 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
   };
 
   const handleConfirmRemove = async () => {
-    if (!signAndSubmitTransaction || !account?.address) return;
+    if ((!signAndSubmitTransaction && !effectiveAptosAddress) || !effectiveAptosAddress) return;
     try {
       setIsRemoving(true);
       setShowRemoveModal(false);
@@ -175,7 +186,7 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
         token2Info,
         currencyA,
         currencyB,
-        accountAddress: account.address.toString(),
+        accountAddress: effectiveAptosAddress,
       });
       if (!currencyA || !currencyB) {
         toast({ title: "Error", description: "Token address not found", variant: "destructive" });
@@ -186,17 +197,25 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
         positionId: position.position.objectId,
         currencyA,
         currencyB,
-        accountAddress: account.address.toString(),
+        accountAddress: effectiveAptosAddress,
       });
       console.log('REMOVE PAYLOAD:', payload);
-      const response = await signAndSubmitTransaction({
-        data: {
-          function: payload.function as `${string}::${string}::${string}`,
-          typeArguments: payload.typeArguments,
-          functionArguments: payload.functionArguments
+      const response = await submitAptosTransaction({
+        transaction: {
+          data: {
+            function: payload.function as `${string}::${string}::${string}`,
+            typeArguments: payload.typeArguments,
+            functionArguments: payload.functionArguments
+          },
+          options: { maxGasAmount: 20000 },
         },
-        options: { maxGasAmount: 20000 }, // Network limit is 20000
+        signAndSubmitTransaction: signAndSubmitTransaction as any,
+        connected: !!account,
+        address: effectiveAptosAddress,
       });
+      if (!response.hash) {
+        throw new Error("Transaction was submitted without hash");
+      }
       toast({
         title: "Remove Liquidity Success",
         description: `Transaction hash: ${response.hash.slice(0, 6)}...${response.hash.slice(-4)}`,
@@ -206,7 +225,7 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
           </ToastAction>
         ),
       });
-      const walletAddress = account.address.toString();
+      const walletAddress = effectiveAptosAddress;
       queryClient.invalidateQueries({
         queryKey: queryKeys.protocols.hyperion.userPositions(walletAddress),
       });
@@ -464,23 +483,6 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
         </div>
       </div>
 
-      {position.chart && (
-        <div className="mt-3">
-          <BinChart
-            chain="aptos"
-            tokenXMint={position.chart.chartTokenAddress}
-            tokenXSymbol={position.chart.chartTokenSymbol}
-            tokenYSymbol={position.chart.quoteTokenSymbol}
-            lowerBinPrice={position.chart.lowerPrice}
-            upperBinPrice={position.chart.upperPrice}
-            activeBinPrice={position.chart.currentPrice}
-            lowerLabel="Min Price"
-            upperLabel="Max Price"
-            activeLabel="Current Price"
-          />
-        </div>
-      )}
-
       {/* Модальное окно подтверждения */}
       <ConfirmRemoveModal
         isOpen={showRemoveModal}
@@ -577,6 +579,7 @@ const HyperionPosition = memo(function HyperionPosition({ position, index }: Hyp
 
 export function HyperionPositions() {
   const { account } = useWallet();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
   const queryClient = useQueryClient();
   const [vaultTokens, setVaultTokens] = useState<Token[]>([]);
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -585,7 +588,7 @@ export function HyperionPositions() {
   const [selectedVaultToken, setSelectedVaultToken] = useState<Token | null>(null);
   const [selectedVaultData, setSelectedVaultData] = useState<VaultData | null>(null);
   const { withdraw, isLoading: isWithdrawing } = useWithdraw();
-  const walletAddress = account?.address?.toString();
+  const walletAddress = account?.address?.toString() ?? injectedAptosAddress ?? undefined;
   const {
     data: rawPositions = [],
     isLoading: positionsLoading,
@@ -722,7 +725,7 @@ export function HyperionPositions() {
 
   // Handler для подтверждения Vault Withdraw
   const handleVaultWithdrawConfirm = async (amount: bigint) => {
-    if (!selectedVaultToken || !account?.address) {
+    if (!selectedVaultToken || !walletAddress) {
       console.error('[HyperionPositions] Missing data for vault withdraw');
       return;
     }
@@ -731,7 +734,7 @@ export function HyperionPositions() {
       console.log('[HyperionPositions] Executing Vault Withdraw:', {
         vaultTokenAddress: selectedVaultToken.address,
         amount: amount.toString(),
-        walletAddress: account.address.toString()
+        walletAddress
       });
 
       await withdraw(
@@ -747,7 +750,6 @@ export function HyperionPositions() {
       setSelectedVaultData(null);
 
       // Обновляем позиции после успешного withdraw
-      const walletAddress = account.address.toString();
       queryClient.invalidateQueries({
         queryKey: queryKeys.protocols.hyperion.userPositions(walletAddress),
       });

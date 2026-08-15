@@ -2,9 +2,6 @@ import { PositionBadge, type ProtocolPosition } from "@/shared/ProtocolCard/type
 import { formatNumber } from "@/lib/utils/numberFormat";
 import { getPreferredJupiterTokenIcon } from "@/lib/services/solana/jupiterTokenIcons";
 import type {
-  KaminoRewardRow,
-} from "@/lib/query/hooks/protocols/kamino/useKaminoRewards";
-import type {
   KaminoUserPositionsRow,
 } from "@/lib/query/hooks/protocols/kamino/useKaminoPositions";
 
@@ -88,12 +85,14 @@ function extractKaminoDeposits(obligation: unknown): KaminoDepositRow[] {
     .filter((d): d is KaminoDepositRow => Boolean(d && typeof d.depositReserve === "string" && d.depositReserve.trim()));
 }
 
-export function computeKaminoRewardsUsd(rewards: KaminoRewardRow[]): number {
-  return rewards.reduce((sum, rw) => {
-    const v = typeof rw.usdValue === "number" && Number.isFinite(rw.usdValue) ? rw.usdValue : 0;
-    return sum + v;
-  }, 0);
-}
+export {
+  computeKaminoRewardsUsd,
+  filterMeaningfulKaminoRewardRows,
+  formatKaminoRewardUsd,
+  hasVisibleKaminoRewards,
+  isMeaningfulKaminoRewardUsd,
+  KAMINO_MIN_VISIBLE_REWARD_USD,
+} from "@/lib/kamino/kaminoRewardUsd";
 
 export function computeKaminoPositionsUsd(rows: KaminoUserPositionsRow[]): number {
   let total = 0;

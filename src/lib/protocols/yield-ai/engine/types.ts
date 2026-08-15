@@ -28,7 +28,9 @@ export type Asset = {
 
 export type Protocol = {
   packageAddress: string;
-  adapterAddressView: string;
+  // Echelon resolves its adapter via a view function; Thala uses a fixed allowlisted address.
+  adapterAddressView?: string;
+  adapterAddress?: string;
   poolId?: number;
 };
 
@@ -66,6 +68,8 @@ export type SafeAssignment = {
 export type ActionType =
   | "claimEchelonReward"
   | "swapFaToFa"
+  | "swapFaToFaThala"
+  | "swapFaToFaHyperionBatch"
   | "depositEchelonFa";
 
 export type Action = {

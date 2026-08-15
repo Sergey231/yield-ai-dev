@@ -4,8 +4,15 @@ import { buildVaultDepositPayload } from '@/lib/protocols/yield-ai/vaultDeposit'
 
 export interface ExecuteDepositOptions {
   marketAddress?: string;
+  signerAddress?: string;
   /** Yield AI vault safe (owner signs `vault::deposit` into this safe). */
   yieldAiSafeAddress?: string;
+  /**
+   * Description for the post-deposit "Thanks for your deposit" toast on Yield AI
+   * safes. `undefined` → default ("rebalance every hour", stablecoin agent);
+   * `''` → no description (e.g. Decibel/Hyperion agents that don't auto-rebalance).
+   */
+  yieldAiSuccessDescription?: string;
 }
 
 export async function executeDeposit(
@@ -41,7 +48,9 @@ export async function executeDeposit(
     
     // Convert Uint8Array address to hex string if needed
     let walletAddress: string;
-    if (wallet.account?.address?.data && Array.isArray(wallet.account.address.data)) {
+    if (options?.signerAddress) {
+      walletAddress = options.signerAddress;
+    } else if (wallet.account?.address?.data && Array.isArray(wallet.account.address.data)) {
       walletAddress = '0x' + Array.from(wallet.account.address.data)
         .map(b => b.toString(16).padStart(2, '0'))
         .join('');
@@ -100,7 +109,8 @@ export async function executeDeposit(
 
   // Standard protocol handling (optional marketAddress for Echelon managed positions)
   const marketAddress = options?.marketAddress;
-  const payload = await protocol.buildDeposit(amount, token, wallet.account?.address?.toString(), marketAddress);
+  const signerAddress = options?.signerAddress ?? wallet.account?.address?.toString();
+  const payload = await protocol.buildDeposit(amount, token, signerAddress, marketAddress);
   console.log('Generated payload:', payload);
 
   if (!payload || typeof payload !== 'object') {

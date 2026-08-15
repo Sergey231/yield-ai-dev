@@ -10,11 +10,16 @@ import { queryKeys } from "@/lib/query/queryKeys";
 import { useKaminoPositions } from "@/lib/query/hooks/protocols/kamino/useKaminoPositions";
 import { useKaminoRewards } from "@/lib/query/hooks/protocols/kamino/useKaminoRewards";
 import { getPreferredJupiterTokenIcon } from "@/lib/services/solana/jupiterTokenIcons";
-import { isLikelySolanaAddress } from "@/lib/kamino/kvaultVaultAddress";
 import { Loader2 } from "lucide-react";
+import {
+  resolveKaminoViewerAddress,
+} from "@/lib/kamino/kaminoTestAddress";
 import {
   computeKaminoPositionsUsd,
   computeKaminoRewardsUsd,
+  filterMeaningfulKaminoRewardRows,
+  formatKaminoRewardUsd,
+  hasVisibleKaminoRewards,
   mapKaminoToProtocolPositions,
 } from "@/components/protocols/kamino/mapKaminoToProtocolPositions";
 import { usePortfolioAmountsPrivacy } from "@/contexts/PortfolioAmountsPrivacyContext";
@@ -42,22 +47,10 @@ export function PositionsList({
   onCheckCompleteRef.current = onPositionsCheckComplete;
   const hasCompletedCheckRef = useRef<string | null>(null);
 
-  const rewardsMockEnabled =
-    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "1" ||
-    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "true";
-
-  const effectiveAddress = useMemo(() => {
-    const base = (address ?? "").trim();
-    if (!rewardsMockEnabled) return base;
-    const raw = (
-      searchParams?.get("kaminoAddress") ||
-      searchParams?.get("address") ||
-      searchParams?.get("solanaAddress") ||
-      ""
-    ).trim();
-    if (raw && isLikelySolanaAddress(raw)) return raw;
-    return base;
-  }, [address, rewardsMockEnabled, searchParams]);
+  const effectiveAddress = useMemo(
+    () => resolveKaminoViewerAddress(searchParams, address),
+    [address, searchParams]
+  );
 
   const {
     data: rows = [],
@@ -67,29 +60,35 @@ export function PositionsList({
     isFetching: isPositionsFetching,
   } = useKaminoPositions(effectiveAddress);
   const {
-    data: rewards = [],
+    data: rewardsQueryData,
     isLoading: isRewardsLoading,
     isError: isRewardsError,
     isFetched: isRewardsFetched,
     isFetching: isRewardsFetching,
   } = useKaminoRewards(effectiveAddress);
+  const rewards = rewardsQueryData?.rewards ?? [];
+  const calculateRewardsValue = useMemo(() => computeKaminoRewardsUsd(rewards), [rewards]);
+  const hasVisibleRewards = useMemo(() => hasVisibleKaminoRewards(rewards), [rewards]);
+  const visibleRewards = useMemo(() => filterMeaningfulKaminoRewardRows(rewards), [rewards]);
+  const totalRewardsUsd =
+    typeof rewardsQueryData?.totalUsdValue === "number" && Number.isFinite(rewardsQueryData.totalUsdValue)
+      ? rewardsQueryData.totalUsdValue
+      : calculateRewardsValue;
 
   const positionsNetUsd = useMemo(() => computeKaminoPositionsUsd(rows), [rows]);
-  const calculateRewardsValue = useMemo(() => computeKaminoRewardsUsd(rewards), [rewards]);
   const positions = useMemo(() => mapKaminoToProtocolPositions(rows), [rows]);
 
   /** Header + sort: net positions only (same as "Total assets in Kamino" in manage positions). Rewards stay in the expanded row. */
   const headerTotalValue = positionsNetUsd;
 
-  const totalRewardsUsdStr =
-    calculateRewardsValue > 0 ? `$${formatNumber(calculateRewardsValue, 2)}` : undefined;
+  const totalRewardsUsdStr = hasVisibleRewards ? formatKaminoRewardUsd(calculateRewardsValue) : undefined;
 
   const rewardsBreakdown =
-    calculateRewardsValue > 0 ? (
+    hasVisibleRewards ? (
       <>
         <div className="text-xs font-semibold mb-1">Rewards breakdown:</div>
         <div className="space-y-2 max-h-60 overflow-y-auto">
-          {rewards.map((reward, idx) => {
+          {visibleRewards.map((reward, idx) => {
             const tokenInfo = (() => {
               const mint = (reward.tokenMint || "").trim();
               if (!mint) return null;
@@ -103,16 +102,10 @@ export function PositionsList({
             })();
             if (!tokenInfo) return null;
             const amountNum = Number(reward.amount);
-            const rewardAmount = Number.isFinite(amountNum) ? amountNum : 0;
-            const price =
-              typeof reward.usdValue === "number" &&
-              Number.isFinite(reward.usdValue) &&
-              reward.usdValue > 0 &&
-              rewardAmount > 0
-                ? String(reward.usdValue / rewardAmount)
-                : "0";
-            const value =
-              price && price !== "0" ? formatNumber(rewardAmount * parseFloat(price), 2) : "N/A";
+            const usdValue =
+              typeof reward.usdValue === "number" && Number.isFinite(reward.usdValue)
+                ? reward.usdValue
+                : 0;
             return (
               <div key={idx} className="flex items-center gap-2">
                 {tokenInfo.icon_uri && (
@@ -125,9 +118,7 @@ export function PositionsList({
                     ? maskBalance(formatNumber(amountNum, 6))
                     : maskBalance(String(reward.amount))}
                 </span>
-                <span className="text-gray-300">
-                  {value === "N/A" ? "N/A" : maskUsd(`$${value}`)}
-                </span>
+                <span className="text-gray-300">{maskUsd(formatKaminoRewardUsd(usdValue))}</span>
               </div>
             );
           })}
@@ -155,7 +146,7 @@ export function PositionsList({
     };
     window.addEventListener("refreshPositions", handleRefresh);
     return () => window.removeEventListener("refreshPositions", handleRefresh);
-  }, [effectiveAddress, queryClient, rewardsMockEnabled]);
+  }, [effectiveAddress, queryClient]);
 
   useEffect(() => {
     if (!effectiveAddress) {
@@ -199,7 +190,7 @@ export function PositionsList({
   useEffect(() => {
     if (!effectiveAddress) return;
     if (!isPositionsFetched || !isRewardsFetched || isPositionsFetching || isRewardsFetching) return;
-    const hasPositions = positions.length > 0 || calculateRewardsValue > 0;
+    const hasPositions = positions.length > 0 || hasVisibleRewards;
     setLastKnownHasPositions(hasPositions);
     if (typeof window === "undefined") return;
     try {
@@ -215,13 +206,13 @@ export function PositionsList({
     isPositionsFetching,
     isRewardsFetching,
     positions.length,
-    calculateRewardsValue,
+    hasVisibleRewards,
   ]);
 
   // Avoid showing an "empty" card when cached data is empty but a refetch is still in progress.
   const isFetching = isPositionsFetching || isRewardsFetching;
   const isInitialLoading = isPositionsLoading || isRewardsLoading;
-  const hasAnyData = positions.length > 0 || calculateRewardsValue > 0;
+  const hasAnyData = positions.length > 0 || hasVisibleRewards;
   const isLoading = isInitialLoading || (isFetching && !hasAnyData);
   const isError = isPositionsError || isRewardsError;
 
@@ -229,27 +220,31 @@ export function PositionsList({
   // Sidebar UX: don't show skeleton for protocols that end up empty.
   // We already show a global "Checking positions..." indicator in the sidebar.
   if (isLoading && !hasAnyData && !lastKnownHasPositions) return null;
-  if (!isLoading && (isError || (positions.length === 0 && calculateRewardsValue <= 0))) return null;
+  if (!isLoading && (isError || (positions.length === 0 && !hasVisibleRewards))) return null;
 
   return (
-    <ProtocolCard
-      protocol={protocol}
-      totalValue={headerTotalValue}
-      totalRewardsUsd={totalRewardsUsdStr}
-      rewardsBreakdown={rewardsBreakdown}
-      rewardsEchelonStyle={Boolean(totalRewardsUsdStr)}
-      positions={positions}
-      isLoading={isLoading}
-      showManageButton={showManageButton}
-      belowRewardsContent={
-        isFetching && hasAnyData ? (
-          <div className="flex items-center gap-2 px-2 pt-2 text-xs text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            <span>Updating Kamino…</span>
-          </div>
-        ) : null
-      }
-    />
+    <>
+      <ProtocolCard
+        protocol={protocol}
+        totalValue={headerTotalValue}
+        totalRewardsUsd={totalRewardsUsdStr}
+        rewardsBreakdown={rewardsBreakdown}
+        rewardsEchelonStyle={Boolean(totalRewardsUsdStr)}
+        positions={positions}
+        isLoading={isLoading}
+        showManageButton={showManageButton}
+        belowRewardsContent={
+          <>
+            {isFetching && hasAnyData ? (
+              <div className="flex items-center gap-2 px-2 pt-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                <span>Updating Kamino…</span>
+              </div>
+            ) : null}
+          </>
+        }
+      />
+    </>
   );
 }
 

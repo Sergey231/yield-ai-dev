@@ -31,6 +31,10 @@ export interface EchelonModalRow {
   marketObj: string;
   /** Supply-only: owner can call `execute_withdraw_all_echelon_fa_as_owner`. */
   canEmergencyWithdraw: boolean;
+  /** Raw supplied amount in underlying FA base units (u64 string) — max for partial withdraw. */
+  amountBaseUnits: string;
+  /** Underlying token decimals for converting user input to base units. */
+  decimals: number;
 }
 
 export interface EchelonRewardRow {
@@ -436,6 +440,8 @@ export function useEchelonProtocolCardModel(
           marketObj: String(position.market ?? ''),
           canEmergencyWithdraw:
             positionType === 'supply' && (position.supply ?? position.amount ?? 0) > 0,
+          amountBaseUnits: String(Math.trunc(rawAmount)),
+          decimals: tokenInfo?.decimals ?? 8,
         } satisfies EchelonModalRow,
       };
     });

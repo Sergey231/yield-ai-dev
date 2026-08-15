@@ -38,10 +38,11 @@ type MarketAsset = {
   emodeLt?: number;
 };
 
-const EXCLUDED_IDEAS_ASSET_SYMBOLS = new Set(['kapt', 'stkapt']);
+const EXCLUDED_IDEAS_ASSET_SYMBOLS = new Set(['kapt', 'stkapt', 'goapt']);
 const EXCLUDED_IDEAS_ASSET_ADDRESSES = new Set([
   '0x821c94e69bc7ca058c913b7b5e6b0a5c9fd1523d58723a966fb8c1f5ea888105',
   '0x42556039b88593e768c97ab1a3ab0c6a17230825769304482dff8fdebe4c002b',
+  '0x5b5c9ec5e88ddd6697b5b2f9f0a8e03eae1186c47fa4d934798632dc2987b249',
 ]);
 
 function normalizeMaybeAddress(value: unknown): string {
@@ -187,8 +188,8 @@ export async function GET() {
 
     if (Array.isArray(result.data.assets)) {
       result.data.assets.forEach((asset: MarketAsset) => {
-        // KoFi kAPT/stkAPT are being removed from Echelon core pools. Keep
-        // unwind paths available, but do not advertise new deposits in Ideas.
+        // Deprecated Echelon assets (kAPT, stkAPT, goAPT). Keep unwind paths
+        // available, but do not advertise new deposits in Ideas.
         if (isExcludedIdeasAsset(asset)) {
           return;
         }

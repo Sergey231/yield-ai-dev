@@ -9,27 +9,42 @@ export async function POST(request: NextRequest) {
       fromTokenAddress,
       toTokenAddress,
       fromTokenAmount,
+      toTokenAmount,
       toWalletAddress,
       slippagePercentage,
-      integratorFeeAddress,
-      integratorFeePercentage,
-      getTransactionData
     } = body;
 
     // Validate required fields
-    if (!chainId || !fromTokenAddress || !toTokenAddress || !fromTokenAmount || !toWalletAddress) {
+    if (!chainId || !fromTokenAddress || !toTokenAddress || !toWalletAddress) {
       return NextResponse.json(
         { error: 'Missing required fields' },
         { status: 400 }
       );
     }
 
+    if (!fromTokenAmount && !toTokenAmount) {
+      return NextResponse.json(
+        { error: 'Either fromTokenAmount or toTokenAmount is required' },
+        { status: 400 }
+      );
+    }
+
+    if (fromTokenAmount && toTokenAmount) {
+      return NextResponse.json(
+        { error: 'Provide either fromTokenAmount or toTokenAmount, not both' },
+        { status: 400 }
+      );
+    }
+
+    const isExactOut = Boolean(toTokenAmount);
     const swapService = PanoraSwapService.getInstance();
     const response = await swapService.getSwapQuote({
       fromToken: fromTokenAddress,
       toToken: toTokenAddress,
       amount: fromTokenAmount,
-      slippage: parseFloat(slippagePercentage || "1") / 100, // Convert percentage to decimal
+      toTokenAmount,
+      quoteMode: isExactOut ? 'exactOut' : 'exactIn',
+      slippage: parseFloat(slippagePercentage || '0.5'),
       toWalletAddress,
     });
 
@@ -48,4 +63,4 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
-} 
+}

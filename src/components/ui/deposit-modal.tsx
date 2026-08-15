@@ -27,6 +27,8 @@ import { cn } from "@/lib/utils";
 import { TokenAmountInput } from "@/shared/DepositAmountInput";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { submitAptosTransaction } from "@/lib/mobile/submitAptosTransaction";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 interface DepositModalProps {
   isOpen: boolean;
@@ -81,6 +83,19 @@ interface DepositModalProps {
    */
   secondaryLogoUrl?: string;
   secondaryLogoAlt?: string;
+  /**
+   * Description for the post-deposit "Thanks for your deposit" toast on Yield AI
+   * safes. Pass `''` to suppress the default "rebalance every hour" note (e.g.
+   * Decibel/Hyperion agents that don't auto-rebalance).
+   */
+  yieldAiSuccessDescription?: string;
+  /**
+   * When set, Yield AI minimum deposit is enforced in USD-equivalent terms.
+   * Used by Hyperion, where accepted safe funding tokens include WBTC.
+   */
+  yieldAiMinDepositUsd?: number;
+  /** Fired after a successful deposit (e.g. to route into manage positions). */
+  onDepositSuccess?: () => void;
 }
 
 const MIN_DEPOSIT_YIELD_AI_USDC = 0.1;
@@ -99,6 +114,9 @@ export function DepositModal({
   onYieldAiSafeChange,
   secondaryLogoUrl,
   secondaryLogoAlt,
+  yieldAiSuccessDescription,
+  yieldAiMinDepositUsd,
+  onDepositSuccess,
 }: DepositModalProps) {
   const { tokens, refreshPortfolio } = useWalletData();
   const [isLoading, setIsLoading] = useState(false);
@@ -107,6 +125,7 @@ export function DepositModal({
   const [isSwapModalOpen, setIsSwapModalOpen] = useState(false);
   const amountInputRef = useRef<HTMLInputElement>(null);
   const { account, signAndSubmitTransaction } = useWallet();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
 
   const [resolvedTokenIn, setResolvedTokenIn] = useState(tokenIn);
   const [resolvedPriceUSD, setResolvedPriceUSD] = useState(priceUSD);
@@ -165,7 +184,18 @@ export function DepositModal({
     const norm = (a: string) =>
       a && a.startsWith('0x') ? '0x' + (a.slice(2).replace(/^0+/, '') || '0') : a;
     const walletTok = tokens?.find((t) => norm(t.address) === norm(opt.address));
-    setResolvedPriceUSD(walletTok?.price ? parseFloat(walletTok.price) : priceUSD);
+    if (walletTok?.price) {
+      setResolvedPriceUSD(parseFloat(walletTok.price));
+      return;
+    }
+    const listTok = getTokenInfo(opt.address);
+    const listPrice = listTok?.usdPrice ? parseFloat(String(listTok.usdPrice)) : 0;
+    if (listPrice > 0) {
+      setResolvedPriceUSD(listPrice);
+      return;
+    }
+    const sym = opt.symbol.toUpperCase();
+    setResolvedPriceUSD(sym === 'USDC' || sym === 'USDT' || sym === 'USD1' ? 1 : priceUSD);
   };
 
   // Получаем информацию о токене из списка токенов
@@ -259,10 +289,28 @@ export function DepositModal({
 
   const minYieldAiDepositBaseUnits = useMemo(() => {
     if (protocol.key !== "yield-ai") return BigInt(0);
+    if (yieldAiMinDepositUsd != null && yieldAiMinDepositUsd > 0) {
+      let price = resolvedPriceUSD;
+      if (!(price > 0)) {
+        const sym = (resolvedTokenIn.symbol || "").toUpperCase();
+        if (sym === "USDC" || sym === "USDT" || sym === "USD1") price = 1;
+      }
+      if (!(price > 0)) return BigInt(0);
+      const humanMin = yieldAiMinDepositUsd / price;
+      const factor = 10 ** resolvedTokenIn.decimals;
+      return BigInt(Math.max(1, Math.ceil(humanMin * factor)));
+    }
     return BigInt(
       Math.round(MIN_DEPOSIT_YIELD_AI_USDC * Math.pow(10, resolvedTokenIn.decimals))
     );
-  }, [protocol.key, resolvedTokenIn.decimals]);
+  }, [protocol.key, yieldAiMinDepositUsd, resolvedPriceUSD, resolvedTokenIn.decimals, resolvedTokenIn.symbol]);
+
+  const yieldAiMinDepositLabel = useMemo(() => {
+    if (yieldAiMinDepositUsd != null && yieldAiMinDepositUsd > 0) {
+      return `$${yieldAiMinDepositUsd.toFixed(2)}`;
+    }
+    return `${MIN_DEPOSIT_YIELD_AI_USDC} ${displaySymbol}`;
+  }, [yieldAiMinDepositUsd, displaySymbol]);
 
   const isYieldAiBelowMinimum =
     protocol.key === "yield-ai" &&
@@ -321,19 +369,25 @@ export function DepositModal({
         console.log('Generated Auro create position payload:', payload);
 
         // Submit transaction
-        if (!account || !signAndSubmitTransaction) {
+        const effectiveAptosAddress = account?.address?.toString() ?? injectedAptosAddress ?? null;
+        if (!effectiveAptosAddress && !signAndSubmitTransaction) {
           throw new Error('Wallet not connected');
         }
 
-        const result = await signAndSubmitTransaction({
-          data: {
-            function: payload.function as `${string}::${string}::${string}`,
-            typeArguments: payload.type_arguments,
-            functionArguments: payload.arguments
+        const result = await submitAptosTransaction({
+          transaction: {
+            data: {
+              function: payload.function as `${string}::${string}::${string}`,
+              typeArguments: payload.type_arguments,
+              functionArguments: payload.arguments
+            },
+            options: {
+              maxGasAmount: 20000,
+            },
           },
-          options: {
-            maxGasAmount: 20000,
-          },
+          signAndSubmitTransaction: signAndSubmitTransaction as any,
+          connected: !!account,
+          address: effectiveAptosAddress,
         });
 
         console.log('Auro create position transaction result:', result);
@@ -398,7 +452,7 @@ export function DepositModal({
           }
           if (isYieldAiBelowMinimum) {
             throw new Error(
-              `Minimum deposit is ${MIN_DEPOSIT_YIELD_AI_USDC} ${displaySymbol}`
+              `Minimum deposit is ${yieldAiMinDepositLabel}`
             );
           }
         }
@@ -406,12 +460,18 @@ export function DepositModal({
         if (protocol.key === "echelon" && poolAddress) {
           depositOptions = { marketAddress: poolAddress };
         } else if (protocol.key === "yield-ai" && yieldAiSafeAddress) {
-          depositOptions = { yieldAiSafeAddress };
+          depositOptions = {
+            yieldAiSafeAddress,
+            ...(yieldAiSuccessDescription !== undefined
+              ? { yieldAiSuccessDescription }
+              : {}),
+          };
         }
         await deposit(protocol.key, resolvedTokenIn.address, amount, depositOptions);
       }
 
       onClose();
+      onDepositSuccess?.();
     } catch (error) {
       console.error('Deposit error:', error);
     } finally {
@@ -567,7 +627,7 @@ export function DepositModal({
 
             {isYieldAiBelowMinimum && (
               <p className="text-sm text-red-500">
-                Minimum deposit is {MIN_DEPOSIT_YIELD_AI_USDC} {displaySymbol}.
+                Minimum deposit is {yieldAiMinDepositLabel}.
               </p>
             )}
 

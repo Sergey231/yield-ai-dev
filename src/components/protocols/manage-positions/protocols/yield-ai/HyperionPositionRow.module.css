@@ -1,0 +1,96 @@
+/* Hyperion LP row overrides — allow pool name to wrap on narrow viewports (Echelon card uses nowrap + ellipsis). */
+.poolAssetTop {
+  flex-wrap: wrap;
+  row-gap: 0.2rem;
+}
+
+.poolSymbol {
+  overflow: visible;
+  text-overflow: unset;
+  white-space: normal;
+  word-break: break-word;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.colActionsContainer {
+  container-type: inline-size;
+  container-name: hyperion-actions;
+}
+
+.actionsCell {
+  flex-wrap: nowrap;
+}
+
+.actionsDesktop {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  flex-wrap: nowrap;
+}
+
+.actionsCompact {
+  display: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.3rem;
+}
+
+.iconActionBtn {
+  width: 2rem;
+}
+
+.textActionBtn {
+  min-width: 3.5rem;
+}
+
+/* Small desktop / laptop: middle panel is squeezed by sidebar + tools rail */
+@media (max-width: 1279px) {
+  .actionsDesktop {
+    display: none;
+  }
+
+  .actionsCompact {
+    display: flex;
+  }
+}
+
+/* Large monitor but narrow actions column (e.g. resized window) */
+@container hyperion-actions (max-width: 360px) {
+  .actionsDesktop {
+    display: none;
+  }
+
+  .actionsCompact {
+    display: flex;
+  }
+}
+
+@media (max-width: 639px) {
+  .poolAssetTop {
+    align-items: flex-start;
+  }
+
+  .poolSymbol {
+    flex: 1 1 100%;
+    line-height: 1.25;
+  }
+
+  .aprInline {
+    flex: 0 0 auto;
+  }
+
+  .actionsCompact {
+    justify-content: flex-end;
+    width: 100%;
+  }
+
+  .actionsCompact button {
+    flex: 0 0 2rem !important;
+    width: 2rem;
+    min-width: 2rem;
+    max-width: 2rem;
+  }
+}

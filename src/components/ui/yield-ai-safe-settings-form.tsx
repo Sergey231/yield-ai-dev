@@ -80,13 +80,6 @@ export function YieldAiSafeSettingsForm({
   const willAttachStrategy = selectedStrategyOnCreate !== 'stablecoin_compound';
   const attachLabel = AI_AGENT_STRATEGIES[selectedStrategyOnCreate]?.label ?? selectedStrategyOnCreate;
 
-  // Hidden entry point: the Hyperion LP strategy option only appears when the
-  // page is opened with `?strategy=hyperion` (kept out of the default UI for now).
-  const [showHyperionOption] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    return new URLSearchParams(window.location.search).get('strategy') === 'hyperion';
-  });
-
   const parsedLimits = useMemo(() => {
     const maxPerTx = parseFloat(safeMaxPerTxUSDC);
     const maxDaily = parseFloat(safeMaxDailyUSDC);
@@ -310,9 +303,6 @@ export function YieldAiSafeSettingsForm({
             <SelectContent>
               <SelectItem value="stablecoin_compound">Stablecoin compound (USD1 + Echelon)</SelectItem>
               <SelectItem value="decibel_delta_neutral">Decibel delta-neutral</SelectItem>
-              {showHyperionOption ? (
-                <SelectItem value="hyperion_lp">Hyperion CLMM LP</SelectItem>
-              ) : null}
             </SelectContent>
           </Select>
         </div>

@@ -495,6 +495,23 @@
     "contractAddresses": []
   },
   {
+    "name": "Exponent",
+    "key": "exponent",
+    "category": "Yield",
+    "url": "https://www.exponent.finance",
+    "logoUrl": "/protocol_ico/exponent.ico",
+    "description": "Exponent yield markets on Solana: principal tokens (PT), yield tokens (YT), and strategy vaults.",
+    "depositType": "external",
+    "depositUrl": "https://www.exponent.finance",
+    "isDepositEnabled": true,
+    "managedType": "native",
+    "socialMedia": {
+      "twitter": "https://x.com/exponent_xyz"
+    },
+    "airdrop": "",
+    "contractAddresses": []
+  },
+  {
     "name": "AI agent",
     "key": "yield-ai",
     "category": "Vault",

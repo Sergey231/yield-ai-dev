@@ -14,6 +14,14 @@ export type HyperionLpPositionView = HyperionPositionView & {
   rewardsBreakdown?: Array<{ symbol: string; amount: number }>;
   /** Realized annualized APR estimate (uncollected fees+rewards since open). */
   aprPct?: number | null;
+  /** Total collected fees + farm rewards (vault events), in USD. */
+  claimedUsd?: number;
+  /** LP-only cost basis from vault `used_a/b` events (USD, spot prices). */
+  basisUsd?: number | null;
+  /** Open: value + uncollected + claimed − basis. Closed: removed + claimed − basis. */
+  pnlUsd?: number | null;
+  /** Present when deployment events are missing from the indexer stream. */
+  pnlUnavailableReason?: string | null;
 };
 
 interface PositionsResponse {

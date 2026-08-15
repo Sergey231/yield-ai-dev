@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useCallback, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { ExternalLink, Info, Loader2 } from "lucide-react";
 import { Transaction, VersionedTransaction } from "@solana/web3.js";
 import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
@@ -23,6 +24,7 @@ import {
   computeOrcaPrincipalUsd,
 } from "@/components/protocols/orca/mapOrcaToProtocolPositions";
 import { BinChart } from "@/components/protocols/meteora/BinChart";
+import { isLikelySolanaAddress } from "@/lib/kamino/kvaultVaultAddress";
 
 const ORCA_APP_URL = "https://www.orca.so/pools";
 
@@ -64,8 +66,46 @@ function TokenIconPair({ tokenA, tokenB }: { tokenA?: OrcaTokenInfo; tokenB?: Or
   );
 }
 
+function PoolAprBadge({ position }: { position: OrcaPosition }) {
+  const aprPct = finite(position.aprPct);
+  const apr24hPct = finite(position.apr24hPct);
+  const feeRatePct = finite(position.feeRate) * 100;
+  if (!(aprPct > 0)) return null;
+
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge
+            variant="outline"
+            className={`text-xs font-normal px-2 py-0.5 h-5 cursor-help ${
+              position.inRange
+                ? "bg-green-500/10 text-green-600 border-green-500/20"
+                : "bg-muted text-muted-foreground border-border"
+            }`}
+          >
+            APR: {formatNumber(aprPct, 2)}%
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent>
+          <div className="space-y-1 text-xs">
+            <p className="font-medium">Pool APR</p>
+            {apr24hPct > 0 ? <p>24h fee yield: {formatNumber(apr24hPct, 3)}%</p> : null}
+            <p>Annualized (7d fees/TVL): {formatNumber(aprPct, 2)}%</p>
+            {feeRatePct > 0 ? <p>Fee tier: {formatNumber(feeRatePct, 2)}%</p> : null}
+            {!position.inRange ? (
+              <p className="text-orange-500 pt-1">Position is out of range — not currently earning fees</p>
+            ) : null}
+          </div>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 function PositionMeta({ position }: { position: OrcaPosition }) {
   const feeRatePct = finite(position.feeRate) * 100;
+  const aprPct = finite(position.aprPct);
 
   return (
     <TooltipProvider>
@@ -85,6 +125,7 @@ function PositionMeta({ position }: { position: OrcaPosition }) {
             <p>Pool: {shortKey(position.poolId)}</p>
             <p>Position: {shortKey(position.positionPda)}</p>
             {position.tickSpacing != null ? <p>Tick spacing: {position.tickSpacing}</p> : null}
+            {aprPct > 0 ? <p>Pool APR: {formatNumber(aprPct, 2)}%</p> : null}
             {feeRatePct > 0 ? <p>Fee tier: {formatNumber(feeRatePct, 2)}%</p> : null}
             <p>Claim fees and close are built through Orca Whirlpool SDK helpers.</p>
           </div>
@@ -153,6 +194,7 @@ const OrcaPositionRow = memo(function OrcaPositionRow({
 
         <div className="flex flex-col items-end gap-2">
           <div className="flex items-center gap-2 flex-wrap justify-end">
+            <PoolAprBadge position={position} />
             {feeRatePct > 0 ? (
               <Badge
                 variant="outline"
@@ -275,12 +317,15 @@ const OrcaPositionRow = memo(function OrcaPositionRow({
         </div>
 
         <div className="flex items-center justify-between gap-2 flex-wrap">
-          <Badge
-            variant="outline"
-            className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-xs font-normal px-2 py-0.5 h-5"
-          >
-            Whirlpool{feeRatePct > 0 ? ` - ${formatNumber(feeRatePct, 2)}%` : ""}
-          </Badge>
+          <div className="flex items-center gap-2 flex-wrap">
+            <PoolAprBadge position={position} />
+            <Badge
+              variant="outline"
+              className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-xs font-normal px-2 py-0.5 h-5"
+            >
+              Whirlpool{feeRatePct > 0 ? ` · Fee ${formatNumber(feeRatePct, 2)}%` : ""}
+            </Badge>
+          </div>
           {feesUsd > 0 ? <div className="text-sm text-gray-600">{formatCurrency(feesUsd, 2)} yield</div> : null}
         </div>
 
@@ -373,8 +418,25 @@ const OrcaPositionRow = memo(function OrcaPositionRow({
 
 export function OrcaPositions() {
   const { protocolsAddress: solanaProtocolsAddress } = useSolanaPortfolio();
-  const address = (solanaProtocolsAddress || "").trim();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
+
+  const mockEnabled =
+    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "1" ||
+    process.env.NEXT_PUBLIC_KAMINO_REWARDS_MOCK === "true";
+
+  const address = useMemo(() => {
+    if (mockEnabled) {
+      const raw = (
+        searchParams?.get("orcaAddress") ||
+        searchParams?.get("address") ||
+        searchParams?.get("solanaAddress") ||
+        ""
+      ).trim();
+      if (raw && isLikelySolanaAddress(raw)) return raw;
+    }
+    return (solanaProtocolsAddress || "").trim();
+  }, [mockEnabled, searchParams, solanaProtocolsAddress]);
   const { toast } = useToast();
   const { publicKey, signTransaction, wallet: solanaWallet } = useSolanaWallet();
   const [claimingKey, setClaimingKey] = useState<string | null>(null);

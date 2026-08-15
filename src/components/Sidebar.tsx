@@ -34,6 +34,7 @@ import { PositionsList as MeteoraPositionsList } from "./protocols/meteora/Posit
 import { PositionsList as RaydiumPositionsList } from "./protocols/raydium/PositionsList";
 import { PositionsList as OrcaPositionsList } from "./protocols/orca/PositionsList";
 import { PositionsList as TramplinPositionsList } from "./protocols/tramplin/PositionsList";
+import { PositionsList as ExponentPositionsList } from "./protocols/exponent/PositionsList";
 import { PositionsList as YieldAIPositionsList } from "./protocols/yield-ai/PositionsList";
 import { useSolanaPortfolio } from "@/hooks/useSolanaPortfolio";
 import { ProtocolIcon } from "@/shared/ProtocolIcon/ProtocolIcon";
@@ -92,7 +93,12 @@ export default function Sidebar() {
     }
     try {
       const sp = new URLSearchParams(window.location.search);
-      const raw = (sp.get("solanaAddress") || sp.get("solana") || "").trim();
+      const raw = (
+        sp.get("solanaAddress") ||
+        sp.get("solana") ||
+        sp.get("kaminoAddress") ||
+        ""
+      ).trim();
       setSolanaAddressOverride(raw && isLikelySolanaAddress(raw) ? raw : null);
     } catch {
       setSolanaAddressOverride(null);
@@ -134,6 +140,7 @@ export default function Sidebar() {
   const [raydiumValue, setRaydiumValue] = useState(0);
   const [orcaValue, setOrcaValue] = useState(0);
   const [tramplinValue, setTramplinValue] = useState(0);
+  const [exponentValue, setExponentValue] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [checkingAptosProtocols, setCheckingAptosProtocols] = useState<string[]>([]);
   const [checkingSolanaProtocols, setCheckingSolanaProtocols] = useState<string[]>([]);
@@ -162,7 +169,7 @@ export default function Sidebar() {
     "APTree",
     "AI agent",
   ];
-  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino", "Meteora", "Raydium", "Orca", "Tramplin"];
+  const SOLANA_PROTOCOL_NAMES = ["Jupiter", "Kamino", "Meteora", "Raydium", "Orca", "Tramplin", "Exponent"];
 
   // When set (e.g. "decibel" or "decibel,thala"), only these protocols are shown in the positions list
   const debugProtocolKeys =
@@ -232,9 +239,7 @@ export default function Sidebar() {
     }
   }, [effectiveAptosAddress]);
 
-  const handleRefresh = useCallback(async () => {
-    await loadPortfolio();
-    // Сбрасываем значения протоколов, чтобы они перезагрузились
+  const resetProtocolValues = useCallback(() => {
     setHyperionValue(0);
     setEchelonValue(0);
     setAriesValue(0);
@@ -246,7 +251,7 @@ export default function Sidebar() {
     setEarniumValue(0);
     setAaveValue(0);
     setThalaValue(0);
-	setEchoValue(0);
+    setEchoValue(0);
     setDecibelValue(0);
     setDecibelMainnetValue(0);
     setAptreeValue(0);
@@ -257,10 +262,20 @@ export default function Sidebar() {
     setRaydiumValue(0);
     setOrcaValue(0);
     setTramplinValue(0);
+    setExponentValue(0);
+  }, []);
+
+  const handleRefresh = useCallback(async () => {
+    await loadPortfolio();
+    resetProtocolValues();
     if (effectiveAptosAddress) resetAptosChecking();
     if (solanaAddress) resetSolanaChecking();
     setRefreshKey((k) => k + 1);
-  }, [effectiveAptosAddress, loadPortfolio, resetAptosChecking, resetSolanaChecking, solanaAddress]);
+  }, [effectiveAptosAddress, loadPortfolio, resetAptosChecking, resetProtocolValues, resetSolanaChecking, solanaAddress]);
+
+  useEffect(() => {
+    resetProtocolValues();
+  }, [effectiveAptosAddress, resetProtocolValues]);
 
   useEffect(() => {
     loadPortfolio();
@@ -372,6 +387,10 @@ export default function Sidebar() {
     setTramplinValue(Number.isFinite(value) ? value : 0);
   }, []);
 
+  const handleExponentValueChange = useCallback((value: number) => {
+    setExponentValue(Number.isFinite(value) ? value : 0);
+  }, []);
+
   // Считаем сумму по кошельку
   const walletTotal = tokens.reduce((sum, token) => {
     const value = token.value ? parseFloat(token.value) : 0;
@@ -409,7 +428,8 @@ export default function Sidebar() {
     (Number.isFinite(meteoraValue) ? meteoraValue : 0) +
     (Number.isFinite(raydiumValue) ? raydiumValue : 0) +
     (Number.isFinite(orcaValue) ? orcaValue : 0) +
-    (Number.isFinite(tramplinValue) ? tramplinValue : 0);
+    (Number.isFinite(tramplinValue) ? tramplinValue : 0) +
+    (Number.isFinite(exponentValue) ? exponentValue : 0);
   const solanaWalletTotal = Number.isFinite(solanaTotalValue) ? (solanaTotalValue ?? 0) : 0;
   const solanaTotalAssets = solanaWalletTotal + solanaProtocolsTotal;
   const solanaWalletTotalDisplay =
@@ -447,6 +467,7 @@ export default function Sidebar() {
         isRefreshing={isRefreshing}
         hasSolanaWallet={!!solanaAddress}
         isDerived={isAptosDerived}
+        address={effectiveAptosAddress}
         hideSmallAssets={hideSmallAssets}
         onHideSmallAssetsChange={setHideSmallAssets}
         showHeaderControls={false}
@@ -500,9 +521,22 @@ export default function Sidebar() {
             : positionsListItems;
         return listToRender
           .sort((a, b) => b.value - a.value)
-          .map(({ component: Component, name }) => (
-            <Component
+          .map(({ component: Component, name, value }) => (
+            <div
               key={name}
+              // Hide small (<$1) cards when the toggle is on; collapse empty
+              // (no-position) wrappers with `contents` so they add no layout
+              // gap. The component stays mounted either way to keep reporting
+              // its value into the wallet total.
+              className={cn(
+                hideSmallAssets && value < 1
+                  ? "hidden"
+                  : value === 0
+                    ? "contents"
+                    : undefined
+              )}
+            >
+            <Component
               address={effectiveAptosAddress}
               walletTokens={tokens}
               refreshKey={refreshKey}
@@ -555,6 +589,7 @@ export default function Sidebar() {
                 });
               }}
             />
+            </div>
           ));
       })() : null}
     </div>
@@ -682,11 +717,41 @@ export default function Sidebar() {
               />
             ),
           },
+          {
+            name: "Exponent" as const,
+            value: exponentValue,
+            component: (
+              <ExponentPositionsList
+                key="Exponent"
+                address={solanaProtocolsAddress ?? undefined}
+                onPositionsValueChange={handleExponentValueChange}
+                onPositionsCheckComplete={() => {
+                  const runId = solanaCheckRunId;
+                  setCheckingSolanaProtocols((prev) => (solanaCheckRunId === runId ? prev.filter((p) => p !== "Exponent") : prev));
+                }}
+              />
+            ),
+          },
         ] as const
       )
         .slice()
         .sort((a, b) => b.value - a.value)
-        .map((x) => x.component)}
+        .map((x) => (
+          <div
+            key={x.name}
+            // See Aptos block above: hide <$1 cards when the toggle is on,
+            // collapse empty (no-position) wrappers so they add no gap.
+            className={cn(
+              hideSmallAssets && x.value < 1
+                ? "hidden"
+                : x.value === 0
+                  ? "contents"
+                  : undefined
+            )}
+          >
+            {x.component}
+          </div>
+        ))}
       <SolanaSignMessageButton />
     </div>
   ) : null;
@@ -695,8 +760,16 @@ export default function Sidebar() {
     const blocks: Array<{ key: "aptos" | "solana"; total: number; node: ReactNode }> = [];
     if (effectiveAptosAddress) blocks.push({ key: "aptos", total: totalAssets, node: aptosBlock });
     if (solanaAddress) blocks.push({ key: "solana", total: solanaTotalAssets, node: solanaBlock });
-    return blocks.sort((a, b) => b.total - a.total);
-  }, [effectiveAptosAddress, solanaAddress, totalAssets, solanaTotalAssets, aptosBlock, solanaBlock]);
+    // Sort by value desc; on a tie (e.g. both empty or still loading) the wallet
+    // the user connected themselves goes first — a derived Aptos wallet loses.
+    const primaryKey: "aptos" | "solana" = isAptosDerived ? "solana" : "aptos";
+    return blocks.sort((a, b) => {
+      const aTotal = Number.isFinite(a.total) ? a.total : 0;
+      const bTotal = Number.isFinite(b.total) ? b.total : 0;
+      if (bTotal !== aTotal) return bTotal - aTotal;
+      return a.key === primaryKey ? -1 : b.key === primaryKey ? 1 : 0;
+    });
+  }, [effectiveAptosAddress, solanaAddress, totalAssets, solanaTotalAssets, aptosBlock, solanaBlock, isAptosDerived]);
 
   return (
     <CollapsibleProvider>

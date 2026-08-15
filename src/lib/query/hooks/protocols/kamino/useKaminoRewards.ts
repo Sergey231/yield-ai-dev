@@ -3,24 +3,27 @@
 import { useQuery } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/query/queryKeys';
 import { STALE_TIME } from '@/lib/query/config';
+import type { KaminoClaimTarget, KaminoRewardRow } from '@/lib/kamino/kaminoClaimTypes';
 
-export type KaminoRewardRow = {
-  tokenMint: string;
-  tokenSymbol?: string;
-  tokenLogoUrl?: string;
-  amount: string;
-  usdValue?: number;
-};
+export type { KaminoClaimTarget, KaminoRewardRow };
 
 type KaminoRewardsResponse = {
   success: boolean;
   data?: KaminoRewardRow[];
+  claimTargets?: KaminoClaimTarget[];
+  totalUsdValue?: number;
   error?: string;
   message?: string;
   count?: number;
 };
 
-async function fetchKaminoRewards(address: string): Promise<KaminoRewardRow[]> {
+export type KaminoRewardsQueryData = {
+  rewards: KaminoRewardRow[];
+  claimTargets: KaminoClaimTarget[];
+  totalUsdValue: number;
+};
+
+async function fetchKaminoRewards(address: string): Promise<KaminoRewardsQueryData> {
   const response = await fetch(
     `/api/protocols/kamino/rewards?address=${encodeURIComponent(address)}`,
     { cache: 'no-store' }
@@ -32,7 +35,11 @@ async function fetchKaminoRewards(address: string): Promise<KaminoRewardRow[]> {
   if (!json.success) {
     throw new Error(json.error || json.message || 'Failed to fetch Kamino rewards');
   }
-  return json.data ?? [];
+  return {
+    rewards: json.data ?? [],
+    claimTargets: json.claimTargets ?? [],
+    totalUsdValue: typeof json.totalUsdValue === 'number' ? json.totalUsdValue : 0,
+  };
 }
 
 export interface UseKaminoRewardsOptions {
@@ -52,8 +59,6 @@ export function useKaminoRewards(
     staleTime: STALE_TIME.POSITIONS,
     enabled,
     refetchOnMount: options?.refetchOnMount,
-    // Avoid brief empty states on quick refreshes / background refetches.
-    placeholderData: (prev) => prev ?? [],
+    placeholderData: (prev) => prev ?? { rewards: [], claimTargets: [], totalUsdValue: 0 },
   });
 }
-

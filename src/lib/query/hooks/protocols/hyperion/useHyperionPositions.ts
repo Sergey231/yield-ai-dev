@@ -3,7 +3,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { queryKeys } from '@/lib/query/queryKeys';
 import { STALE_TIME } from '@/lib/query/config';
-import type { HyperionStableChartData } from '@/lib/protocols/hyperion/stableChart';
 
 export interface HyperionPosition {
   isActive: boolean;
@@ -27,7 +26,6 @@ export interface HyperionPosition {
       token2Info?: { symbol?: string; logoUrl?: string };
     };
   };
-  chart?: HyperionStableChartData;
 }
 
 interface HyperionPositionsResponse {

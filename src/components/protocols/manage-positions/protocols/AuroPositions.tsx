@@ -29,6 +29,8 @@ import { showTransactionSuccessToast } from '@/components/ui/transaction-toast';
 import tokenList from "@/lib/data/tokenList.json";
 import { WithdrawModal } from '@/components/ui/withdraw-modal';
 import { GasStationService } from '@/lib/services/gasStation';
+import { submitAptosTransaction } from "@/lib/mobile/submitAptosTransaction";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 interface AuroPositionsProps {
   address?: string;
@@ -37,6 +39,7 @@ interface AuroPositionsProps {
 
 export function AuroPositions({ address, onPositionsValueChange }: AuroPositionsProps) {
   const { account, signAndSubmitTransaction, wallet } = useWallet();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
   
   // Gas Station is configured globally in WalletProvider
   // All transactions via signAndSubmitTransaction will automatically use Gas Station (free transactions)
@@ -71,7 +74,8 @@ export function AuroPositions({ address, onPositionsValueChange }: AuroPositions
   const { tokens, refreshPortfolio } = useWalletData();
   const pricesService = PanoraPricesService.getInstance();
 
-  const walletAddress = address || account?.address?.toString();
+  const walletAddress = address || account?.address?.toString() || injectedAptosAddress || undefined;
+  const effectiveAptosAddress = account?.address?.toString() ?? injectedAptosAddress ?? null;
   const protocol = getProtocolByName("Auro Finance");
 
   // Получаем информацию о токене из списка токенов
@@ -636,20 +640,24 @@ export function AuroPositions({ address, onPositionsValueChange }: AuroPositions
       
       console.log('Generated payload:', payload);
       
-      if (!account || !signAndSubmitTransaction) {
+      if (!effectiveAptosAddress || (!signAndSubmitTransaction && !injectedAptosAddress)) {
         throw new Error('Wallet not connected');
       }
       
-      const result = await signAndSubmitTransaction({
-        data: {
-          function: payload.function as `${string}::${string}::${string}`,
-          typeArguments: payload.type_arguments,
-          functionArguments: payload.arguments
+      const result = await submitAptosTransaction({
+        transaction: {
+          data: {
+            function: payload.function as `${string}::${string}::${string}`,
+            typeArguments: payload.type_arguments,
+            functionArguments: payload.arguments
+          },
+          options: {
+            maxGasAmount: 20000,
+          },
         },
-        options: {
-          maxGasAmount: 20000,
-        },
-        // Gas Station is configured globally in WalletProvider, no need to pass explicitly
+        signAndSubmitTransaction: signAndSubmitTransaction as any,
+        connected: !!account,
+        address: effectiveAptosAddress,
       });
       
       console.log('Auro deposit transaction result:', result);
@@ -784,21 +792,25 @@ export function AuroPositions({ address, onPositionsValueChange }: AuroPositions
       payload = await auroProtocol.buildWithdrawEntry(position.address, amount, position.collateralTokenAddress);
     }
     
-    if (!account || !signAndSubmitTransaction) {
+    if (!effectiveAptosAddress || (!signAndSubmitTransaction && !injectedAptosAddress)) {
       throw new Error('Wallet not connected');
     }
     
-    const result = await signAndSubmitTransaction({
-      data: {
-        function: payload.function as `${string}::${string}::${string}`,
-        typeArguments: payload.type_arguments,
-        functionArguments: payload.arguments
-      },
-      options: {
-        maxGasAmount: 20000,
-      },
-      // Explicitly pass transactionSubmitter for Gas Station (free transactions)
-      transactionSubmitter: transactionSubmitter || undefined,
+    const result = await submitAptosTransaction({
+      transaction: {
+        data: {
+          function: payload.function as `${string}::${string}::${string}`,
+          typeArguments: payload.type_arguments,
+          functionArguments: payload.arguments
+        },
+        options: {
+          maxGasAmount: 20000,
+        },
+        transactionSubmitter: transactionSubmitter || undefined,
+      } as any,
+      signAndSubmitTransaction: signAndSubmitTransaction as any,
+      connected: !!account,
+      address: effectiveAptosAddress,
     });
     
     console.log('Auro withdraw transaction result:', result);
@@ -827,21 +839,25 @@ export function AuroPositions({ address, onPositionsValueChange }: AuroPositions
       payload = await auroProtocol.buildExitPosition(position.address, position.collateralTokenAddress);
     }
     
-    if (!account || !signAndSubmitTransaction) {
+    if (!effectiveAptosAddress || (!signAndSubmitTransaction && !injectedAptosAddress)) {
       throw new Error('Wallet not connected');
     }
     
-    const result = await signAndSubmitTransaction({
-      data: {
-        function: payload.function as `${string}::${string}::${string}`,
-        typeArguments: payload.type_arguments,
-        functionArguments: payload.arguments
-      },
-      options: {
-        maxGasAmount: 20000,
-      },
-      // Explicitly pass transactionSubmitter for Gas Station (free transactions)
-      transactionSubmitter: transactionSubmitter || undefined,
+    const result = await submitAptosTransaction({
+      transaction: {
+        data: {
+          function: payload.function as `${string}::${string}::${string}`,
+          typeArguments: payload.type_arguments,
+          functionArguments: payload.arguments
+        },
+        options: {
+          maxGasAmount: 20000,
+        },
+        transactionSubmitter: transactionSubmitter || undefined,
+      } as any,
+      signAndSubmitTransaction: signAndSubmitTransaction as any,
+      connected: !!account,
+      address: effectiveAptosAddress,
     });
     
     console.log('Auro exit position transaction result:', result);

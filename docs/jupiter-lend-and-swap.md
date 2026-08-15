@@ -50,6 +50,8 @@ Jupiter in Yield AI is **Solana-only**. There is no Aptos entry-function path fo
 
 ## Jupiter Swap (Swap modal — Solana chain)
 
+> **See also:** [swap-integration.md](./swap-integration.md) — end-to-end Swap modal flow for **both** Aptos (Panora) and Solana (Jupiter), with official doc links.
+
 Controlled by **`NEXT_PUBLIC_GASLESS_SWAP`**: when `"1"` or `"true"`, the app uses the **gasless** path; otherwise the **user pays** SOL for fees.
 
 ### Quote

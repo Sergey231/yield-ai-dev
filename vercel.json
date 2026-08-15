@@ -44,5 +44,27 @@
       "source": "/favicon.ico",
       "destination": "/favicon.ico"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/protocols/yield-ai/hyperion-lp/cron",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/protocols/yield-ai/hyperion-lp/cron?action=recenter-dual&dryRun=false&poolKeys=usdt_usdc,usd1_usdc&halfWidthTicks=10&minPositionAgeSeconds=3600&minFeesUsd=0.05&maxActionsPerRun=10",
+      "schedule": "15 * * * *"
+    },
+    {
+      "path": "/api/protocols/decibel/dn-spread-monitor/cron",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/protocols/decibel/dn-autoclaim/cron?dryRun=false&maxActionsPerRun=5&minClaimUsd=0.1",
+      "schedule": "30 * * * *"
+    },
+    {
+      "path": "/api/protocols/decibel/dn-rehedge/cron?dryRun=false&maxActionsPerRun=3&bandBps=1500&marginBufferPct=0.2",
+      "schedule": "45 * * * *"
+    }
   ]
 } 

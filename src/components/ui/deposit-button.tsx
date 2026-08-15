@@ -207,6 +207,7 @@ export function DepositButton({
   const solanaTokens = solanaTokensOverride ?? hookedSolanaTokens;
   const refreshSolana = refreshSolanaOverride ?? hookedRefreshSolana;
   const { toast } = useToast();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
   const injectedSolanaAddress = useNativeWalletStore((s) => s.solanaAddress);
 
   const jupiterSymbol = canonicalJupiterSymbol(tokenIn?.symbol);
@@ -602,7 +603,7 @@ export function DepositButton({
     }
 
     // Если кошелек не подключен, открываем диалог подключения
-    if (!connected) {
+    if (!connected && !injectedAptosAddress) {
       setIsWalletDialogOpen(true);
       return;
     }

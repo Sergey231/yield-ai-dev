@@ -935,80 +935,6 @@ export async function GET() {
           }
         }
       },
-      "/api/protocols/echelon/pools": {
-        get: {
-          tags: ["protocols"],
-          summary: "Get Echelon pools",
-          description: "Returns all pools from Echelon lending protocol",
-          parameters: [],
-          responses: {
-            "200": {
-              description: "Successful response",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      data: {
-                        type: "array",
-                        items: {
-                          type: "object",
-                          properties: {
-                            poolId: {
-                              type: "string",
-                              example: "0x1::coin::AptosCoin"
-                            },
-                            assetName: {
-                              type: "string",
-                              example: "APT"
-                            },
-                            supplyApy: {
-                              type: "string",
-                              example: "3.5"
-                            },
-                            borrowApy: {
-                              type: "string",
-                              example: "5.2"
-                            },
-                            totalSupply: {
-                              type: "string",
-                              example: "1250000"
-                            },
-                            totalBorrow: {
-                              type: "string",
-                              example: "750000"
-                            }
-                          }
-                        }
-                      },
-                      status: {
-                        type: "number",
-                        example: 200
-                      }
-                    }
-                  }
-                }
-              }
-            },
-            "500": {
-              description: "Server error",
-              content: {
-                "application/json": {
-                  schema: {
-                    type: "object",
-                    properties: {
-                      error: {
-                        type: "string",
-                        example: "Failed to fetch pools"
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      },
       "/api/protocols/echelon/userPositions": {
         get: {
           tags: ["protocols"],
@@ -1496,4 +1422,4 @@ export async function GET() {
   };
 
   return NextResponse.json(swagger);
-} 
+}

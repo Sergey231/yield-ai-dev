@@ -10,6 +10,7 @@ import {
   YIELD_AI_VAULT_ENTRYPOINTS,
   YIELD_AI_HYPERION_ADAPTER_ADDRESS,
 } from "@/lib/constants/yieldAiVault";
+import { u32FromI32 } from "@/lib/protocols/yield-ai/hyperionLp";
 
 const APTOS_API_KEY = process.env.APTOS_API_KEY;
 
@@ -44,6 +45,11 @@ function getExecutorAccount(): Account {
 
   cachedExecutorAccount = account;
   return account;
+}
+
+/** Canonical executor address derived from `YIELD_AI_EXECUTOR_PRIVATE_KEY`. */
+export function getYieldAiExecutorAddress(): string {
+  return toCanonicalAddress(getExecutorAccount().accountAddress.toString());
 }
 
 type ExecutorArg = string | number | bigint | number[] | Uint8Array;
@@ -254,6 +260,36 @@ export async function executeDepositEchelonFa(options: {
   });
 }
 
+/**
+ * Executor: partial withdraw from an Echelon FA market back into the safe.
+ * `amountShares` is in Echelon market SHARES, not underlying tokens — the
+ * entry forwards it to lending::withdraw(shares). Convert user-facing token
+ * amounts via `lending::coins_to_shares` first.
+ * For a full exit the owner-signed `execute_withdraw_all_echelon_fa_as_owner` is preferred.
+ */
+export async function executeWithdrawEchelonFa(options: {
+  safeAddress: string;
+  adapterAddress: string;
+  marketObj: string;
+  amountShares: bigint;
+  maxGasAmount?: number;
+  dryRun?: boolean;
+}) {
+  const { safeAddress, adapterAddress, marketObj, amountShares, maxGasAmount, dryRun } = options;
+  return buildAndSubmit({
+    function: YIELD_AI_VAULT_ENTRYPOINTS.executeWithdrawEchelonFa,
+    functionArguments: [
+      toCanonicalAddress(safeAddress),
+      toCanonicalAddress(adapterAddress),
+      toCanonicalAddress(marketObj),
+      amountShares,
+    ],
+    maxGasAmount,
+    dryRun,
+    logPrefix: "[Yield AI] execute_withdraw_echelon_fa",
+  });
+}
+
 export async function executeClaimEchelonReward(options: {
   safeAddress: string;
   adapterAddress: string;
@@ -317,8 +353,8 @@ export async function executeHyperionOpenZapUsdc(options: {
       toCanonicalAddress(options.tokenA),
       toCanonicalAddress(options.tokenB),
       options.feeTier,
-      options.tickLower,
-      options.tickUpper,
+      u32FromI32(options.tickLower),
+      u32FromI32(options.tickUpper),
       options.usdcAmountInBaseUnits,
       options.swapAmountInBaseUnits,
       options.swapAmountOutMinBaseUnits,
@@ -386,8 +422,8 @@ export async function executeHyperionOpenDual(options: {
       toCanonicalAddress(options.tokenA),
       toCanonicalAddress(options.tokenB),
       options.feeTier,
-      options.tickLower,
-      options.tickUpper,
+      u32FromI32(options.tickLower),
+      u32FromI32(options.tickUpper),
       options.amountABaseUnits,
       options.amountBBaseUnits,
       options.amountAMinBaseUnits ?? 0n,

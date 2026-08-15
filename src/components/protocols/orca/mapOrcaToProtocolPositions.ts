@@ -30,6 +30,7 @@ export function mapOrcaToProtocolPositions(positions: OrcaPosition[]): ProtocolP
         ? finite(position.unclaimedUsd)
         : finite(position.feesUsd);
       const feeRatePct = finite(position.feeRate) * 100;
+      const aprPct = finite(position.aprPct);
 
       return {
         id: position.id,
@@ -39,7 +40,12 @@ export function mapOrcaToProtocolPositions(positions: OrcaPosition[]): ProtocolP
         logoUrl2: position.tokenB?.logoUrl,
         badge: position.inRange ? PositionBadge.Active : PositionBadge.Inactive,
         subLabel: fees > 0 ? `Yield $${fees.toFixed(2)}` : undefined,
-        apr: feeRatePct > 0 ? `${feeRatePct.toFixed(2)}% fee` : undefined,
+        apr:
+          position.inRange && aprPct > 0
+            ? aprPct.toFixed(2)
+            : feeRatePct > 0
+              ? `${feeRatePct.toFixed(2)}% fee`
+              : undefined,
       };
     })
     .sort((a, b) => b.value - a.value);

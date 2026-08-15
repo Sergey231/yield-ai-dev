@@ -3,7 +3,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { TokenList } from "@/components/portfolio/TokenList";
 import { Token } from "@/lib/types/token";
 import { useState } from "react";
-import { ChevronDown, RefreshCw } from "lucide-react";
+import Link from "next/link";
+import { ArrowRightLeft, ChevronDown, Copy, RefreshCw } from "lucide-react";
+import { useToast } from "@/components/ui/use-toast";
 import { cn } from "@/lib/utils";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -24,6 +26,8 @@ interface PortfolioCardProps {
   hasSolanaWallet?: boolean;
   /** When true, show "Derived from Solana wallet" label under title. */
   isDerived?: boolean;
+  /** Wallet address — enables "Copy address" in the empty state. */
+  address?: string | null;
   /** Optional external control for hiding small assets; if not provided, component manages its own state */
   hideSmallAssets?: boolean;
   onHideSmallAssetsChange?: (value: boolean) => void;
@@ -39,6 +43,7 @@ export function PortfolioCard({
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   hasSolanaWallet = false,
   isDerived = false,
+  address,
   hideSmallAssets,
   onHideSmallAssetsChange,
   showHeaderControls = true,
@@ -46,6 +51,17 @@ export function PortfolioCard({
   const { isExpanded, toggleSection } = useCollapsible();
   const [internalHideSmallAssets, setInternalHideSmallAssets] = useState(true);
   const { state, validateDrop, handleDrop } = useDragDrop();
+  const { toast } = useToast();
+
+  const copyWalletAddress = async () => {
+    if (!address) return;
+    try {
+      await navigator.clipboard.writeText(address);
+      toast({ title: "Success", description: "Copied wallet address to clipboard" });
+    } catch {
+      toast({ variant: "destructive", title: "Error", description: "Failed to copy wallet address" });
+    }
+  };
 
   const effectiveHideSmallAssets = hideSmallAssets ?? internalHideSmallAssets;
   const setHideSmallAssets = onHideSmallAssetsChange ?? setInternalHideSmallAssets;
@@ -183,6 +199,32 @@ export function PortfolioCard({
 
         {isExpanded('wallet') && (
           <CardContent className="flex-1 overflow-y-auto px-3 pt-0">
+            {tokens.length === 0 ? (
+              <div className="py-3 space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  No assets in this wallet yet
+                </p>
+                <div className="flex flex-col gap-2">
+                  <Button asChild variant="outline" size="sm" className="justify-start gap-2">
+                    <Link href="/bridge">
+                      <ArrowRightLeft className="h-4 w-4" />
+                      Top up using Bridge
+                    </Link>
+                  </Button>
+                  {address && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="justify-start gap-2"
+                      onClick={copyWalletAddress}
+                    >
+                      <Copy className="h-4 w-4" />
+                      Copy address
+                    </Button>
+                  )}
+                </div>
+              </div>
+            ) : (
             <ScrollArea className="h-full">
               <TokenList tokens={filteredTokens} />
               {hiddenCount > 0 ? (
@@ -203,6 +245,7 @@ export function PortfolioCard({
                 </div>
               )}
             </ScrollArea>
+            )}
           </CardContent>
         )}
       </Card>

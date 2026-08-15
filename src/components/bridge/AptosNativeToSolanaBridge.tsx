@@ -4,6 +4,7 @@ import bs58 from "bs58";
 import { AccountAddress, U32, U64 } from "@aptos-labs/ts-sdk";
 import type { Aptos } from "@aptos-labs/ts-sdk";
 import { isDerivedAptosWallet } from "@/lib/aptosWalletUtils";
+import type { AptosTransactionInput } from "@/lib/mobile/nativeBridge";
 
 const USDC_SOLANA = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const USDC_APTOS = "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b";
@@ -57,6 +58,7 @@ export interface ExecuteAptosNativeToSolanaBridgeParams {
   aptosClient: Aptos;
   destinationSolanaAddress: string;
   onStatusUpdate: (status: string) => void;
+  signAndSubmitTransaction?: (transaction: AptosTransactionInput) => Promise<string>;
 }
 
 /**
@@ -67,13 +69,13 @@ export interface ExecuteAptosNativeToSolanaBridgeParams {
 export async function executeAptosNativeToSolanaBridge(
   params: ExecuteAptosNativeToSolanaBridgeParams
 ): Promise<string> {
-  const { amount, aptosAccount, aptosWallet, aptosClient, destinationSolanaAddress, onStatusUpdate } = params;
+  const { amount, aptosAccount, aptosWallet, aptosClient, destinationSolanaAddress, onStatusUpdate, signAndSubmitTransaction } = params;
 
-  if (isDerivedAptosWallet(aptosWallet)) {
+  if (!signAndSubmitTransaction && isDerivedAptosWallet(aptosWallet)) {
     throw new Error("Aptos (native) → Solana supports only native Aptos wallets (e.g. Petra). Use derived flow for Solana-linked wallets.");
   }
   const signTx = aptosWallet.features?.["aptos:signTransaction"];
-  if (!signTx) {
+  if (!signTx && !signAndSubmitTransaction) {
     throw new Error("Wallet does not support aptos:signTransaction");
   }
 
@@ -90,10 +92,7 @@ export async function executeAptosNativeToSolanaBridge(
 
   onStatusUpdate("Building transaction...");
   const expireTimestamp = await getAptosExpireTimestampSecs(1800);
-
-  const transaction = await aptosClient.transaction.build.simple({
-    sender: aptosAccount.address,
-    withFeePayer: false,
+  const transactionInput: AptosTransactionInput = {
     data: {
       typeArguments: [],
       function: CCTP_DEPOSIT_FOR_BURN_ENTRY_FUNCTION as `${string}::${string}::${string}`,
@@ -109,6 +108,21 @@ export async function executeAptosNativeToSolanaBridge(
       gasUnitPrice: 100,
       ...(expireTimestamp ? { expireTimestamp } : {}),
     },
+  };
+
+  if (signAndSubmitTransaction) {
+    onStatusUpdate("Please approve the transaction in your Aptos wallet...");
+    return signAndSubmitTransaction(transactionInput);
+  }
+  if (!signTx) {
+    throw new Error("Wallet does not support aptos:signTransaction");
+  }
+
+  const transaction = await aptosClient.transaction.build.simple({
+    sender: aptosAccount.address,
+    withFeePayer: false,
+    data: transactionInput.data,
+    options: transactionInput.options,
   } as any);
 
   onStatusUpdate("Please approve the transaction in your Aptos wallet...");

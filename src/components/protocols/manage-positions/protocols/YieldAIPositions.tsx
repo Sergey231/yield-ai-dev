@@ -17,7 +17,9 @@ import {
   USD1_FA_METADATA_MAINNET,
   ELON_FA_METADATA_MAINNET,
   THAPT_FA_METADATA_MAINNET,
+  YIELD_AI_HYPERION_POOLS,
 } from "@/lib/constants/yieldAiVault";
+import { rangeAdjustedApr } from "@/lib/protocols/yield-ai/hyperionRangeApr";
 import { formatCurrency, formatNumber } from "@/lib/utils/numberFormat";
 import { useToast } from "@/components/ui/use-toast";
 import { normalizeAddress } from "@/lib/utils/addressNormalization";
@@ -27,7 +29,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Check, ChevronDown, ChevronRight, Copy, ExternalLink, History, Loader2, PauseCircle, PlayCircle, Plus, Settings, XCircle } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Copy, ExternalLink, History, Info, Loader2, PauseCircle, PlayCircle, Plus, Settings, XCircle } from "lucide-react";
 import {
   Collapsible,
   CollapsibleContent,
@@ -36,9 +38,13 @@ import {
 import { DepositModal } from "@/components/ui/deposit-modal";
 import { DecibelDepositModal } from "@/components/ui/decibel-deposit-modal";
 import { HyperionLpStrategyView } from "@/components/protocols/manage-positions/protocols/yield-ai/HyperionLpStrategyView";
+import { useHyperionLpPositions } from "@/lib/query/hooks/protocols/yield-ai/useHyperionLpPositions";
+import { buildHyperionAgentDepositModalConfig } from "@/lib/protocols/yield-ai/hyperionAgentDepositModal";
 import { DeltaNeutralPriceFundingChart } from "@/components/decibel/delta-neutral-price-funding-chart";
+import type { DeltaNeutralLpLeg } from "@/app/api/protocols/yield-ai/delta-neutral-cycles/route";
 import { getProtocolByName } from "@/lib/protocols/getProtocolsList";
 import { YieldAIWithdrawModal } from "@/components/ui/yield-ai-withdraw-modal";
+import { YieldAiEchelonWithdrawModal } from "@/components/ui/yield-ai-echelon-withdraw-modal";
 import { YieldAiHistoryModal } from "@/components/ui/yield-ai-history-modal";
 import { useQueryClient } from "@tanstack/react-query";
 import { queryKeys } from "@/lib/query/queryKeys";
@@ -47,6 +53,7 @@ import {
   useYieldAiSafes,
   useYieldAiSafeTokens,
   useDeltaNeutralState,
+  useDeltaNeutralCycles,
   useDeltaNeutralHistory,
   useYieldAiStablecoinCompoundHistory,
   useYieldAiSafePaused,
@@ -55,7 +62,10 @@ import {
 } from "@/lib/query/hooks/protocols/yield-ai";
 import { useSafeAiAgentStrategy } from "@/lib/query/hooks/protocols/yield-ai/useSafeAiAgentStrategy";
 import { useBatchSafeStrategies } from "@/lib/query/hooks/protocols/yield-ai/useBatchSafeStrategies";
-import { AI_AGENT_STRATEGIES } from "@/lib/protocols/yield-ai/strategyRegistry";
+import {
+  AI_AGENT_STRATEGIES,
+  AI_AGENT_STRATEGY_BADGE_CLASS,
+} from "@/lib/protocols/yield-ai/strategyRegistry";
 import {
   Dialog,
   DialogContent,
@@ -102,6 +112,8 @@ import {
   buildSetSafePausedPayload,
   buildSetFaSwapLimitsPayload,
 } from "@/lib/protocols/yield-ai/vaultDeposit";
+import { signOwnerManageAuth } from "@/lib/protocols/yield-ai/manageAuthClient";
+import type { ManageAuthFields } from "@/lib/protocols/yield-ai/manageAuth";
 import {
   HEDGE_FA,
   formatUsdcAmountForSwap,
@@ -124,6 +136,8 @@ import {
   getDecibelSpotAssetForMetadata,
   isDecibelBtcSpotMetadata,
 } from "@/lib/protocols/decibel/deltaNeutralSpotAssets";
+import { submitAptosTransaction } from "@/lib/mobile/submitAptosTransaction";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 const USDC_LOGO_APTOS = "https://assets.panora.exchange/tokens/aptos/USDC.svg";
 const USD1_LOGO_APTOS = "https://assets.panora.exchange/tokens/aptos/USD1.png";
@@ -143,6 +157,20 @@ function spotAssetLabel(spotAssetMetadata: string): string {
 
 function isApt(spotAssetMetadata: string): boolean {
   return normalizeAddress(spotAssetMetadata) === normalizeAddress(APT_FA_METADATA_MAINNET);
+}
+
+/**
+ * Worst-case margin multiple for an LP-hedge position opened at the center of a symmetric
+ * log-price range ±rangePct% (r = 1 + rangePct/100, matching halfWidthTicksForPct's convention).
+ * As price falls toward the range's lower bound, the CLMM position sheds its USDC leg for more
+ * of the base asset, so the 1x short (and its required margin) must grow to match. The worst case
+ * — price sitting exactly at the lower bound — needs margin_atOpen * (sqrt(r) + 1) / r. Narrower
+ * ranges have a HIGHER multiple (composition swings more per unit of price move near a closer
+ * bound), not lower — e.g. ±10% ≈ 1.86x vs ±20% ≈ 1.75x vs ±50% ≈ 1.48x.
+ */
+function lpHedgeWorstCaseMarginMultiple(rangePct: number): number {
+  const r = 1 + Math.max(0.1, rangePct) / 100;
+  return (Math.sqrt(r) + 1) / r;
 }
 
 function envFlag(raw: string | undefined, defaultValue = false): boolean {
@@ -183,10 +211,19 @@ function formatUnixSecondsLabel(s: string): string {
 }
 
 export function YieldAIPositions() {
-  const { account, signAndSubmitTransaction } = useWallet();
+  const { account, signAndSubmitTransaction, signMessage } = useWallet();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
+  const effectiveAptosAddress = injectedAptosAddress ?? account?.address?.toString() ?? null;
   const { tokens: walletTokens } = useWalletData();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  // Wallet-signed owner authorization for user-initiated executor routes.
+  // Fields must be the exact values sent in the request body (same key order).
+  const signManageAction = useCallback(
+    (action: string, fields: ManageAuthFields) =>
+      signOwnerManageAuth({ account, signMessage, action, fields }),
+    [account, signMessage]
+  );
   const configuredBtcSpotAsset = useMemo(() => getClientDecibelBtcSpotAsset(), []);
   const [showDepositModal, setShowDepositModal] = useState(false);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
@@ -201,6 +238,64 @@ export function YieldAIPositions() {
   const [echelonAdapterLoadError, setEchelonAdapterLoadError] = useState<string | null>(null);
   const [executorAsset, setExecutorAsset] = useState<"BTC" | "APT">("BTC");
   const [executorSizeUsd, setExecutorSizeUsd] = useState<string>("10");
+  // DN hedge variant: "spot" (hold spot) or "lp" (Hyperion APT/USDC LP long leg). LP is APT-only.
+  const [dnHedgeMode, setDnHedgeMode] = useState<"spot" | "lp">("spot");
+  // LP-hedge DN is in private beta — the LP toggle is hidden for wallets outside this allowlist.
+  // UX-only: the real gate is server-side (executor-open-delta-neutral, fail-closed). Addresses
+  // aren't secret, so a NEXT_PUBLIC_ var doubles as both the server's and the client's source.
+  const isLpDnBetaUser = useMemo(() => {
+    const list = (process.env.NEXT_PUBLIC_LP_DN_ALLOWLIST || "")
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean)
+      .map((v) => normalizeAddress(toCanonicalAddress(v)));
+    if (list.length === 0 || !account?.address) return false;
+    return list.includes(normalizeAddress(toCanonicalAddress(account.address.toString())));
+  }, [account?.address]);
+  // Guard against stale "lp" mode surviving a wallet switch to a non-beta wallet.
+  useEffect(() => {
+    if (dnHedgeMode === "lp" && !isLpDnBetaUser) setDnHedgeMode("spot");
+  }, [dnHedgeMode, isLpDnBetaUser]);
+  const [lpRangePct, setLpRangePct] = useState<string>("20");
+  const [lpPoolKey, setLpPoolKey] = useState<"apt_usdc" | "wbtc_usdc">("apt_usdc");
+  // Live apt_usdc pool APR feed for the LP-hedge preview (fetched when LP mode is active).
+  const [lpPoolApr, setLpPoolApr] = useState<{ feeApr: number; farmApr: number; currentTick: number } | null>(null);
+  useEffect(() => {
+    if (dnHedgeMode !== "lp") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const poolId = YIELD_AI_HYPERION_POOLS[lpPoolKey].poolAddress;
+        const res = await fetch(`/api/protocols/hyperion/pools/${poolId}`);
+        const json = await res.json();
+        const data = json?.data;
+        const p = Array.isArray(data) ? data[0] : data;
+        const currentTick = Number(p?.pool?.currentTick ?? p?.currentTick);
+        if (!cancelled && Number.isFinite(currentTick)) {
+          setLpPoolApr({ feeApr: Number(p?.feeAPR) || 0, farmApr: Number(p?.farmAPR) || 0, currentTick });
+        }
+      } catch {
+        /* preview-only; ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [dnHedgeMode, lpPoolKey]);
+  const lpRangeApr = useMemo(
+    () =>
+      lpPoolApr
+        ? rangeAdjustedApr({
+            feeAprPct: lpPoolApr.feeApr,
+            farmAprPct: lpPoolApr.farmApr,
+            currentTick: lpPoolApr.currentTick,
+            rangePct: Number(lpRangePct),
+            referenceRangePct: YIELD_AI_HYPERION_POOLS[lpPoolKey].ui.aprReferencePct,
+            tickSpacing: YIELD_AI_HYPERION_POOLS[lpPoolKey].tickSpacing,
+          })
+        : null,
+    [lpPoolApr, lpRangePct, lpPoolKey]
+  );
   const [debouncedExecutorSizeUsd, setDebouncedExecutorSizeUsd] = useState<number | null>(10);
   // Auto-fill MAX size once per "session" until the user manually edits the field.
   const [executorSizeDirty, setExecutorSizeDirty] = useState(false);
@@ -289,7 +384,7 @@ export function YieldAIPositions() {
     if (!executorHedgeHint) return false;
     return hasEnoughUsdcForHedge(walletTokens, executorHedgeHint.sizeUsd);
   }, [executorHedgeHint, walletTokens]);
-  const walletAddress = account?.address?.toString();
+  const walletAddress = effectiveAptosAddress ?? undefined;
   const {
     data: safeAddresses = [],
     isLoading: safesLoading,
@@ -436,6 +531,190 @@ export function YieldAIPositions() {
     error: deltaNeutralError,
   } = useDeltaNeutralState(safeAddr ?? undefined);
 
+  // strategy_journal cycles (post-migration DN positions). Dual-read alongside the legacy
+  // V2 state above; multiple cycles per safe are allowed, but only on DIFFERENT markets.
+  const { data: deltaNeutralCyclesData, isFetching: deltaNeutralCyclesFetching } =
+    useDeltaNeutralCycles(safeAddr ?? undefined, {
+      refetchOnMount: "always",
+      subaccount: selectedDecibelSubaccount || undefined,
+    });
+  const [closingCycleId, setClosingCycleId] = useState<string | null>(null);
+  const [rehedgingCycleId, setRehedgingCycleId] = useState<string | null>(null);
+  // Cycle id pending a close-confirmation dialog (with loss estimate), like the v1 flow.
+  const [closeCyclePromptId, setCloseCyclePromptId] = useState<string | null>(null);
+  // Top-up modal target ("Add" on a journal position card). The amount is modal-local so the
+  // create form's size state stays untouched.
+  const [addTarget, setAddTarget] = useState<{ cycleId: string; asset: "BTC" | "APT"; isLp: boolean } | null>(null);
+  const [addSizeUsd, setAddSizeUsd] = useState<string>("");
+  // Market to scroll to + briefly highlight (set when arriving from the Decibel "Manage" button).
+  const [highlightedDnMarket, setHighlightedDnMarket] = useState<string | null>(null);
+  const baseSymbolOfMarket = (name: string | null | undefined): string =>
+    (name || "").toUpperCase().split(/[-/_\s]/)[0] || "";
+
+  // Unified DN positions: legacy delta_neutral record + every strategy_journal cycle, normalized
+  // into one shape so they render as identical rows in the list below.
+  type DnPositionRow = {
+    source: "legacy" | "journal";
+    key: string;
+    cycleId: string | null;
+    asset: "BTC" | "APT";
+    marketAddr: string;
+    marketName: string;
+    shortSizeHuman: number | null;
+    /** LIVE Decibel short (abs, human). The journal-recorded shortSizeHuman can lag by a lot
+     * when a rehedge order landed but its record_action tx failed — prefer live for drift/display. */
+    liveShortSizeHuman: number | null;
+    spotHuman: number | null;
+    notionalUsd: number;
+    openedAt: number;
+    // Live real-quote valuation (journal cycles only for now).
+    spotValueUsd: number | null;
+    perpUPnlUsd: number | null;
+    estCloseUsd: number | null;
+    markPx: number | null;
+    perpEntryPx: number | null;
+    perpMarginUsd: number | null;
+    perpFundingUsd: number | null;
+    fundingAprPct: number | null;
+    decibelEquityUsd: number | null;
+    totalValueUsd: number | null;
+    pnlPriceUsd: number | null;
+    deployedUsd: number | null;
+    realizedAprPct: number | null;
+    realizedAgeDays: number | null;
+    // LP-hedge cycles: the live Hyperion LP long leg (range, composition, in-range). Null for spot.
+    lpLeg: DeltaNeutralLpLeg | null;
+  };
+  const journalRows: DnPositionRow[] = (deltaNeutralCyclesData?.cycles ?? []).map((c) => {
+    const asset: "BTC" | "APT" = baseSymbolOfMarket(c.marketName) === "APT" ? "APT" : "BTC";
+    return {
+      source: "journal",
+      key: `journal-${c.cycleId}`,
+      cycleId: c.cycleId,
+      asset,
+      marketAddr: c.perpMarket,
+      marketName: c.marketName ?? `${asset}/USD`,
+      shortSizeHuman: c.shortSizeHuman,
+      liveShortSizeHuman: c.liveShortSizeHuman ?? null,
+      spotHuman: Number(c.baseExposure) / 1e8, // BTC(WBTC)/APT spot both 8 decimals
+      notionalUsd: Number(c.usdcNotionalOpen) / 1e6,
+      openedAt: Number(c.openedAt),
+      spotValueUsd: c.spotValueUsd ?? null,
+      perpUPnlUsd: c.perpUPnlUsd ?? null,
+      estCloseUsd: c.estCloseUsd ?? null,
+      markPx: c.markPx ?? null,
+      perpEntryPx: c.perpEntryPx ?? null,
+      perpMarginUsd: c.perpMarginUsd ?? null,
+      perpFundingUsd: c.perpFundingUsd ?? null,
+      fundingAprPct: c.fundingAprPct ?? null,
+      decibelEquityUsd: c.decibelEquityUsd ?? null,
+      totalValueUsd: c.totalValueUsd ?? null,
+      pnlPriceUsd: c.pnlPriceUsd ?? null,
+      deployedUsd: c.deployedUsd ?? null,
+      realizedAprPct: c.realizedAprPct ?? null,
+      realizedAgeDays: c.realizedAgeDays ?? null,
+      lpLeg: c.lpLeg ?? null,
+    };
+  });
+  const legacyRows: DnPositionRow[] =
+    deltaNeutral?.isOpen && deltaNeutral.recordExists
+      ? [
+          (() => {
+            const isApt =
+              normalizeAddress(toCanonicalAddress(deltaNeutral.spotAssetMetadata || "0x0")) ===
+              normalizeAddress("0xa");
+            const asset: "BTC" | "APT" = isApt ? "APT" : "BTC";
+            const szDec = deltaNeutral.szDecimals ?? 8;
+            const shortHuman = Number(deltaNeutral.filledShortSize) / 10 ** szDec;
+            const spotHuman = deltaNeutral.spotBalanceHumanApprox
+              ? Number(String(deltaNeutral.spotBalanceHumanApprox).replace(/,/g, ""))
+              : null;
+            return {
+              source: "legacy" as const,
+              key: "legacy",
+              cycleId: null,
+              asset,
+              marketAddr: deltaNeutral.perpMarket,
+              marketName: `${asset}/USD`,
+              shortSizeHuman: Number.isFinite(shortHuman) ? shortHuman : null,
+              liveShortSizeHuman: null,
+              spotHuman: spotHuman != null && Number.isFinite(spotHuman) ? spotHuman : null,
+              notionalUsd: Number(deltaNeutral.usdcSwappedIn) / 1e6,
+              openedAt: Number(deltaNeutral.openedAt),
+              spotValueUsd: null,
+              perpUPnlUsd: null,
+              estCloseUsd: null,
+              markPx: null,
+              perpEntryPx: null,
+              perpMarginUsd: null,
+              perpFundingUsd: null,
+              fundingAprPct: null,
+              decibelEquityUsd: null,
+              totalValueUsd: null,
+              pnlPriceUsd: null,
+              deployedUsd: null,
+              realizedAprPct: null,
+              realizedAgeDays: null,
+              lpLeg: null,
+            };
+          })(),
+        ]
+      : [];
+  const dnPositions: DnPositionRow[] = [...legacyRows, ...journalRows];
+  // Markets already running a position — block opening a duplicate on the same asset.
+  const busyAssets = new Set<string>(dnPositions.map((p) => p.asset));
+  // Spot-DN and LP-DN on the SAME asset share the Decibel subaccount + perp market, so a second DN
+  // stacks shorts and corrupts per-cycle hedge/rehedge accounting. Track which mode is open per asset
+  // so the open form can block the colliding combination (spot-on-LP and vice versa).
+  const lpDnAssets = new Set<string>(dnPositions.filter((p) => p.lpLeg).map((p) => p.asset));
+  const spotDnAssets = new Set<string>(dnPositions.filter((p) => !p.lpLeg).map((p) => p.asset));
+  // Form-level availability: the bottom form is CREATE-only — top-ups live on each position
+  // card's "Add" button (modal). When no market is free, the form collapses to an explainer.
+  const canCreateAnyDn = (["BTC", "APT"] as const).some((a) => !busyAssets.has(a));
+
+  // Spot-leg FA metadata of every OPEN DN position (journal cycles + legacy). These assets live
+  // in the safe but belong to a position, so we hide them from the agent wallet list (#2) — they
+  // are shown inside the expanded position instead.
+  const dnSpotLegMetadata = new Set<string>();
+  (deltaNeutralCyclesData?.cycles ?? []).forEach((c) => {
+    // Only hide the spot leg for hold-spot DN cycles. LP-hedge cycles keep their base INSIDE the
+    // Hyperion LP (not loose in the safe), so any loose spot of that asset is genuinely separate
+    // money and must stay visible + convertible (e.g. a spot-DN accidentally stacked on an LP-DN).
+    const isLpCycle = Boolean(c.lpPosition) && !/^0x0+$/.test(normalizeAddress(c.lpPosition));
+    if (c.isOpen && c.spotMetadata && !isLpCycle) {
+      dnSpotLegMetadata.add(normalizeAddress(c.spotMetadata));
+    }
+  });
+  if (deltaNeutral?.isOpen && deltaNeutral.spotAssetMetadata) {
+    dnSpotLegMetadata.add(normalizeAddress(deltaNeutral.spotAssetMetadata));
+  }
+  const isDnSpotLegToken = (tokenAddress: string): boolean => {
+    const norm =
+      tokenAddress === APTOS_COIN_TYPE
+        ? normalizeAddress(APT_FA_METADATA_MAINNET)
+        : normalizeAddress(tokenAddress);
+    return dnSpotLegMetadata.has(norm);
+  };
+
+  // Arriving from the Decibel "Manage in Yield AI agent" button: scroll to + highlight the
+  // matching position once the list is loaded. The target market is passed via sessionStorage.
+  useEffect(() => {
+    if (!isDeltaNeutralStrategy || dnPositions.length === 0 || typeof window === "undefined") return;
+    const focus = sessionStorage.getItem("dnFocusMarket");
+    if (!focus) return;
+    const el = document.getElementById(`dn-position-${focus}`);
+    if (!el) return;
+    sessionStorage.removeItem("dnFocusMarket");
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    setHighlightedDnMarket(focus);
+    const t = setTimeout(() => setHighlightedDnMarket(null), 2500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDeltaNeutralStrategy, dnPositions.length]);
+  // Legacy positions can't be topped up, so their asset stays fully blocked in the create form.
+  // Journal-backed assets stay selectable (the form flips to "Add"/top-up mode).
+  const legacyBusyAssets = new Set<string>(legacyRows.map((p) => p.asset));
+
   const {
     data: deltaNeutralOpenPreview,
     isFetching: deltaNeutralOpenPreviewLoading,
@@ -445,7 +724,7 @@ export function YieldAIPositions() {
     sizeUsd: debouncedExecutorSizeUsd ?? undefined,
     enabled: Boolean(
       isDeltaNeutralStrategy &&
-        !deltaNeutral?.isOpen &&
+        !busyAssets.has(executorAsset) &&
         debouncedExecutorSizeUsd != null &&
         debouncedExecutorSizeUsd > 0
     ),
@@ -559,21 +838,6 @@ export function YieldAIPositions() {
   });
   const { data: decibelPositions = [], isLoading: decibelPositionsLoading } = useDecibelUserPositions(walletAddress);
 
-  const subaccountHasOpenOnSelectedMarket = useMemo(() => {
-    if (!selectedDecibelSubaccount || !executorMarketAddr) return false;
-    const sub = normalizeAddress(selectedDecibelSubaccount);
-    const mkt = normalizeAddress(executorMarketAddr);
-    return decibelPositions.some((p) => {
-      if (!p || p.is_deleted) return false;
-      const sz = Number(p.size);
-      if (!Number.isFinite(sz) || sz === 0) return false;
-      return (
-        normalizeAddress(String(p.user || "")) === sub &&
-        normalizeAddress(String(p.market || "")) === mkt
-      );
-    });
-  }, [decibelPositions, selectedDecibelSubaccount, executorMarketAddr]);
-
   const openPositionAsset = useMemo<"BTC" | "APT" | null>(() => {
     if (!deltaNeutral?.recordExists || !deltaNeutral.isOpen) return null;
     const spot = normalizeAddress(deltaNeutral.spotAssetMetadata);
@@ -659,6 +923,7 @@ export function YieldAIPositions() {
     if (safeAddr) {
       queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddr) });
       queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.deltaNeutralState(safeAddr) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.hyperionLpPositions(safeAddr) });
       queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.userPositions(safeAddr) });
       queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.rewards(safeAddr) });
     }
@@ -698,6 +963,11 @@ export function YieldAIPositions() {
     }
     try {
       setExecutorSubmitting(true);
+      const auth = await signManageAction("decibel_open_short", {
+        subaccount: primaryDecibelSubaccount,
+        asset: executorAsset,
+        sizeUsd,
+      });
       const response = await fetch("/api/protocols/decibel/executor-open-short", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -706,6 +976,7 @@ export function YieldAIPositions() {
           subaccount: primaryDecibelSubaccount,
           asset: executorAsset,
           sizeUsd,
+          auth,
         }),
       });
       const json = await response.json();
@@ -769,6 +1040,81 @@ export function YieldAIPositions() {
       });
       return;
     }
+
+    // LP-hedge variant: open a Hyperion LP (APT/USDC or WBTC/USDC) + short the base leg on Decibel.
+    if (dnHedgeMode === "lp") {
+      if (sizeUsd < 10) {
+        toast({ title: "Invalid size", description: "Minimum LP size is 10 USDC.", variant: "destructive" });
+        return;
+      }
+      const rangePct = Number(lpRangePct);
+      if (!Number.isFinite(rangePct) || rangePct < 1 || rangePct > 95) {
+        toast({ title: "Invalid range", description: "Range must be between 1% and 95%.", variant: "destructive" });
+        return;
+      }
+      if (safeUsdcBalance + 1e-9 < sizeUsd) {
+        toast({
+          title: "Not enough USDC in safe",
+          description: `LP needs ${sizeUsd.toFixed(2)} USDC; the safe has ${safeUsdcBalance.toFixed(2)} USDC.`,
+          variant: "destructive",
+        });
+        return;
+      }
+      try {
+        setExecutorSubmitting(true);
+        setOpenDeltaNeutralResult(null);
+        setOpenDeltaNeutralModalOpen(true);
+        const auth = await signManageAction("decibel_dn_lp_open", {
+          safeAddress: safeAddr,
+          subaccount: selectedDecibelSubaccount,
+          poolKey: lpPoolKey,
+          sizeUsd,
+          rangePct,
+        });
+        const usdcAmountInBaseUnits = BigInt(Math.round(sizeUsd * 1e6)).toString();
+        const response = await fetch("/api/protocols/decibel/executor-open-delta-neutral", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "lp",
+            owner: account.address.toString(),
+            subaccount: selectedDecibelSubaccount,
+            safeAddress: safeAddr,
+            usdcAmountInBaseUnits,
+            rangePct,
+            poolKey: lpPoolKey,
+            auth,
+          }),
+        });
+        const json = await response.json();
+        if (!response.ok || !json?.success) {
+          throw new Error(json?.error || "Failed to open LP delta-neutral via executor");
+        }
+        const d = json?.data ?? {};
+        setOpenDeltaNeutralResult({
+          success: true,
+          openTxHash: d.openTxHash ?? null,
+          swapTxHash: null,
+          recordOpenTxHash: d.openCycleTxHash ?? null,
+        });
+        toast({
+          title: "LP delta-neutral opened",
+          description: `${lpPoolKey === "wbtc_usdc" ? "WBTC/USDC LP + BTC" : "APT/USDC LP + APT"} short submitted (cycle #${d.cycleId ?? "?"}).`,
+        });
+        if (safeAddr) {
+          void queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.deltaNeutralCycles(safeAddr) });
+          void queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddr) });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Unknown error";
+        setOpenDeltaNeutralResult({ success: false, error: msg });
+        toast({ title: "LP delta-neutral open failed", description: msg, variant: "destructive" });
+      } finally {
+        setExecutorSubmitting(false);
+      }
+      return;
+    }
+
     if (sizeUsd < 10) {
       toast({
         title: "Invalid size",
@@ -804,18 +1150,16 @@ export function YieldAIPositions() {
       });
       return;
     }
-    if (subaccountHasOpenOnSelectedMarket) {
-      toast({
-        title: "Subaccount already has a position",
-        description: `Decibel subaccount already has an open position on ${executorMarketName ?? `${executorAsset}/USD`}. Close it before opening a delta-neutral on the same market.`,
-        variant: "destructive",
-      });
-      return;
-    }
     try {
       setExecutorSubmitting(true);
       setOpenDeltaNeutralResult(null);
       setOpenDeltaNeutralModalOpen(true);
+      const auth = await signManageAction("decibel_dn_open", {
+        safeAddress: safeAddr,
+        subaccount: selectedDecibelSubaccount,
+        asset: executorAsset,
+        sizeUsd,
+      });
       const response = await fetch("/api/protocols/decibel/executor-open-delta-neutral", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -825,6 +1169,7 @@ export function YieldAIPositions() {
           safeAddress: safeAddr,
           asset: executorAsset,
           sizeUsd,
+          auth,
         }),
       });
       const json = await response.json();
@@ -848,6 +1193,7 @@ export function YieldAIPositions() {
       });
       if (safeAddr) {
         void queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.deltaNeutralState(safeAddr) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.deltaNeutralCycles(safeAddr) });
         void queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddr) });
       }
       if (walletAddress) {
@@ -858,10 +1204,14 @@ export function YieldAIPositions() {
           queryKey: queryKeys.protocols.decibel.accountBalance(selectedDecibelSubaccount),
         });
       }
+      // Re-fetch once more shortly after — the new cycle's views/extras may lag the open response.
       setTimeout(() => {
+        if (safeAddr) {
+          void queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.deltaNeutralCycles(safeAddr) });
+        }
         window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "decibel" } }));
         window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "yield-ai" } }));
-      }, 1500);
+      }, 2000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       setOpenDeltaNeutralResult({ success: false, error: msg });
@@ -889,6 +1239,12 @@ export function YieldAIPositions() {
       setCloseDeltaNeutralSubmitting(true);
       setCloseDeltaNeutralResult(null);
       setCloseDeltaNeutralForceMode(force);
+      const auth = await signManageAction("decibel_dn_close", {
+        safeAddress: safeAddr,
+        subaccount: deltaNeutral.decibelSubaccount,
+        asset: executorAsset,
+        force,
+      });
       const response = await fetch("/api/protocols/decibel/executor-close-delta-neutral", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -898,6 +1254,7 @@ export function YieldAIPositions() {
           safeAddress: safeAddr,
           asset: executorAsset,
           force,
+          auth,
         }),
       });
       const json = await response.json();
@@ -966,6 +1323,259 @@ export function YieldAIPositions() {
     }
   };
 
+  // Close a single strategy_journal cycle (post-migration DN position). Resolves the market from
+  // the cycle on the server, so the asset field is only part of the signed authorization.
+  const handleRehedgeCycle = async (cycle: { cycleId: string; asset: "BTC" | "APT" }) => {
+    if (!account?.address || !safeAddr || !selectedDecibelSubaccount) {
+      toast({
+        title: "Cannot rehedge",
+        description: "Connect the owner wallet, a safe, and an active Decibel subaccount.",
+        variant: "destructive",
+      });
+      return;
+    }
+    try {
+      setRehedgingCycleId(cycle.cycleId);
+      const auth = await signManageAction("decibel_dn_rehedge", {
+        safeAddress: safeAddr,
+        subaccount: selectedDecibelSubaccount,
+        cycleId: cycle.cycleId,
+      });
+      const res = await fetch("/api/protocols/decibel/executor-rehedge-delta-neutral", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner: account.address.toString(),
+          safeAddress: safeAddr,
+          subaccount: selectedDecibelSubaccount,
+          cycleId: cycle.cycleId,
+          auth,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json?.success) throw new Error(json?.error || "Rehedge failed");
+      const d = json.data ?? {};
+      const dAbs = Number(d.deltaApt);
+      const dec = cycle.asset === "BTC" ? 6 : 2;
+      toast({
+        title:
+          d.action === "in-band"
+            ? "Already balanced"
+            : d.action === "margin-skip"
+              ? "Rehedge skipped"
+              : "Rehedged",
+        description:
+          d.action === "in-band"
+            ? `Delta within band${Number.isFinite(dAbs) ? ` (Δ ${dAbs.toFixed(dec)} ${cycle.asset})` : ""}.`
+            : d.action === "margin-skip"
+              ? String(d.note || "Not enough free margin to grow the short.")
+              : `${d.action === "grow-short" ? "Grew" : "Reduced"} short by ${Number(d.adjustedApt).toFixed(dec)} ${cycle.asset}.`,
+      });
+      if (safeAddr) {
+        await queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.deltaNeutralCycles(safeAddr) });
+      }
+    } catch (err) {
+      toast({
+        title: "Rehedge failed",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setRehedgingCycleId(null);
+    }
+  };
+
+  const handleCloseCycle = async (cycle: { cycleId: string; marketName: string | null }) => {
+    if (!account?.address || !safeAddr || !selectedDecibelSubaccount) {
+      toast({
+        title: "Cannot close",
+        description: "Missing wallet, safe, or Decibel subaccount.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const asset: "BTC" | "APT" = baseSymbolOfMarket(cycle.marketName) === "APT" ? "APT" : "BTC";
+    try {
+      setClosingCycleId(cycle.cycleId);
+      // Field order must mirror the server (assertOwnerManageAuth): safeAddress, subaccount, asset, force, cycleId.
+      const auth = await signManageAction("decibel_dn_close", {
+        safeAddress: safeAddr,
+        subaccount: selectedDecibelSubaccount,
+        asset,
+        force: false,
+        cycleId: cycle.cycleId,
+      });
+      const response = await fetch("/api/protocols/decibel/executor-close-delta-neutral", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner: account.address.toString(),
+          subaccount: selectedDecibelSubaccount,
+          safeAddress: safeAddr,
+          asset,
+          force: false,
+          cycleId: cycle.cycleId,
+          auth,
+        }),
+      });
+      const json = await response.json();
+      if (!response.ok || !json?.success) {
+        throw new Error(json?.error || "Failed to close delta-neutral cycle");
+      }
+      toast({
+        title: "Delta-neutral cycle closed",
+        description: `Cycle #${cycle.cycleId} closed: Decibel short reduced, spot swapped, journal updated.`,
+      });
+      if (safeAddr) {
+        await queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.deltaNeutralCycles(safeAddr) });
+        await queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.deltaNeutralState(safeAddr) });
+        await queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddr) });
+      }
+      if (walletAddress) {
+        await queryClient.invalidateQueries({ queryKey: queryKeys.protocols.decibel.userPositions(walletAddress) });
+      }
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "decibel" } }));
+        window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "yield-ai" } }));
+      }, 1500);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast({ title: "Cycle close failed", description: msg, variant: "destructive" });
+    } finally {
+      setClosingCycleId(null);
+    }
+  };
+
+  // Add (top up) an existing LP-DN cycle with USDC: swap the range split USDC→base, dual-add into
+  // the cycle's OWN LP range, grow the short to the new live base (margin-guarded) — one
+  // LIQUIDITY_ADD journal action. Private beta, same allowlist as LP open (server-enforced).
+  const handleExecutorAddLpDeltaNeutral = async (cycleId: string, sizeUsd: number) => {
+    if (!account?.address || !safeAddr || !selectedDecibelSubaccount) {
+      toast({ title: "Cannot add", description: "Missing wallet, safe, or Decibel subaccount.", variant: "destructive" });
+      return;
+    }
+    if (!Number.isFinite(sizeUsd) || sizeUsd < 10) {
+      toast({ title: "Invalid size", description: "Minimum add size is 10 USDC.", variant: "destructive" });
+      return;
+    }
+    if (safeUsdcBalance + 1e-9 < sizeUsd) {
+      toast({
+        title: "Not enough USDC in safe",
+        description: `Add needs ${sizeUsd.toFixed(2)} USDC; the safe has ${safeUsdcBalance.toFixed(2)} USDC.`,
+        variant: "destructive",
+      });
+      return;
+    }
+    try {
+      setExecutorSubmitting(true);
+      const usdcAmountInBaseUnits = BigInt(Math.round(sizeUsd * 1e6)).toString();
+      const auth = await signManageAction("decibel_dn_lp_add", {
+        safeAddress: safeAddr,
+        subaccount: selectedDecibelSubaccount,
+        cycleId,
+        usdcAmountInBaseUnits,
+      });
+      const response = await fetch("/api/protocols/decibel/executor-add-delta-neutral", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "lp",
+          owner: account.address.toString(),
+          safeAddress: safeAddr,
+          subaccount: selectedDecibelSubaccount,
+          cycleId,
+          usdcAmountInBaseUnits,
+          auth,
+        }),
+      });
+      const json = await response.json();
+      if (!response.ok || !json?.success) {
+        throw new Error(json?.error || "Failed to add to the LP delta-neutral position");
+      }
+      const d = json?.data ?? {};
+      const shortAction = d?.shortAdjust?.action;
+      toast({
+        title: "Added to LP-DN position",
+        description:
+          shortAction === "margin-skip"
+            ? `LP grew by ~$${(Number(d.lpAddedValueUsdc ?? 0) / 1e6).toFixed(2)}, but the short could NOT grow (no free margin) — top up Decibel margin, the position runs under-hedged until then.`
+            : `Cycle #${cycleId}: LP +$${(Number(d.lpAddedValueUsdc ?? 0) / 1e6).toFixed(2)}, short resized to match.`,
+        ...(shortAction === "margin-skip" ? { variant: "destructive" as const } : {}),
+      });
+      setAddTarget(null);
+      setAddSizeUsd("");
+      if (safeAddr) {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.deltaNeutralCycles(safeAddr) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddr) });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast({ title: "LP-DN add failed", description: msg, variant: "destructive" });
+    } finally {
+      setExecutorSubmitting(false);
+    }
+  };
+
+  // Add (top up) an existing journal cycle: increase the short + buy matching spot, recorded as
+  // a LIQUIDITY_ADD action. Only journal-backed positions can be topped up (legacy has no add).
+  const handleExecutorAddDeltaNeutral = async (cycleId: string, asset: "BTC" | "APT", sizeUsd: number) => {
+    if (!account?.address || !safeAddr || !selectedDecibelSubaccount) {
+      toast({ title: "Cannot add", description: "Missing wallet, safe, or Decibel subaccount.", variant: "destructive" });
+      return;
+    }
+    if (!Number.isFinite(sizeUsd) || sizeUsd < 10) {
+      toast({ title: "Invalid size", description: "Minimum add size is 10 USDC.", variant: "destructive" });
+      return;
+    }
+    try {
+      setExecutorSubmitting(true);
+      // Field order must mirror the server: safeAddress, subaccount, asset, sizeUsd, cycleId.
+      const auth = await signManageAction("decibel_dn_add", {
+        safeAddress: safeAddr,
+        subaccount: selectedDecibelSubaccount,
+        asset,
+        sizeUsd,
+        cycleId,
+      });
+      const response = await fetch("/api/protocols/decibel/executor-add-delta-neutral", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          owner: account.address.toString(),
+          subaccount: selectedDecibelSubaccount,
+          safeAddress: safeAddr,
+          asset,
+          sizeUsd,
+          cycleId,
+          auth,
+        }),
+      });
+      const json = await response.json();
+      if (!response.ok || !json?.success) {
+        throw new Error(json?.error || "Failed to add to delta-neutral position");
+      }
+      toast({ title: "Added to position", description: `Cycle #${cycleId}: short increased + spot bought.` });
+      setAddTarget(null);
+      setAddSizeUsd("");
+      if (safeAddr) {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.deltaNeutralCycles(safeAddr) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddr) });
+      }
+      if (walletAddress) {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.protocols.decibel.userPositions(walletAddress) });
+      }
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "decibel" } }));
+        window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "yield-ai" } }));
+      }, 1500);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast({ title: "Add failed", description: msg, variant: "destructive" });
+    } finally {
+      setExecutorSubmitting(false);
+    }
+  };
+
   const aptosTxnHashExplorerUrl = (hash?: string | null): string | null =>
     hash ? `https://explorer.aptoslabs.com/txn/${hash}?network=mainnet` : null;
 
@@ -997,6 +1607,11 @@ export function YieldAIPositions() {
     }
     try {
       setConvertStaleAptSubmitting(true);
+      const auth = await signManageAction("decibel_dn_residual_swap", {
+        safeAddress: safeAddr,
+        subaccount: null,
+        spotMetadata: APT_FA_METADATA_MAINNET,
+      });
       const response = await fetch("/api/protocols/decibel/executor-swap-delta-neutral-residual", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1004,6 +1619,7 @@ export function YieldAIPositions() {
           owner: account.address.toString(),
           safeAddress: safeAddr,
           spotMetadata: APT_FA_METADATA_MAINNET,
+          auth,
         }),
       });
       const json = await response.json();
@@ -1050,6 +1666,11 @@ export function YieldAIPositions() {
     };
     try {
       setConvertStaleXbtcSubmitting(true);
+      const auth = await signManageAction("decibel_dn_residual_swap", {
+        safeAddress: safeAddr,
+        subaccount: null,
+        spotMetadata: staleBtc.metadata,
+      });
       const response = await fetch("/api/protocols/decibel/executor-swap-delta-neutral-residual", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1057,6 +1678,7 @@ export function YieldAIPositions() {
           owner: account.address.toString(),
           safeAddress: safeAddr,
           spotMetadata: staleBtc.metadata,
+          auth,
         }),
       });
       const json = await response.json();
@@ -1098,6 +1720,11 @@ export function YieldAIPositions() {
     }
     try {
       setSwapResidualSubmitting(true);
+      const auth = await signManageAction("decibel_dn_residual_swap", {
+        safeAddress: safeAddr,
+        subaccount: deltaNeutral.decibelSubaccount,
+        spotMetadata: null,
+      });
       const response = await fetch("/api/protocols/decibel/executor-swap-delta-neutral-residual", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1105,6 +1732,7 @@ export function YieldAIPositions() {
           owner: account.address.toString(),
           subaccount: deltaNeutral.decibelSubaccount,
           safeAddress: safeAddr,
+          auth,
         }),
       });
       const json = await response.json();
@@ -1233,9 +1861,9 @@ export function YieldAIPositions() {
     deltaNeutral?.recordExists && !deltaNeutral.isOpen && deltaNeutralResidualSwapUsable
   );
 
-  const showDeltaNeutralCard = Boolean(
-    safeAddr && deltaNeutral?.recordExists && isDeltaNeutralStrategy
-  );
+  // Legacy single-position card retired: all DN positions (legacy record + journal cycles) now
+  // render in the unified list below. Kept as a flag (not deleted) to hide the old card cleanly.
+  const showDeltaNeutralCard = false;
 
   // No initial fetch here: safe and token data are via useQuery (cached).
 
@@ -1394,58 +2022,122 @@ export function YieldAIPositions() {
     };
   }, [safeAddr]);
 
-  const handleEchelonWithdrawConfirm = async () => {
-    if (!selectedEchelonWithdrawRow || !safeAddr || !echelonAdapterAddress) return;
-    if (!signAndSubmitTransaction) {
+  const closeEchelonWithdrawDialog = () => {
+    setShowEchelonWithdrawConfirm(false);
+    setSelectedEchelonWithdrawRow(null);
+  };
+
+  const afterEchelonWithdrawSubmitted = (full: boolean) => {
+    closeEchelonWithdrawDialog();
+    if (safeAddr) {
+      queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.userPositions(safeAddr) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.rewards(safeAddr) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddr) });
+    }
+    toast({
+      title: full ? "Echelon exit submitted" : "Partial withdraw submitted",
+      description: full
+        ? "Full position is being withdrawn from Echelon into your AI agent safe."
+        : "Requested amount is being withdrawn from Echelon into your AI agent safe. Use Withdraw in the AI agent wallet section to send it to your wallet.",
+    });
+    setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "yield-ai" } }));
+    }, 2000);
+  };
+
+  const handleEchelonWithdrawConfirm = async (amountBaseUnits: bigint, isFull: boolean) => {
+    if (!selectedEchelonWithdrawRow || !safeAddr) return;
+    if (amountBaseUnits <= 0n) {
       toast({
-        title: "Unsupported wallet",
-        description: "Current wallet cannot sign and submit transactions.",
+        title: "Invalid amount",
+        description: "Enter a positive amount within the supplied balance.",
         variant: "destructive",
       });
       return;
     }
+    const marketObj = toCanonicalAddress(selectedEchelonWithdrawRow.marketObj);
 
+    if (isFull) {
+      // Full exit: owner-signed withdraw_all (works even while the agent is paused).
+      if (!echelonAdapterAddress) return;
+      if (!signAndSubmitTransaction && !effectiveAptosAddress) {
+        toast({
+          title: "Unsupported wallet",
+          description: "Current wallet cannot sign and submit transactions.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      try {
+        setIsExecutingEchelonWithdrawToSafe(true);
+        const payload = buildVaultExecuteWithdrawAllEchelonFaAsOwnerPayload({
+          safeAddress: toCanonicalAddress(safeAddr),
+          adapterAddress: toCanonicalAddress(echelonAdapterAddress),
+          marketObj,
+        });
+
+        const result = await submitAptosTransaction({
+          transaction: {
+            data: {
+              function: payload.function as `${string}::${string}::${string}`,
+              typeArguments: payload.typeArguments,
+              functionArguments: payload.functionArguments,
+            },
+            options: { maxGasAmount: 50000 },
+          },
+          signAndSubmitTransaction: signAndSubmitTransaction as any,
+          connected: Boolean(account?.address),
+          address: effectiveAptosAddress,
+        });
+
+        if (!result?.hash) {
+          throw new Error("Transaction was submitted without hash");
+        }
+        afterEchelonWithdrawSubmitted(true);
+      } catch (err) {
+        console.error("execute_withdraw_all_echelon_fa_as_owner failed:", err);
+        toast({
+          title: "Echelon withdraw failed",
+          description: err instanceof Error ? err.message : "Transaction failed. Please try again.",
+          variant: "destructive",
+        });
+      } finally {
+        setIsExecutingEchelonWithdrawToSafe(false);
+      }
+      return;
+    }
+
+    // Partial withdraw: executor-signed vault::execute_withdraw_echelon_fa
+    // (the route converts this underlying amount to market shares).
     try {
       setIsExecutingEchelonWithdrawToSafe(true);
-      const marketObj = toCanonicalAddress(selectedEchelonWithdrawRow.marketObj);
-      const payload = buildVaultExecuteWithdrawAllEchelonFaAsOwnerPayload({
-        safeAddress: toCanonicalAddress(safeAddr),
-        adapterAddress: toCanonicalAddress(echelonAdapterAddress),
+      const amountStr = amountBaseUnits.toString();
+      const auth = await signManageAction("echelon_partial_withdraw", {
+        safeAddress: safeAddr,
         marketObj,
+        amountBaseUnits: amountStr,
       });
-
-      const result = await signAndSubmitTransaction({
-        data: {
-          function: payload.function as `${string}::${string}::${string}`,
-          typeArguments: payload.typeArguments,
-          functionArguments: payload.functionArguments,
-        },
-        options: { maxGasAmount: 50000 },
+      const res = await fetch("/api/protocols/yield-ai/echelon-withdraw", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          safeAddress: safeAddr,
+          marketObj,
+          amountBaseUnits: amountStr,
+          auth,
+        }),
       });
-
-      if (!result?.hash) {
-        throw new Error("Transaction was submitted without hash");
+      const json = (await res.json().catch(() => ({}))) as { data?: { hash?: string }; error?: string };
+      if (!res.ok || json.error) {
+        throw new Error(json.error || `HTTP ${res.status}`);
       }
-
-      setShowEchelonWithdrawConfirm(false);
-      setSelectedEchelonWithdrawRow(null);
-      if (safeAddr) {
-        queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.userPositions(safeAddr) });
-        queryClient.invalidateQueries({ queryKey: queryKeys.protocols.echelon.rewards(safeAddr) });
-        queryClient.invalidateQueries({ queryKey: queryKeys.protocols.yieldAi.safeTokens(safeAddr) });
-      }
-      toast({
-        title: "Echelon exit submitted",
-        description: "Full position is being withdrawn from Echelon into your AI agent safe.",
-      });
-      setTimeout(() => {
-        window.dispatchEvent(new CustomEvent("refreshPositions", { detail: { protocol: "yield-ai" } }));
-      }, 2000);
+      afterEchelonWithdrawSubmitted(false);
     } catch (err) {
-      console.error("execute_withdraw_all_echelon_fa_as_owner failed:", err);
+      console.error("execute_withdraw_echelon_fa failed:", err);
       toast({
         title: "Echelon withdraw failed",
-        description: err instanceof Error ? err.message : "Transaction failed. Please try again.",
+        description: err instanceof Error ? err.message : "Withdraw failed. Please try again.",
         variant: "destructive",
       });
     } finally {
@@ -1458,12 +2150,17 @@ export function YieldAIPositions() {
     if (isConvertingUsd1ToUsdc) return;
     try {
       setIsConvertingUsd1ToUsdc(true);
+      const auth = await signManageAction("usd1_to_usdc_swap", {
+        safeAddress: safeAddr,
+        amountInBaseUnits: usd1ConvertAmountBaseUnits,
+      });
       const res = await fetch("/api/protocols/yield-ai/swap/usd1-to-usdc", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           safeAddress: safeAddr,
           amountInBaseUnits: usd1ConvertAmountBaseUnits,
+          auth,
         }),
       });
       const json = (await res.json().catch(() => ({}))) as { data?: { hash?: string }; error?: string };
@@ -1620,10 +2317,24 @@ export function YieldAIPositions() {
   // BTC assets have 8 decimals; 1000 base units = 0.00001 BTC ≈ $0.8 dust threshold at $80k/BTC.
   const STALE_BTC_DUST_BASE_UNITS = BigInt(1_000);
 
+  // Hyperion LP positions live inside the safe but aren't safe FA balances —
+  // add their USD value to the safe total for hyperion_lp safes.
+  const { data: hyperionLpPositions = [] } = useHyperionLpPositions(safeAddr ?? undefined, {
+    enabled: activeStrategyId === "hyperion_lp" && Boolean(safeAddr),
+  });
+  const hyperionLpValue = useMemo(
+    () =>
+      hyperionLpPositions
+        .filter((p) => !p.closed)
+        .reduce((sum, p) => sum + (p.valueUsd ?? 0), 0),
+    [hyperionLpPositions]
+  );
+
   const totalValue =
     tokens.reduce((sum, t) => sum + (t.value ? parseFloat(t.value) : 0), 0) +
     totalRewardsValue +
-    echelonTotalValue;
+    echelonTotalValue +
+    hyperionLpValue;
 
   const { data: depositHistory, isLoading: historyLoading, isFetching: historyFetching } = useYieldAiDepositHistory(
     safeAddr ?? undefined,
@@ -1640,8 +2351,28 @@ export function YieldAIPositions() {
   const aprPct = holdingDays >= 7 && aprRaw != null ? parseFloat(aprRaw) : null;
   const netDepositsUsd = netDepositsRaw != null ? parseFloat(netDepositsRaw) : null;
 
+  // Strategy-level fee APR: everything the LP positions earned (claimed +
+  // uncollected fees/rewards, open and closed) over the same time-weighted
+  // average capital used for Historical APR. Same denominator → the two badges
+  // are directly comparable; the difference between them is price moves / IL.
+  const hyperionFeeAprPct = useMemo(() => {
+    if (activeStrategyId !== "hyperion_lp") return null;
+    const avgCapital = parseFloat(depositHistory?.pnlStats?.avgCapitalUsd ?? "");
+    const periodDays = depositHistory?.pnlStats?.periodDays ?? 0;
+    if (!Number.isFinite(avgCapital) || avgCapital <= 0.01 || periodDays < 1) return null;
+    let earnedUsd = 0;
+    for (const p of hyperionLpPositions) {
+      earnedUsd += p.claimedUsd ?? 0;
+      if (!p.closed) earnedUsd += (p.feesUsd ?? 0) + (p.rewardsUsd ?? 0);
+    }
+    if (earnedUsd <= 0) return null;
+    return (earnedUsd / avgCapital) * (365 / periodDays) * 100;
+  }, [activeStrategyId, hyperionLpPositions, depositHistory]);
+
   const aiAgentProtocolConfig = useMemo(() => getProtocolByName("AI agent"), []);
   const decibelProtocolConfig = useMemo(() => getProtocolByName("Decibel"), []);
+  const hyperionProtocolConfig = useMemo(() => getProtocolByName("Hyperion"), []);
+  const isHyperionLpStrategy = activeStrategyId === "hyperion_lp";
   const walletUsdcPriceUsd = useMemo(() => {
     const usdc = walletTokens?.find(
       (t) =>
@@ -1650,6 +2381,59 @@ export function YieldAIPositions() {
     );
     return usdc?.price ? parseFloat(usdc.price) : 1;
   }, [walletTokens]);
+
+  const depositModalConfig = useMemo(() => {
+    if (isHyperionLpStrategy && safeAddr) {
+      return buildHyperionAgentDepositModalConfig({
+        aiAgentLogoUrl: aiAgentProtocolConfig?.logoUrl ?? "/logo.png",
+        hyperionLogoUrl: hyperionProtocolConfig?.logoUrl,
+        yieldAiSafeAddress: safeAddr,
+        apy: aprPct ?? 0,
+      });
+    }
+    const usdc = AI_AGENT_DEPOSIT_TOKENS[0];
+    if (isDeltaNeutralStrategy) {
+      return {
+        protocol: {
+          name: "Decibel AI agent",
+          logo: aiAgentProtocolConfig?.logoUrl ?? "/logo.png",
+          apy: aprPct ?? 0,
+          key: "yield-ai" as const,
+        },
+        tokenIn: usdc,
+        tokenOut: usdc,
+        tokenInOptions: [usdc],
+        priceUSD: walletUsdcPriceUsd,
+        yieldAiSafeAddress: safeAddr ?? undefined,
+        secondaryLogoUrl: decibelProtocolConfig?.logoUrl,
+        secondaryLogoAlt: "Decibel",
+        yieldAiSuccessDescription: "",
+      };
+    }
+    return {
+      protocol: {
+        name: aiAgentProtocolConfig?.name ?? "AI agent",
+        logo: aiAgentProtocolConfig?.logoUrl ?? "/logo.png",
+        apy: aprPct ?? 0,
+        key: "yield-ai" as const,
+      },
+      tokenIn: usdc,
+      tokenOut: usdc,
+      tokenInOptions: AI_AGENT_DEPOSIT_TOKENS,
+      priceUSD: walletUsdcPriceUsd,
+      yieldAiSafeAddress: safeAddr ?? undefined,
+    };
+  }, [
+    isHyperionLpStrategy,
+    isDeltaNeutralStrategy,
+    safeAddr,
+    aiAgentProtocolConfig?.logoUrl,
+    aiAgentProtocolConfig?.name,
+    hyperionProtocolConfig?.logoUrl,
+    aprPct,
+    walletUsdcPriceUsd,
+    decibelProtocolConfig?.logoUrl,
+  ]);
 
   const performanceLoading =
     historyLoading ||
@@ -1694,8 +2478,9 @@ export function YieldAIPositions() {
   return (
     <div className="space-y-4 text-base">
       <div className="flex flex-col gap-2">
-        <div className="flex flex-wrap items-center justify-between gap-3 gap-y-2">
-          <div className="flex min-w-0 items-center gap-1.5">
+        <div className="flex flex-wrap items-start justify-between gap-3 gap-y-2">
+          <div className="flex min-w-0 flex-col gap-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
             <span className="text-sm font-medium text-muted-foreground">
               {safeAddr ? (
                 <>
@@ -1794,10 +2579,33 @@ export function YieldAIPositions() {
                 </p>
               </TooltipContent>
             </Tooltip>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge
+                variant="outline"
+                className={cn(
+                  "text-xs font-medium",
+                  AI_AGENT_STRATEGY_BADGE_CLASS[activeStrategyId]
+                )}
+              >
+                AI agent: {AI_AGENT_STRATEGIES[activeStrategyId].label}
+              </Badge>
+              <p className="flex items-center gap-1 text-sm font-normal text-muted-foreground">
+                {AI_AGENT_STRATEGIES[activeStrategyId].tagline}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Info className="h-3.5 w-3.5 shrink-0 cursor-help" />
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-[300px] text-xs">
+                    {AI_AGENT_STRATEGIES[activeStrategyId].tooltip}
+                  </TooltipContent>
+                </Tooltip>
+              </p>
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <Button size="sm" variant="default" onClick={() => setShowDepositModal(true)}>
-              Deposit USDC to AI agent
+              {isHyperionLpStrategy ? "Deposit" : "Deposit USDC to AI agent"}
             </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -1842,24 +2650,6 @@ export function YieldAIPositions() {
               <History className="h-4 w-4" />
             </Button>
           </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge
-            variant="outline"
-            className={cn(
-              "text-xs font-medium",
-              isDeltaNeutralStrategy
-                ? "bg-purple-500/10 text-purple-700 dark:text-purple-300 border-purple-500/30"
-                : "bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/30"
-            )}
-          >
-            AI agent: {AI_AGENT_STRATEGIES[activeStrategyId].label}
-          </Badge>
-          <p className="text-sm font-normal text-muted-foreground">
-            {isDeltaNeutralStrategy
-              ? "Manual delta-neutral strategy on Decibel"
-              : "AI agent rebalances positions every hour"}
-          </p>
         </div>
       </div>
 
@@ -1914,8 +2704,9 @@ export function YieldAIPositions() {
             <DialogHeader>
               <DialogTitle>Delta-neutral history</DialogTitle>
               <DialogDescription>
-                Past delta-neutral deals reconstructed from executor record_open / record_close
-                calls (V1 contract stores only the latest snapshot on-chain).
+                All delta-neutral deals for this safe: strategy_journal cycles (spot &amp; LP-hedge,
+                exact on-chain records) plus legacy V1 deals reconstructed from executor
+                record_open / record_close calls.
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-3">
@@ -1957,28 +2748,85 @@ export function YieldAIPositions() {
                 }
                 if (!deltaNeutralHistory) return null;
                 const deals = deltaNeutralHistory.deals;
-                if (deals.length === 0) {
+                const journalCycles = deltaNeutralHistory.journalCycles ?? [];
+                if (deals.length === 0 && journalCycles.length === 0) {
                   return (
                     <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
                       No on-chain record_open / record_close transactions found for this safe yet.
                     </div>
                   );
                 }
-                // "Previous deal" = last *closed* deal preceding the current state.
-                // If the current snapshot is open, that's the last fully-closed deal.
-                // If the current snapshot is closed, the previous one is the closed deal
-                // before the latest one.
-                const closedDeals = deals.filter((d) => d.close != null);
-                const previousDeal =
-                  deltaNeutral?.isOpen
-                    ? closedDeals.length > 0
-                      ? closedDeals[closedDeals.length - 1]
-                      : null
-                    : closedDeals.length > 1
-                      ? closedDeals[closedDeals.length - 2]
-                      : null;
-
-                const lastFiveDeals = deals.slice(-5).reverse();
+                // Compact "4m / 2h 10m / 2d 9h" duration for a deal's open→close span.
+                const fmtDuration = (ms: number): string => {
+                  const m = Math.max(0, Math.round(ms / 60000));
+                  if (m < 60) return `${m}m`;
+                  const h = Math.floor(m / 60);
+                  if (h < 48) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+                  const days = Math.floor(h / 24);
+                  return h % 24 ? `${days}d ${h % 24}h` : `${days}d`;
+                };
+                // One flat list: journal cycles (current system, exact on-chain close proceeds)
+                // + V1 deals (proceeds resolved from the indexer swap scan), newest first.
+                type HistoryRowVm = {
+                  key: string;
+                  label: string;
+                  assetLabel: string;
+                  isLp: boolean;
+                  openedSec: number;
+                  closedSec: number | null;
+                  inUsd: number;
+                  outUsd: number | null;
+                  openTxVersion: string | null;
+                  closeTxVersion: string | null;
+                  swapTxVersion: string | null;
+                };
+                const journalAssetLabel = (spotMetadata: string, strategyId: string): string => {
+                  const label = spotAssetLabel(spotMetadata);
+                  if (!label.startsWith("0x")) return label;
+                  const sid = strategyId.toLowerCase();
+                  return sid.includes("btc") ? "WBTC" : sid.includes("apt") ? "APT" : label.slice(0, 8);
+                };
+                const historyRows: HistoryRowVm[] = [
+                  ...journalCycles.map((c): HistoryRowVm => {
+                    const outRaw = Number(c.usdcReceivedOnClose) / 1e6;
+                    return {
+                      key: `journal-${c.cycleId}`,
+                      label: `C#${c.cycleId}`,
+                      assetLabel: journalAssetLabel(c.spotMetadata, c.strategyId),
+                      isLp: c.isLp,
+                      openedSec: Number(c.openedAt) || 0,
+                      closedSec: c.isOpen ? null : Number(c.closedAt) || null,
+                      // Cumulative spot/LP-side USDC (open + top-ups) — notional-open alone
+                      // shows phantom profit on topped-up cycles.
+                      inUsd: Number(c.usdcInTotal) / 1e6,
+                      outUsd: !c.isOpen && outRaw > 0 ? outRaw : null,
+                      openTxVersion: c.openTxVersion,
+                      closeTxVersion: c.closeTxVersion,
+                      swapTxVersion: null,
+                    };
+                  }),
+                  ...deals.map((d): HistoryRowVm => {
+                    const outRaw =
+                      d.closeSwapUsdcOutBaseUnits != null
+                        ? Number(d.closeSwapUsdcOutBaseUnits) / 1e6
+                        : null;
+                    return {
+                      key: `deal-${d.index}-${d.open.txVersion}`,
+                      label: `#${d.index + 1}`,
+                      assetLabel: spotAssetLabel(d.spotAssetMetadata),
+                      isLp: false,
+                      openedSec: Math.floor(new Date(d.open.timestamp).getTime() / 1000),
+                      closedSec: d.close
+                        ? Math.floor(new Date(d.close.timestamp).getTime() / 1000)
+                        : null,
+                      inUsd: Number(d.open.usdcSwappedIn ?? "0") / 1e6,
+                      outUsd: outRaw != null && outRaw > 0 ? outRaw : null,
+                      openTxVersion: d.open.txVersion,
+                      closeTxVersion: d.close?.txVersion ?? null,
+                      swapTxVersion: d.closeSwapTxVersion,
+                    };
+                  }),
+                ].sort((a, b) => b.openedSec - a.openedSec);
 
                 return (
                   <div className="space-y-3">
@@ -2050,78 +2898,11 @@ export function YieldAIPositions() {
                       </div>
                     ) : null}
 
-                    {previousDeal ? (
-                      <div className="rounded-md border bg-muted/30 p-3 space-y-1.5">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                            Previous deal
-                          </span>
-                          <Badge variant="outline" className="text-[10px]">
-                            #{previousDeal.index + 1}
-                          </Badge>
-                          <Badge variant="outline" className="text-[10px]">
-                            {spotAssetLabel(previousDeal.spotAssetMetadata)}
-                          </Badge>
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          Open {formatUnixSecondsLabel(
-                            String(Math.floor(new Date(previousDeal.open.timestamp).getTime() / 1000))
-                          )}
-                          {previousDeal.close
-                            ? ` → Close ${formatUnixSecondsLabel(
-                                String(
-                                  Math.floor(new Date(previousDeal.close.timestamp).getTime() / 1000)
-                                )
-                              )}`
-                            : ""}
-                        </div>
-                        <div className="grid gap-1 sm:grid-cols-2 text-xs">
-                          <div>
-                            <span className="text-muted-foreground">USDC swapped in: </span>
-                            <span className="font-medium">
-                              {(Number(previousDeal.open.usdcSwappedIn ?? "0") / 1e6).toLocaleString(undefined, {
-                                maximumFractionDigits: 2,
-                              })}{" "}
-                              USDC
-                            </span>
-                          </div>
-                          <div>
-                            <span className="text-muted-foreground">Filled short size (raw): </span>
-                            <span className="font-mono">{previousDeal.open.filledShortSize ?? "0"}</span>
-                          </div>
-                          <div className="sm:col-span-2 flex flex-wrap items-center gap-2">
-                            <span className="text-muted-foreground">Open tx:</span>
-                            <a
-                              href={aptosMainnetTxnExplorerUrl(previousDeal.open.txVersion) ?? "#"}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="font-mono text-xs underline hover:text-foreground"
-                            >
-                              {previousDeal.open.txVersion}
-                            </a>
-                            {previousDeal.close ? (
-                              <>
-                                <span className="text-muted-foreground">· Close tx:</span>
-                                <a
-                                  href={aptosMainnetTxnExplorerUrl(previousDeal.close.txVersion) ?? "#"}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="font-mono text-xs underline hover:text-foreground"
-                                >
-                                  {previousDeal.close.txVersion}
-                                </a>
-                              </>
-                            ) : null}
-                          </div>
-                        </div>
-                      </div>
-                    ) : null}
-
-                    {deals.length > 0 ? (
+                    {historyRows.length > 0 ? (
                       <div className="rounded-md border bg-muted/20 p-3 space-y-2">
                         <div className="flex items-center justify-between gap-2 flex-wrap">
                           <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                            Recent deals (last {lastFiveDeals.length} of {deals.length})
+                            Deals ({historyRows.length})
                           </span>
                           {deltaNeutralHistory.truncated ? (
                             <span className="text-[10px] text-muted-foreground">
@@ -2129,46 +2910,95 @@ export function YieldAIPositions() {
                             </span>
                           ) : null}
                         </div>
-                        <div className="space-y-1">
-                          {lastFiveDeals.map((d) => {
-                            const isStillOpen = !d.close;
-                            const openedSec = Math.floor(
-                              new Date(d.open.timestamp).getTime() / 1000
+                        <div className="max-h-72 overflow-y-auto pr-1">
+                          {historyRows.map((r) => {
+                            const isStillOpen = r.closedSec == null;
+                            const pnl =
+                              r.outUsd != null && Number.isFinite(r.inUsd)
+                                ? r.outUsd - r.inUsd
+                                : null;
+                            const pct = pnl != null && r.inUsd > 0 ? (pnl / r.inUsd) * 100 : null;
+                            const txLink = (label: string, version: string) => (
+                              <a
+                                href={aptosMainnetTxnExplorerUrl(version) ?? "#"}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+                              >
+                                {label}
+                              </a>
                             );
-                            const closedSec = d.close
-                              ? Math.floor(new Date(d.close.timestamp).getTime() / 1000)
-                              : null;
-                            const usdcIn = Number(d.open.usdcSwappedIn ?? "0") / 1e6;
                             return (
                               <div
-                                key={`deal-${d.index}-${d.open.txVersion}`}
-                                className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]"
+                                key={r.key}
+                                className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-border/40 py-1.5 text-[11px] last:border-b-0"
                               >
                                 <Badge variant="outline" className="text-[10px]">
-                                  #{d.index + 1}
+                                  {r.label}
                                 </Badge>
-                                <Badge
-                                  variant="outline"
-                                  className="text-[10px]"
-                                >
-                                  {spotAssetLabel(d.spotAssetMetadata)}
+                                <Badge variant="outline" className="text-[10px]">
+                                  {r.assetLabel}
                                 </Badge>
+                                {r.isLp ? (
+                                  <Badge className="border-violet-500/30 bg-violet-500/10 text-[10px] text-violet-600 dark:text-violet-400">
+                                    LP
+                                  </Badge>
+                                ) : null}
                                 <span className="text-muted-foreground">
-                                  {formatUnixSecondsLabel(String(openedSec))}
+                                  {formatUnixSecondsLabel(String(r.openedSec))}
                                 </span>
-                                <span className="text-muted-foreground">→</span>
-                                <span className={isStillOpen ? "text-green-600" : "text-muted-foreground"}>
-                                  {closedSec
-                                    ? formatUnixSecondsLabel(String(closedSec))
-                                    : "still open"}
+                                {isStillOpen ? (
+                                  <Badge className="bg-green-500/10 text-green-700 border-green-500/30 text-[10px]">
+                                    open
+                                  </Badge>
+                                ) : (
+                                  <span className="text-muted-foreground">
+                                    · {fmtDuration(((r.closedSec ?? r.openedSec) - r.openedSec) * 1000)}
+                                  </span>
+                                )}
+                                <span className="tabular-nums font-medium">
+                                  {Number.isFinite(r.inUsd) ? formatCurrency(r.inUsd, 2) : "—"} in
                                 </span>
-                                <span className="text-muted-foreground">·</span>
-                                <span className="font-medium">
-                                  {Number.isFinite(usdcIn) ? formatCurrency(usdcIn, 2) : "—"} in
+                                {!isStillOpen &&
+                                  (r.outUsd != null ? (
+                                    <>
+                                      <span className="tabular-nums text-muted-foreground">
+                                        → {formatCurrency(r.outUsd, 2)} out
+                                      </span>
+                                      {pnl != null ? (
+                                        <span
+                                          className={cn(
+                                            "tabular-nums font-medium",
+                                            pnl >= 0
+                                              ? "text-emerald-600 dark:text-emerald-400"
+                                              : "text-rose-600 dark:text-rose-400"
+                                          )}
+                                        >
+                                          {pnl >= 0 ? "+" : ""}
+                                          {formatCurrency(pnl, 2)}
+                                          {pct != null
+                                            ? ` (${pnl >= 0 ? "+" : ""}${pct.toFixed(1)}%)`
+                                            : ""}
+                                        </span>
+                                      ) : null}
+                                    </>
+                                  ) : (
+                                    <span className="text-muted-foreground/70">out —</span>
+                                  ))}
+                                <span className="ml-auto flex items-center gap-1.5 text-muted-foreground">
+                                  {r.openTxVersion ? txLink("open", r.openTxVersion) : null}
+                                  {r.closeTxVersion ? <>· {txLink("close", r.closeTxVersion)}</> : null}
+                                  {r.swapTxVersion ? <>· {txLink("swap", r.swapTxVersion)}</> : null}
                                 </span>
                               </div>
                             );
                           })}
+                        </div>
+                        <div className="text-[10px] text-muted-foreground/80">
+                          PnL is the spot/LP-leg round trip (USDC in at open → USDC out at close;
+                          LP cycles include fees claimed at close). Decibel margin, funding and
+                          perp PnL settle on the subaccount and are not included. C# rows are
+                          journal cycles (exact on-chain proceeds); # rows are V1 deals.
                         </div>
                       </div>
                     ) : null}
@@ -3770,19 +4600,699 @@ export function YieldAIPositions() {
         </div>
       )}
 
-      {isDeltaNeutralStrategy && !deltaNeutral?.isOpen && (
+      {isDeltaNeutralStrategy && (dnPositions.length > 0 || deltaNeutralCyclesFetching) && (
+        <div className="rounded-lg border bg-card p-3 sm:p-4 space-y-3">
+          <div className="flex items-center gap-2 font-medium">
+            Delta-neutral positions
+            {deltaNeutralCyclesFetching && (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+            )}
+          </div>
+          {dnPositions.length === 0 && deltaNeutralCyclesFetching && (
+            <div className="flex items-center gap-2 rounded-md border bg-muted/20 px-3 py-4 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading positions…
+            </div>
+          )}
+          {(() => {
+            const withVal = dnPositions.filter((p) => p.deployedUsd != null && p.totalValueUsd != null);
+            if (withVal.length === 0) return null;
+            const dep = withVal.reduce((s, p) => s + (p.deployedUsd ?? 0), 0);
+            const pnl = withVal.reduce((s, p) => {
+              if (p.pnlPriceUsd == null) return s;
+              return (
+                s +
+                p.pnlPriceUsd +
+                (p.perpFundingUsd ?? 0) +
+                (p.lpLeg?.claimableFeesUsd ?? 0) +
+                (p.lpLeg?.claimedFeesUsd ?? 0) +
+                (p.lpLeg?.claimableRewardsUsd ?? 0) +
+                (p.lpLeg?.claimedRewardsUsd ?? 0)
+              );
+            }, 0);
+            // Value = deposited + PnL (all-in economic value), so deposited -> value delta IS the PnL.
+            const val = dep + pnl;
+            const pct = dep > 0 ? (pnl / dep) * 100 : null;
+            return (
+              <div className="flex items-center gap-x-4 gap-y-1 flex-wrap rounded-md border bg-muted/20 px-3 py-2 text-sm">
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-xs text-muted-foreground">Deposited</span>
+                  <span className="font-medium">{formatCurrency(dep, 2)}</span>
+                </div>
+                <span className="text-muted-foreground/50">→</span>
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-xs text-muted-foreground">Value</span>
+                  <span className="font-semibold">{formatCurrency(val, 2)}</span>
+                </div>
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-xs text-muted-foreground">PnL</span>
+                  <span
+                    className={cn(
+                      "font-medium",
+                      pnl >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"
+                    )}
+                  >
+                    {pnl >= 0 ? "+" : ""}
+                    {formatCurrency(pnl, 2)}
+                    {pct != null && (
+                      <span className="text-xs">
+                        {" "}
+                        ({pct >= 0 ? "+" : ""}
+                        {formatNumber(pct, 2)}%)
+                      </span>
+                    )}
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
+          <div className="space-y-2">
+            {dnPositions.map((p) => {
+              const closing = p.source === "journal" && closingCycleId === p.cycleId;
+              const ageH =
+                p.openedAt > 0
+                  ? Math.max(0, Math.floor((Date.now() / 1000 - p.openedAt) / 3600))
+                  : null;
+              const ageLabel =
+                ageH == null ? null : ageH < 24 ? `${ageH}h` : `${Math.floor(ageH / 24)}d ${ageH % 24}h`;
+              const logoUrl =
+                p.asset === "BTC"
+                  ? configuredBtcSpotAsset.logoUrl
+                  : "https://assets.panora.exchange/tokens/aptos/APT.svg";
+              const totalUsd = p.totalValueUsd != null ? p.totalValueUsd : null;
+              // Derived USD metrics shared by the collapsed hero + expanded details.
+              // Short size: prefer the LIVE Decibel position — the journal-recorded size can lag
+              // by a lot when a rehedge order landed but its record_action tx failed, which made
+              // the hedge gauge scream "Rehedge needed" while the cron (live-based) correctly
+              // saw the drift in-band.
+              const effectiveShortHuman = p.liveShortSizeHuman ?? p.shortSizeHuman;
+              const depositedUsd = p.deployedUsd;
+              // Total economic PnL (price + funding + claimable/claimed fees + rewards) — matches the
+              // header PnL chip. Value = deposited + this, so the deposited -> value delta IS the PnL.
+              // (Principal mark-to-market alone excludes accrued fees/funding and looked contradictory:
+              // value below deposited while PnL was positive.)
+              const pnlTotalUsd =
+                p.pnlPriceUsd != null
+                  ? p.pnlPriceUsd +
+                    (p.perpFundingUsd ?? 0) +
+                    (p.lpLeg?.claimableFeesUsd ?? 0) +
+                    (p.lpLeg?.claimedFeesUsd ?? 0) +
+                    (p.lpLeg?.claimableRewardsUsd ?? 0) +
+                    (p.lpLeg?.claimedRewardsUsd ?? 0)
+                  : null;
+              const valueUsd =
+                depositedUsd != null && pnlTotalUsd != null ? depositedUsd + pnlTotalUsd : p.totalValueUsd;
+              // Gross position APR: LP fees/farm on LP value + funding on short notional, over deployed.
+              const lpValForApr = p.spotValueUsd ?? p.lpLeg?.valueUsd ?? 0;
+              const marginForApr = p.perpMarginUsd ?? 0;
+              const totalCapForApr = lpValForApr + marginForApr;
+              const shortNotionalForApr = (effectiveShortHuman ?? 0) * (p.markPx ?? 0);
+              const grossAprPct =
+                totalCapForApr > 0
+                  ? ((lpValForApr * ((p.lpLeg?.rangeAprPct ?? 0) / 100) +
+                      shortNotionalForApr * ((p.fundingAprPct ?? 0) / 100)) /
+                      totalCapForApr) *
+                    100
+                  : null;
+              // Realized APR is meaningful only after the young-window noise settles (~1d).
+              const realizedAprShown =
+                p.realizedAprPct != null && (p.realizedAgeDays ?? 0) >= 1 ? p.realizedAprPct : null;
+              const marketId = normalizeAddress(p.marketAddr);
+              const isHighlighted = highlightedDnMarket === marketId;
+              return (
+                <Collapsible
+                  key={p.key}
+                  id={`dn-position-${marketId}`}
+                  className={cn(
+                    "rounded-md border bg-muted/20 transition-shadow",
+                    isHighlighted && "ring-2 ring-primary ring-offset-1"
+                  )}
+                >
+                  <div className="flex items-center justify-between gap-3 flex-wrap px-3 py-2.5">
+                    {/* Collapsed: icon + market + total value (+ PnL, funding). Details on expand. */}
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <Image
+                        src={logoUrl}
+                        alt={p.asset}
+                        width={28}
+                        height={28}
+                        className="h-7 w-7 rounded-full object-contain shrink-0"
+                        unoptimized
+                      />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-medium">{p.marketName}</span>
+                          <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                            Open
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">
+                            {p.source === "journal" ? `#${p.cycleId}` : "legacy"}
+                          </span>
+                          {p.lpLeg && (
+                            <>
+                              <span
+                                className={cn(
+                                  "inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+                                  p.lpLeg.inRange
+                                    ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                                    : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                                )}
+                              >
+                                LP {p.lpLeg.inRange ? "in range" : "out of range"}
+                              </span>
+                              <span className="text-[10px] text-muted-foreground">
+                                ±
+                                {(
+                                  (Math.pow(1.0001, (p.lpLeg.tickUpper - p.lpLeg.tickLower) / 2) - 1) * 100 || 0
+                                ).toFixed(0)}
+                                % · {formatNumber(p.lpLeg.aptHuman, p.lpLeg.aptHuman >= 1 ? 2 : 5)} {p.asset} +{" "}
+                                {p.lpLeg.usdcHuman.toFixed(2)} USDC
+                              </span>
+                              {p.lpLeg.rangeAprPct != null && (
+                                <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                                  ~{formatNumber(p.lpLeg.rangeAprPct, 0)}% LP APR
+                                </span>
+                              )}
+                            </>
+                          )}
+                        </div>
+                        <div className="mt-0.5 flex items-baseline gap-x-2 gap-y-0.5 flex-wrap text-sm">
+                          {depositedUsd != null && (
+                            <span className="text-xs text-muted-foreground">
+                              in {formatCurrency(depositedUsd, 2)}{" "}
+                              <span className="text-muted-foreground/50">→</span>
+                            </span>
+                          )}
+                          <span className="font-semibold">
+                            {valueUsd != null
+                              ? formatCurrency(valueUsd, 2)
+                              : totalUsd != null
+                                ? formatCurrency(totalUsd, 2)
+                                : Number.isFinite(p.notionalUsd)
+                                  ? formatCurrency(p.notionalUsd, 2)
+                                  : "—"}
+                          </span>
+                          {p.pnlPriceUsd != null &&
+                            (() => {
+                              // PnL = price (LP value Δ + perp uPnL) + funding + LP fees + rewards,
+                              // where fees/rewards = claimable (pending) + claimed (already collected),
+                              // so PnL stays stable when fees are claimed (unclaimed → claimed).
+                              const price = p.pnlPriceUsd ?? 0;
+                              const funding = p.perpFundingUsd ?? 0;
+                              const fees = (p.lpLeg?.claimableFeesUsd ?? 0) + (p.lpLeg?.claimedFeesUsd ?? 0);
+                              const rewards =
+                                (p.lpLeg?.claimableRewardsUsd ?? 0) + (p.lpLeg?.claimedRewardsUsd ?? 0);
+                              const total = price + funding + fees + rewards;
+                              return (
+                                <TooltipProvider delayDuration={150}>
+                                  <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span
+                                      className={cn(
+                                        "text-xs cursor-help underline decoration-dotted decoration-muted-foreground/40 underline-offset-2",
+                                        total >= 0
+                                          ? "text-emerald-600 dark:text-emerald-400"
+                                          : "text-rose-600 dark:text-rose-400"
+                                      )}
+                                    >
+                                      {total >= 0 ? "+" : ""}
+                                      {formatCurrency(total, 2)} PnL
+                                    </span>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top" className="max-w-[260px] text-xs">
+                                    <div className="mb-1 font-medium">Net PnL (mark-to-market)</div>
+                                    <div className="space-y-0.5">
+                                      <div className="flex justify-between gap-4">
+                                        <span className="text-muted-foreground">Price (LP value Δ + perp)</span>
+                                        <span>{price >= 0 ? "+" : ""}{formatCurrency(price, 2)}</span>
+                                      </div>
+                                      <div className="flex justify-between gap-4">
+                                        <span className="text-muted-foreground">Funding accrued</span>
+                                        <span>{funding >= 0 ? "+" : ""}{formatCurrency(funding, 2)}</span>
+                                      </div>
+                                      {p.lpLeg && (
+                                        <div className="flex justify-between gap-4">
+                                          <span className="text-muted-foreground">
+                                            LP fees{(p.lpLeg.claimedFeesUsd ?? 0) > 0 ? " (earned)" : " (claimable)"}
+                                          </span>
+                                          <span>+{formatCurrency(fees, 2)}</span>
+                                        </div>
+                                      )}
+                                      {p.lpLeg && rewards > 0 && (
+                                        <div className="flex justify-between gap-4">
+                                          <span className="text-muted-foreground">
+                                            Rewards{(p.lpLeg.claimedRewardsUsd ?? 0) > 0 ? " (earned)" : " (claimable)"}
+                                          </span>
+                                          <span>+{formatCurrency(rewards, 2)}</span>
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="mt-1 text-muted-foreground/70">
+                                      Fees/rewards = claimable + claimed (mark-to-market); excludes gas &amp; rehedge
+                                      costs.
+                                    </div>
+                                  </TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              );
+                            })()}
+                          {(realizedAprShown != null || grossAprPct != null) && (
+                            <span className="text-xs whitespace-nowrap">
+                              {realizedAprShown != null ? (
+                                <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                                  ~{formatNumber(realizedAprShown, 0)}% APR
+                                </span>
+                              ) : (
+                                <span className="text-muted-foreground">
+                                  ~{formatNumber(grossAprPct as number, 0)}% APR{" "}
+                                  <span className="text-muted-foreground/60">gross</span>
+                                </span>
+                              )}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <CollapsibleTrigger className="group inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+                        <ChevronRight className="h-3.5 w-3.5 transition-transform group-data-[state=open]:rotate-90" />
+                        Details
+                      </CollapsibleTrigger>
+                      {/* Top-up modal. Spot-DN adds via the spot path; LP-DN adds via the LP
+                          top-up path (private beta — hidden for non-beta wallets, server-enforced too). */}
+                      {p.source === "journal" && p.cycleId && (!p.lpLeg || isLpDnBetaUser) && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            setAddSizeUsd("");
+                            setAddTarget({ cycleId: p.cycleId!, asset: p.asset, isLp: Boolean(p.lpLeg) });
+                          }}
+                        >
+                          Add
+                        </Button>
+                      )}
+                      {p.source === "journal" && p.lpLeg && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={rehedgingCycleId === p.cycleId || !selectedDecibelSubaccount}
+                          onClick={() => handleRehedgeCycle({ cycleId: p.cycleId!, asset: p.asset })}
+                        >
+                          {rehedgingCycleId === p.cycleId ? "Rehedging…" : "Rehedge"}
+                        </Button>
+                      )}
+                      {p.source === "journal" ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={closing || !selectedDecibelSubaccount}
+                          className="border-destructive/40 text-destructive hover:bg-destructive/5"
+                          onClick={() => setCloseCyclePromptId(p.cycleId!)}
+                        >
+                          {closing ? "Closing…" : "Close"}
+                        </Button>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={closeDeltaNeutralSubmitting}
+                          className="border-destructive/40 text-destructive hover:bg-destructive/5"
+                          onClick={() => setCloseDeltaNeutralOpen(true)}
+                        >
+                          Close
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                  <CollapsibleContent className="px-3 pb-3 space-y-3">
+                    {/* Hedge balance (LP-DN): net APT delta of LIVE LP vs LIVE short + a balance
+                        gauge. Uses effectiveShortHuman (live first) — the journal-recorded size
+                        can lag a failed record_action and made this gauge falsely scream
+                        "Rehedge needed" while the (live-based) cron correctly saw in-band. */}
+                    {p.lpLeg && effectiveShortHuman != null && p.lpLeg.aptHuman > 0
+                      ? (() => {
+                          const lpApt = p.lpLeg.aptHuman;
+                          const netApt = lpApt - (effectiveShortHuman ?? 0); // + under-hedged, − over-hedged
+                          const netUsd = netApt * (p.markPx ?? 0);
+                          const band = 0.15; // rehedge band (kept at 15%)
+                          const frac = netApt / lpApt;
+                          const absFrac = Math.abs(frac);
+                          // 3-zone: balanced < band/2, drifting band/2..band, rehedge > band.
+                          const zone = absFrac > band ? "rehedge" : absFrac > band / 2 ? "drifting" : "balanced";
+                          const zoneLabel =
+                            zone === "balanced" ? "Balanced" : zone === "drifting" ? "Drifting" : "Rehedge needed";
+                          const zoneText =
+                            zone === "balanced"
+                              ? "text-emerald-600 dark:text-emerald-400"
+                              : zone === "drifting"
+                                ? "text-amber-600 dark:text-amber-400"
+                                : "text-rose-600 dark:text-rose-400";
+                          const zoneMarker =
+                            zone === "balanced"
+                              ? "bg-emerald-500"
+                              : zone === "drifting"
+                                ? "bg-amber-500"
+                                : "bg-rose-500";
+                          const pos = 50 + Math.max(-50, Math.min(50, (frac / (band * 2)) * 50));
+                          // Blended position APR on total deployed capital (LP + margin): LP fees/farm
+                          // on the LP value + funding on the short notional. GROSS — excludes
+                          // rehedge/gamma/gas, assumes in-range. Diluted below the LP APR by the margin.
+                          const positionAprPct = grossAprPct;
+                          return (
+                            <div className="space-y-1 pt-1 border-t border-border/40">
+                              {(positionAprPct != null || realizedAprShown != null) && (
+                                <div className="flex items-center justify-between text-xs">
+                                  <span className="text-muted-foreground">Position APR</span>
+                                  <span>
+                                    {realizedAprShown != null && (
+                                      <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+                                        {formatNumber(realizedAprShown, 1)}% realized
+                                      </span>
+                                    )}
+                                    {realizedAprShown != null && positionAprPct != null && (
+                                      <span className="text-muted-foreground/50"> · </span>
+                                    )}
+                                    {positionAprPct != null && (
+                                      <span className="text-muted-foreground">
+                                        {formatNumber(positionAprPct, 1)}% gross
+                                      </span>
+                                    )}
+                                  </span>
+                                </div>
+                              )}
+                              <div className="flex items-center justify-between text-xs">
+                                <span className="text-muted-foreground">Hedge balance</span>
+                                <span className={cn("font-medium", zoneText)}>
+                                  {zoneLabel} · Δ {netApt >= 0 ? "+" : ""}
+                                  {formatNumber(netApt, 2)} {p.asset} ({formatCurrency(netUsd, 2)} ·{" "}
+                                  {frac >= 0 ? "+" : ""}
+                                  {formatNumber(frac * 100, 0)}%)
+                                </span>
+                              </div>
+                              <div className="relative h-2 overflow-hidden rounded-full bg-muted/60">
+                                {/* amber drifting band (±15%) */}
+                                <div className="absolute inset-y-0 bg-amber-500/15" style={{ left: "25%", right: "25%" }} />
+                                {/* green balanced band (±7.5%) */}
+                                <div className="absolute inset-y-0 bg-emerald-500/25" style={{ left: "37.5%", right: "37.5%" }} />
+                                <div className="absolute inset-y-0 w-px bg-foreground/40" style={{ left: "50%" }} />
+                                <div
+                                  className={cn(
+                                    "absolute top-1/2 h-3.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-sm",
+                                    zoneMarker
+                                  )}
+                                  style={{ left: `${pos}%` }}
+                                />
+                              </div>
+                              <div className="flex justify-between text-[10px] text-muted-foreground/70">
+                                <span>over-hedged</span>
+                                <span>balanced</span>
+                                <span>under-hedged</span>
+                              </div>
+                            </div>
+                          );
+                        })()
+                      : null}
+                    {/* Composition in USD: where the deposited capital sits + the short hedge. */}
+                    {p.lpLeg && depositedUsd != null && depositedUsd > 0 && (
+                      <div className="space-y-1 pt-1 border-t border-border/40">
+                        <div className="text-[10px] text-muted-foreground">
+                          Where the {formatCurrency(depositedUsd, 2)} sits
+                        </div>
+                        {(() => {
+                          const lp = p.spotValueUsd ?? p.lpLeg.valueUsd ?? 0;
+                          const margin = p.perpMarginUsd ?? 0;
+                          const tot = lp + margin || 1;
+                          return (
+                            <div className="flex h-5 overflow-hidden rounded text-[10px] font-medium">
+                              <div
+                                className="flex items-center justify-center bg-sky-500/15 text-sky-700 dark:text-sky-300"
+                                style={{ width: `${(lp / tot) * 100}%` }}
+                              >
+                                LP {formatCurrency(lp, 2)}
+                              </div>
+                              <div
+                                className="flex items-center justify-center border-l-2 border-background bg-violet-500/15 text-violet-700 dark:text-violet-300"
+                                style={{ width: `${(margin / tot) * 100}%` }}
+                              >
+                                Margin {formatCurrency(margin, 2)}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                        <div className="text-[11px] text-muted-foreground">
+                          Short <span className="text-foreground">{formatCurrency(shortNotionalForApr, 2)}</span>{" "}
+                          hedges the {p.asset} in the LP · net Δ{" "}
+                          <span className="text-foreground">
+                            {formatCurrency((p.lpLeg.aptHuman - (effectiveShortHuman ?? 0)) * (p.markPx ?? 0), 2)}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1 text-xs pt-1 border-t border-border/40">
+                      {/* LP / spot leg */}
+                      <div className="text-muted-foreground">
+                        {p.lpLeg ? "LP" : "Spot"}:{" "}
+                        <span className="text-foreground">
+                          {/* LP cycles: show the LIVE LP APT (drifts with price), not base_exposure
+                              at open — must match the header composition + the Hedge balance Δ. */}
+                          {p.lpLeg
+                            ? formatNumber(p.lpLeg.aptHuman, 4)
+                            : p.spotHuman != null
+                              ? formatNumber(p.spotHuman, 4)
+                              : "—"}{" "}
+                          {p.asset}
+                        </span>
+                      </div>
+                      {p.spotValueUsd != null && (
+                        <div className="text-muted-foreground">
+                          {p.lpLeg ? "LP value" : "Spot value"}:{" "}
+                          <span className="text-foreground">{formatCurrency(p.spotValueUsd, 2)}</span>
+                        </div>
+                      )}
+                      {p.lpLeg?.rangeAprPct != null && (
+                        <div className="text-muted-foreground">
+                          LP APR:{" "}
+                          <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                            {formatNumber(p.lpLeg.rangeAprPct, 1)}%
+                          </span>
+                          {p.lpLeg.feeAprPct != null ? (
+                            <span className="text-muted-foreground/70"> (fee {formatNumber(p.lpLeg.feeAprPct, 1)}%)</span>
+                          ) : null}
+                        </div>
+                      )}
+                      {p.lpLeg?.claimableFeesUsd != null && (
+                        <div className="text-muted-foreground">
+                          Claimable:{" "}
+                          <span className="text-foreground">{formatCurrency(p.lpLeg.claimableFeesUsd, 2)} fees</span>
+                          {p.lpLeg.rewardCount ? (
+                            <span className="text-muted-foreground/70">
+                              {" "}
+                              + {p.lpLeg.rewardCount} reward{p.lpLeg.rewardCount > 1 ? "s" : ""}
+                            </span>
+                          ) : null}
+                        </div>
+                      )}
+                      {/* Short / perp leg (live size, falls back to the journal record) */}
+                      <div className="text-muted-foreground">
+                        Short:{" "}
+                        <span className="text-foreground">
+                          {effectiveShortHuman != null ? formatNumber(effectiveShortHuman, 4) : "—"} {p.asset}
+                        </span>
+                        <span
+                          title="This Decibel short also earns Decibel AMPs (points) as a bonus."
+                          className="ml-1.5 inline-flex items-center gap-0.5 rounded-full bg-violet-500/10 px-1.5 py-0 text-[9px] font-medium text-violet-600 dark:text-violet-400 align-middle"
+                        >
+                          ⚡ AMPs
+                        </span>
+                      </div>
+                      {p.perpEntryPx != null && (
+                        <div className="text-muted-foreground">
+                          Entry: <span className="text-foreground">{formatNumber(p.perpEntryPx, 2)}</span>
+                        </div>
+                      )}
+                      {p.markPx != null && (
+                        <div className="text-muted-foreground">
+                          Mark: <span className="text-foreground">{formatNumber(p.markPx, 2)}</span>
+                        </div>
+                      )}
+                      {p.perpMarginUsd != null && (
+                        <div className="text-muted-foreground">
+                          Perp margin: <span className="text-foreground">{formatCurrency(p.perpMarginUsd, 2)}</span>
+                        </div>
+                      )}
+                      {p.fundingAprPct != null && (
+                        <div className="text-muted-foreground">
+                          Funding APR:{" "}
+                          <span
+                            className={cn(
+                              "font-medium",
+                              p.fundingAprPct >= 0
+                                ? "text-emerald-600 dark:text-emerald-400"
+                                : "text-rose-600 dark:text-rose-400"
+                            )}
+                          >
+                            {p.fundingAprPct >= 0 ? "+" : ""}
+                            {formatNumber(p.fundingAprPct, 1)}%
+                          </span>
+                        </div>
+                      )}
+                      {p.perpUPnlUsd != null && (
+                        <div className="text-muted-foreground">
+                          Perp uPnL: <span className="text-foreground">{formatCurrency(p.perpUPnlUsd, 2)}</span>
+                        </div>
+                      )}
+                      {/* Totals */}
+                      <div className="text-muted-foreground">
+                        Deployed:{" "}
+                        <span className="text-foreground">{formatCurrency(p.deployedUsd ?? p.notionalUsd, 2)}</span>
+                        {p.lpLeg && p.perpMarginUsd != null && p.deployedUsd != null ? (
+                          <span className="text-muted-foreground/70">
+                            {" "}
+                            (LP {formatCurrency(p.deployedUsd - p.perpMarginUsd, 2)} + margin{" "}
+                            {formatCurrency(p.perpMarginUsd, 2)})
+                          </span>
+                        ) : null}
+                      </div>
+                      {p.estCloseUsd != null && (
+                        <div className="text-muted-foreground">
+                          If closed now: <span className="text-foreground">≈ {formatCurrency(p.estCloseUsd, 2)}</span>
+                        </div>
+                      )}
+                      {ageLabel && (
+                        <div className="text-muted-foreground">
+                          Age: <span className="text-foreground">{ageLabel}</span>
+                        </div>
+                      )}
+                    </div>
+                    {p.marketAddr ? (
+                      <DeltaNeutralPriceFundingChart
+                        marketAddr={p.marketAddr}
+                        marketName={p.marketName}
+                        interval="1h"
+                        className="h-[300px]"
+                        rangeLowerPrice={
+                          p.lpLeg && p.lpLeg.tickLower !== p.lpLeg.tickUpper
+                            ? Math.pow(1.0001, p.lpLeg.tickLower) * 100
+                            : undefined
+                        }
+                        rangeUpperPrice={
+                          p.lpLeg && p.lpLeg.tickLower !== p.lpLeg.tickUpper
+                            ? Math.pow(1.0001, p.lpLeg.tickUpper) * 100
+                            : undefined
+                        }
+                        entryPrices={p.lpLeg && p.perpEntryPx != null ? [p.perpEntryPx] : []}
+                      />
+                    ) : null}
+                  </CollapsibleContent>
+                </Collapsible>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {isDeltaNeutralStrategy && (
         <>
 
           <div className="rounded-lg border bg-card p-3 sm:p-4 space-y-3">
             <div>
               <div className="font-medium">Create delta-neutral position</div>
               <div className="text-sm text-muted-foreground">
-                Open a Decibel short and hedge spot inside your safe (executor-signed).
+                {canCreateAnyDn
+                  ? "Open a Decibel short and hedge spot inside your safe (executor-signed)."
+                  : "Both markets already run a position — top one up with the Add button on its card, or close one first."}
               </div>
-              <div className="text-xs text-muted-foreground mt-1">
-                One delta-neutral position per safe — close the current one before opening another.
-              </div>
+              {canCreateAnyDn ? (
+                <div className="text-xs text-muted-foreground mt-1">
+                  Multiple positions allowed — one per market (e.g. BTC and APT at the same time).
+                </div>
+              ) : null}
             </div>
+
+            {canCreateAnyDn ? (<>
+            {/* Hedge variant: hold spot, or a Hyperion LP long leg (APT/USDC or WBTC/USDC). */}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+              <div className="inline-flex rounded-full border bg-muted/30 p-0.5 text-xs font-medium">
+                <button
+                  type="button"
+                  onClick={() => setDnHedgeMode("spot")}
+                  className={cn(
+                    "rounded-full px-3 py-1 transition-colors",
+                    dnHedgeMode === "spot" ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  Spot hedge
+                </button>
+                {/* LP-hedge DN is in private beta — hidden for wallets outside the allowlist.
+                    Server-side enforces this too (fail-closed); this is UX only. */}
+                {isLpDnBetaUser && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDnHedgeMode("lp");
+                        setLpPoolKey("apt_usdc");
+                        setExecutorAsset("APT");
+                      }}
+                      className={cn(
+                        "rounded-full px-3 py-1 transition-colors",
+                        dnHedgeMode === "lp" && lpPoolKey === "apt_usdc"
+                          ? "bg-background shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      LP APT/USDC
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDnHedgeMode("lp");
+                        setLpPoolKey("wbtc_usdc");
+                        setExecutorAsset("BTC");
+                      }}
+                      className={cn(
+                        "rounded-full px-3 py-1 transition-colors",
+                        dnHedgeMode === "lp" && lpPoolKey === "wbtc_usdc"
+                          ? "bg-background shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      LP WBTC/USDC
+                    </button>
+                  </>
+                )}
+              </div>
+              {dnHedgeMode === "lp" ? (
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="text-muted-foreground">Range ±</span>
+                  <Input
+                    type="number"
+                    min="1"
+                    max="95"
+                    step="1"
+                    value={lpRangePct}
+                    onChange={(e) => setLpRangePct(e.target.value)}
+                    disabled={executorSubmitting}
+                    className="h-8 w-16 text-center tabular-nums"
+                  />
+                  <span className="text-muted-foreground">%</span>
+                </div>
+              ) : null}
+            </div>
+            {dnHedgeMode === "lp" ? (
+              <div className="text-xs text-muted-foreground">
+                Opens a Hyperion {lpPoolKey === "wbtc_usdc" ? "WBTC/USDC" : "APT/USDC"} LP from your safe
+                USDC and shorts the {lpPoolKey === "wbtc_usdc" ? "BTC" : "APT"} leg on Decibel (1x). Earns
+                LP fees; rehedge as the LP&apos;s base leg drifts. Margin (~
+                {formatNumber(lpHedgeWorstCaseMarginMultiple(Number(lpRangePct)) / 2, 2)}× size at ±
+                {lpRangePct}%) must be pre-funded in the Decibel subaccount — see the exact amount below.
+              </div>
+            ) : null}
 
             {/* Decision-time chart: candles + funding APR for the selected
                 market. Collapsed by default to keep the form compact —
@@ -3843,31 +5353,59 @@ export function YieldAIPositions() {
                 requiredSpotHedgeUsdc != null &&
                 !isSpotHedgeFundingAcceptableUsd(safeUsdcBalance, requiredSpotHedgeUsdc);
               const spotPreviewBlocking = deltaNeutralOpenPreview?.severity === "block";
-              const openDisabled =
+              // Only one open cycle per market. Top-ups live on the position card's Add button —
+              // this form only ever OPENS a new position, so a busy asset just blocks the button.
+              const assetCycleOpen = busyAssets.has(executorAsset);
+              const baseDisabled =
                 executorSubmitting ||
                 subaccountReadinessLoading ||
                 !selectedDecibelSubaccount ||
                 !selectedDecibelSubaccountReady ||
                 !safeAddr ||
-                subaccountHasOpenOnSelectedMarket ||
                 safeUsdcEmpty ||
+                builderFeeBlocking;
+              const openDisabled =
+                baseDisabled ||
+                assetCycleOpen ||
                 spotHedgeInsufficient ||
-                builderFeeBlocking ||
                 spotPreviewBlocking;
+              const lpMode = dnHedgeMode === "lp";
+              const lpRangeNum = Number(lpRangePct);
+              const lpRangeValid = Number.isFinite(lpRangeNum) && lpRangeNum >= 1 && lpRangeNum <= 95;
+              // LP mode skips the spot-hedge funding/preview gates (they don't apply); it needs the
+              // full size in safe USDC (the zap) and a valid range. The pool is set by the toggle.
+              const lpDisabled = baseDisabled || !lpRangeValid || safeUsdcBalance + 1e-9 < sizeNum;
+              // One DN per asset: opening a new DN (spot or LP) on an asset that already has any DN
+              // open would stack shorts on the shared subaccount. Exempt "Add" (grows the existing one).
+              const selectedDnAsset: "APT" | "BTC" = lpMode
+                ? lpPoolKey === "wbtc_usdc"
+                  ? "BTC"
+                  : "APT"
+                : executorAsset;
+              const sameAssetLp = lpDnAssets.has(selectedDnAsset);
+              const sameAssetSpot = spotDnAssets.has(selectedDnAsset);
+              const dnCollision = sameAssetLp || sameAssetSpot;
+              const actionDisabled = (lpMode ? lpDisabled : openDisabled) || dnCollision;
               const openButton = (
                 <Button
                   type="button"
                   variant="default"
                   className="w-full lg:w-auto lg:h-[68px] lg:px-6"
-                  onClick={handleExecutorOpenDeltaNeutral}
-                  disabled={openDisabled}
+                  onClick={() => handleExecutorOpenDeltaNeutral()}
+                  disabled={actionDisabled}
                 >
                   {executorSubmitting
                     ? "Submitting…"
-                    : `Open ${executorAsset} delta-neutral`}
+                    : lpMode
+                      ? `Open ${lpPoolKey === "wbtc_usdc" ? "WBTC" : "APT"}/USDC LP-DN`
+                      : `Open ${executorAsset} delta-neutral`}
                 </Button>
               );
-              const openButtonTooltip = builderFeeBlocking
+              const openButtonTooltip = dnCollision
+                ? legacyBusyAssets.has(selectedDnAsset)
+                  ? `A legacy delta-neutral position on ${selectedDnAsset} is open. Close it before opening a new one.`
+                  : `A ${sameAssetLp ? "LP" : "spot"} delta-neutral on ${selectedDnAsset} is already open — top it up with "Add" on its position card, or close it first.`
+                : builderFeeBlocking
                 ? "Approve the builder fee for this subaccount in the setup card before opening positions."
                 : safeUsdcEmpty
                   ? "Deposit USDC to the AI agent safe before opening a delta-neutral position."
@@ -3919,8 +5457,12 @@ export function YieldAIPositions() {
                           </div>
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="BTC">BTC</SelectItem>
-                          <SelectItem value="APT">APT</SelectItem>
+                          <SelectItem value="BTC" disabled={busyAssets.has("BTC")}>
+                            BTC{busyAssets.has("BTC") ? " (open)" : ""}
+                          </SelectItem>
+                          <SelectItem value="APT" disabled={busyAssets.has("APT")}>
+                            APT{busyAssets.has("APT") ? " (open)" : ""}
+                          </SelectItem>
                         </SelectContent>
                       </Select>
 
@@ -3942,7 +5484,9 @@ export function YieldAIPositions() {
                           className={cn(
                             // Use flex sizing to prevent the number field from collapsing
                             // between the asset selector and the right-side controls on narrow widths.
-                            "h-auto min-w-0 flex-1 w-0 overflow-x-auto rounded-none border-0 bg-transparent px-0 py-0 text-left text-2xl sm:text-3xl font-medium leading-none tabular-nums shadow-none dark:bg-transparent",
+                            // Right-aligned so the amount visually pairs with the "USDC" label next to
+                            // it, not with the asset selector on the left (the size is in USDC, not BTC/APT).
+                            "h-auto min-w-0 flex-1 w-0 overflow-x-auto rounded-none border-0 bg-transparent px-0 py-0 text-right text-2xl sm:text-3xl font-medium leading-none tabular-nums shadow-none dark:bg-transparent",
                             "focus-visible:border-transparent focus-visible:ring-0 focus-visible:ring-offset-0",
                             "aria-invalid:border-transparent aria-invalid:ring-0 dark:aria-invalid:ring-0"
                           )}
@@ -4003,6 +5547,50 @@ export function YieldAIPositions() {
               const sizeNum = Number(executorSizeUsd);
               if (!isDeltaNeutralStrategy || deltaNeutral?.isOpen || !Number.isFinite(sizeNum) || sizeNum <= 0) {
                 return null;
+              }
+              // LP-hedge preview replaces the spot execution preview in LP mode.
+              if (dnHedgeMode === "lp") {
+                const half = sizeNum / 2;
+                const lpPool = YIELD_AI_HYPERION_POOLS[lpPoolKey];
+                const assetSym = lpPool.symbolA;
+                const aptPrice = lpPoolApr
+                  ? Math.pow(1.0001, lpPoolApr.currentTick) * 10 ** (lpPool.decimalsA - lpPool.decimalsB)
+                  : null;
+                const aptLeg = aptPrice && aptPrice > 0 ? half / aptPrice : null;
+                // Worst-case pre-fund: margin needed if price falls all the way to the range's
+                // lower bound (see lpHedgeWorstCaseMarginMultiple) — not a flat fraction of size.
+                const marginMultiple = lpHedgeWorstCaseMarginMultiple(Number(lpRangePct));
+                const reserve = half * marginMultiple;
+                return (
+                  <div className="rounded-md border border-emerald-500/25 bg-emerald-500/5 p-2 text-xs space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-medium text-foreground">LP-hedge preview</span>
+                      {lpRangeApr ? (
+                        <span className="font-semibold tabular-nums text-emerald-700 dark:text-emerald-400">
+                          ≈ {formatNumber(lpRangeApr.total, 1)}% APR
+                          <span className="ml-1 font-normal text-muted-foreground">
+                            (fee {formatNumber(lpRangeApr.fee * lpRangeApr.ratio, 1)}% + farm{" "}
+                            {formatNumber(lpRangeApr.farm, 1)}% · ±{lpRangePct}%)
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">estimating APR…</span>
+                      )}
+                    </div>
+                    <div className="text-muted-foreground">
+                      LP ≈ {formatCurrency(half, 2)} {assetSym} + {formatCurrency(half, 2)} USDC (~50/50). Short ≈{" "}
+                      {aptLeg != null
+                        ? `${formatNumber(aptLeg, aptLeg >= 1 ? 2 : 5)} ${assetSym}`
+                        : formatCurrency(half, 2)}{" "}
+                      ({formatCurrency(half, 2)}) on Decibel, 1×.
+                    </div>
+                    <div className="text-muted-foreground">
+                      Margin ≈ {formatCurrency(half, 2)} now; pre-fund ~{formatCurrency(reserve, 2)} (
+                      {formatNumber(marginMultiple, 2)}×) to cover the worst case if price falls to the
+                      bottom of the ±{lpRangePct}% range. Earns LP fees; funding applies to the short.
+                    </div>
+                  </div>
+                );
               }
               if (deltaNeutralOpenPreviewLoading && !deltaNeutralOpenPreview) {
                 return (
@@ -4134,15 +5722,6 @@ export function YieldAIPositions() {
                 </div>
               );
             })()}
-            {subaccountHasOpenOnSelectedMarket ? (
-              <div className="rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive">
-                Subaccount already has an open position on{" "}
-                <span className="font-medium">
-                  {executorMarketName ?? `${executorAsset}/USD`}
-                </span>
-                . Close it on Decibel before opening a delta-neutral on the same market.
-              </div>
-            ) : null}
             {selectedDecibelSubaccount &&
             !selectedSubaccountBuilderApproval.isLoading &&
             selectedSubaccountBuilderApproval.requiredBps != null &&
@@ -4155,6 +5734,7 @@ export function YieldAIPositions() {
             {(() => {
               const sizeNum = Number(executorSizeUsd);
               if (!Number.isFinite(sizeNum) || sizeNum <= 0) return null;
+              if (dnHedgeMode === "lp") return null; // LP preview shows its own split/notional
               const totalNotional = sizeNum * 2;
               const overMax = Number.isFinite(maxSizeUsd) && maxSizeUsd > 0 && sizeNum - maxSizeUsd > 1e-9;
               return (
@@ -4176,11 +5756,13 @@ export function YieldAIPositions() {
                 </div>
               );
             })()}
+            </>) : null}
             {/* Flex-wrap (not a rigid 3-col grid): the middle pane is squeezed
                 by the sidebar + Tools rail on mid widths, where a fixed
                 lg:grid-cols-3 made the "Deposit USDC to Decibel" button
                 overflow its cell. Items stack on narrow, wrap gracefully on
-                wide. */}
+                wide. The subaccount/margin row stays visible even when the create
+                form is collapsed — Decibel margin top-ups matter for open positions too. */}
             <div className="flex flex-col gap-2 xl:flex-row xl:flex-wrap xl:items-center">
               <Select
                 value={selectedDecibelSubaccount}
@@ -4500,6 +6082,8 @@ export function YieldAIPositions() {
             )}
             {tokens
               .filter((token) => {
+                // Hide spot legs of open DN positions — shown inside the position, not the wallet.
+                if (isDnSpotLegToken(token.address)) return false;
                 const value = token.value ? parseFloat(token.value) : 0;
                 return Number.isFinite(value) && value >= MIN_VISIBLE_USD;
               })
@@ -4527,6 +6111,7 @@ export function YieldAIPositions() {
               normalizeAddress(token.address) === normalizeAddress(XBTC_FA_METADATA_MAINNET);
             const showXbtcConvert =
               isXbtcToken && !xbtcIsActiveHedge && safeXbtcBaseUnits > STALE_BTC_DUST_BASE_UNITS;
+            const isBtcWithdrawToken = isWbtcToken || isXbtcToken;
             // ELON / thAPT: not swappable yet — offer plain withdraw to wallet.
             const isWithdrawOnlyToken =
               token.symbol === "ELON" ||
@@ -4622,7 +6207,7 @@ export function YieldAIPositions() {
                       </Button>
                     </div>
                   )}
-                  {(isUsdc || isWithdrawOnlyToken) && (
+                  {(isUsdc || isBtcWithdrawToken || isWithdrawOnlyToken) && (
                     <div className="flex flex-wrap gap-2 mt-2 justify-end">
                       {/* Per-token Deposit + History removed — both duplicate the
                           header "Deposit to safe" + History icon-button. Withdraw
@@ -4713,24 +6298,281 @@ export function YieldAIPositions() {
         )}
       </div>
 
+      {/* Top-up ("Add") modal, opened from a journal position card. Funded from SAFE USDC —
+          the Decibel balance only backs the short's margin, so maxSizeUsd (safe budget) caps it. */}
+      {(() => {
+        const addSizeNum = Number(addSizeUsd);
+        const addMax = Number.isFinite(maxSizeUsd) ? Math.max(0, Math.floor(maxSizeUsd * 100) / 100) : 0;
+        const addOverMax = Number.isFinite(addSizeNum) && addSizeNum - addMax > 1e-9;
+        const addTooSmall = !Number.isFinite(addSizeNum) || addSizeNum < 10;
+        const addSubmitDisabled =
+          executorSubmitting ||
+          !selectedDecibelSubaccount ||
+          !selectedDecibelSubaccountReady ||
+          addTooSmall ||
+          addOverMax;
+        return (
+          <Dialog
+            open={addTarget != null}
+            onOpenChange={(o) => {
+              if (!o && !executorSubmitting) {
+                setAddTarget(null);
+                setAddSizeUsd("");
+              }
+            }}
+          >
+            <DialogContent className="sm:max-w-[440px]">
+              <DialogHeader>
+                <DialogTitle>
+                  Add to {addTarget?.asset} {addTarget?.isLp ? "LP-DN" : "delta-neutral"} position
+                </DialogTitle>
+                <DialogDescription>
+                  {addTarget?.isLp
+                    ? "Adds USDC into the cycle's own LP range and grows the Decibel short to match."
+                    : "Buys spot with safe USDC and grows the Decibel short by the same notional."}
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min="0"
+                    step="any"
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    value={addSizeUsd}
+                    onChange={(e) => setAddSizeUsd(e.target.value)}
+                    disabled={executorSubmitting}
+                    className={cn(
+                      "text-right text-lg tabular-nums",
+                      addOverMax && "border-red-500 focus-visible:ring-red-500/20"
+                    )}
+                  />
+                  <span className="shrink-0 text-sm font-medium text-muted-foreground">USDC</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={executorSubmitting || !(addMax > 0)}
+                    onClick={() => setAddSizeUsd(String(addMax))}
+                  >
+                    Max
+                  </Button>
+                </div>
+                <div className="rounded-md border bg-muted/30 p-2.5 text-xs space-y-1">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Safe USDC (funds the add)</span>
+                    <span className="font-medium tabular-nums">{formatCurrency(safeUsdcBalance, 2)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Max add (~2.5% fee/rounding reserve)</span>
+                    <span className="font-medium tabular-nums">{formatCurrency(addMax, 2)}</span>
+                  </div>
+                  {addTarget?.isLp ? (
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Decibel margin available</span>
+                      <span className="font-medium tabular-nums">
+                        {availableToTradeUsdc != null ? formatCurrency(availableToTradeUsdc, 2) : "—"}
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
+                {addMax < 10 ? (
+                  <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-700 dark:text-amber-400">
+                    Minimum add is 10 USDC, but the safe only covers {formatCurrency(addMax, 2)}.
+                    Deposit USDC to the AI agent safe first — the Decibel balance can&apos;t fund
+                    this side of the position.
+                  </div>
+                ) : addTarget?.isLp ? (
+                  <div className="text-xs text-muted-foreground">
+                    If the subaccount lacks free margin, the LP still grows and the position runs
+                    under-hedged until you top up Decibel margin.
+                  </div>
+                ) : null}
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={executorSubmitting}
+                  onClick={() => {
+                    setAddTarget(null);
+                    setAddSizeUsd("");
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  disabled={addSubmitDisabled}
+                  onClick={() => {
+                    if (!addTarget) return;
+                    if (addTarget.isLp) void handleExecutorAddLpDeltaNeutral(addTarget.cycleId, addSizeNum);
+                    else void handleExecutorAddDeltaNeutral(addTarget.cycleId, addTarget.asset, addSizeNum);
+                  }}
+                >
+                  {executorSubmitting ? "Adding…" : "Add"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        );
+      })()}
+
+      {(() => {
+        const row = closeCyclePromptId
+          ? dnPositions.find((p) => p.source === "journal" && p.cycleId === closeCyclePromptId)
+          : null;
+        const isClosing = !!closingCycleId;
+        return (
+          <AlertDialog
+            open={!!row}
+            onOpenChange={(o) => {
+              if (!o && !isClosing) setCloseCyclePromptId(null);
+            }}
+          >
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Close {row?.marketName ?? "position"}?</AlertDialogTitle>
+                <AlertDialogDescription asChild>
+                  <div className="space-y-2 text-sm">
+                    <span className="block">
+                      This closes the Decibel short and sells the spot leg back to USDC.
+                    </span>
+                    {row &&
+                      (() => {
+                        // Mirror the card's "Net PnL" tooltip exactly (price + funding + fees +
+                        // rewards) so this dialog never shows a smaller number than what's
+                        // already visible on the card above it. Fees/rewards = claimable + claimed
+                        // (mark-to-market, matches the tooltip — see delta-neutral-cycles route).
+                        const fees =
+                          (row.lpLeg?.claimableFeesUsd ?? 0) + (row.lpLeg?.claimedFeesUsd ?? 0);
+                        const rewards =
+                          (row.lpLeg?.claimableRewardsUsd ?? 0) + (row.lpLeg?.claimedRewardsUsd ?? 0);
+                        // Decibel taker fee on the close trade: back it out of the two existing
+                        // estimates (estCloseUsd already nets it, totalValueUsd doesn't) rather
+                        // than duplicating the bps math here.
+                        const takerFeeUsd =
+                          row.totalValueUsd != null && row.estCloseUsd != null
+                            ? Math.max(0, row.totalValueUsd - row.estCloseUsd)
+                            : 0;
+                        const estValueReturned =
+                          row.totalValueUsd != null
+                            ? row.totalValueUsd + fees + rewards - takerFeeUsd
+                            : null;
+                        const netPnl =
+                          row.pnlPriceUsd != null
+                            ? row.pnlPriceUsd + (row.perpFundingUsd ?? 0) + fees + rewards - takerFeeUsd
+                            : null;
+                        const pct =
+                          netPnl != null && row.deployedUsd != null && row.deployedUsd > 0
+                            ? (netPnl / row.deployedUsd) * 100
+                            : null;
+                        return (
+                          <div className="rounded-md border bg-muted/30 p-3 space-y-1 text-xs">
+                            {estValueReturned != null && (
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Est. value returned</span>
+                                <span className="font-medium">≈ {formatCurrency(estValueReturned, 2)}</span>
+                              </div>
+                            )}
+                            {netPnl != null && (
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">PnL vs deployed</span>
+                                <span
+                                  className={
+                                    netPnl >= 0
+                                      ? "text-emerald-600 dark:text-emerald-400"
+                                      : "text-rose-600 dark:text-rose-400"
+                                  }
+                                >
+                                  {netPnl >= 0 ? "+" : ""}
+                                  {formatCurrency(netPnl, 2)}
+                                  {pct != null ? ` (${netPnl >= 0 ? "+" : ""}${pct.toFixed(2)}%)` : ""}
+                                </span>
+                              </div>
+                            )}
+                            {row.spotValueUsd != null && (
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">
+                                  {row.lpLeg ? "LP value" : "Spot sells for (quote)"}
+                                </span>
+                                <span>{formatCurrency(row.spotValueUsd, 2)}</span>
+                              </div>
+                            )}
+                            {row.perpUPnlUsd != null && (
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Perp uPnL</span>
+                                <span>{formatCurrency(row.perpUPnlUsd, 2)}</span>
+                              </div>
+                            )}
+                            {row.perpFundingUsd != null && (
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Funding earned</span>
+                                <span className="text-emerald-600 dark:text-emerald-400">
+                                  {row.perpFundingUsd >= 0 ? "+" : ""}
+                                  {formatCurrency(row.perpFundingUsd, 2)}
+                                </span>
+                              </div>
+                            )}
+                            {row.lpLeg && fees > 0 && (
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">LP fees</span>
+                                <span className="text-emerald-600 dark:text-emerald-400">
+                                  +{formatCurrency(fees, 2)}
+                                </span>
+                              </div>
+                            )}
+                            {row.lpLeg && rewards > 0 && (
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Rewards</span>
+                                <span className="text-emerald-600 dark:text-emerald-400">
+                                  +{formatCurrency(rewards, 2)}
+                                </span>
+                              </div>
+                            )}
+                            {takerFeeUsd > 0 && (
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Decibel close fee</span>
+                                <span className="text-rose-600 dark:text-rose-400">
+                                  -{formatCurrency(takerFeeUsd, 2)}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    <span className="block text-muted-foreground text-xs">
+                      Final amounts may differ slightly due to slippage and fees.
+                    </span>
+                  </div>
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={isClosing}>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  disabled={isClosing}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    if (row) {
+                      void handleCloseCycle({ cycleId: row.cycleId!, marketName: row.marketName });
+                      setCloseCyclePromptId(null);
+                    }
+                  }}
+                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                >
+                  {isClosing ? "Closing…" : "Close position"}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        );
+      })()}
+
       <DepositModal
         isOpen={showDepositModal}
         onClose={() => setShowDepositModal(false)}
-        protocol={{
-          name: aiAgentProtocolConfig?.name ?? "AI agent",
-          logo: aiAgentProtocolConfig?.logoUrl ?? "/logo.png",
-          apy: aprPct ?? 0,
-          key: "yield-ai",
-        }}
-        tokenIn={AI_AGENT_DEPOSIT_TOKENS[0]}
-        tokenOut={AI_AGENT_DEPOSIT_TOKENS[0]}
-        tokenInOptions={AI_AGENT_DEPOSIT_TOKENS}
-        priceUSD={walletUsdcPriceUsd}
-        yieldAiSafeAddress={safeAddr ?? undefined}
-        secondaryLogoUrl={
-          isDeltaNeutralStrategy ? decibelProtocolConfig?.logoUrl : undefined
-        }
-        secondaryLogoAlt={isDeltaNeutralStrategy ? "Decibel" : undefined}
+        {...depositModalConfig}
       />
 
       <YieldAIWithdrawModal
@@ -4842,6 +6684,7 @@ export function YieldAIPositions() {
                 : stablecoinOps?.operations ?? []
           }
           currentValueUsd={Number.isFinite(totalValue) ? totalValue : null}
+          feeAprPct={hyperionFeeAprPct}
         />
       )}
 
@@ -5343,40 +7186,45 @@ export function YieldAIPositions() {
               hash?: string | null;
             };
 
+            // LP-hedge runs LP-first (open LP → short → record cycle); spot runs short → swap → record.
+            const lpFlow = dnHedgeMode === "lp";
             let steps: Step[];
             if (inProgress) {
-              steps = [
-                { key: "decibel", label: "Opening Decibel short", status: "loading" },
-                { key: "swap", label: "Swapping USDC → spot on Hyperion (safe)", status: "loading" },
-                { key: "record", label: "Recording open on-chain", status: "loading" },
-              ];
+              steps = lpFlow
+                ? [
+                    { key: "swap", label: "Opening Hyperion LP", status: "loading" },
+                    { key: "decibel", label: "Opening Decibel short", status: "loading" },
+                    { key: "record", label: "Recording cycle on-chain", status: "loading" },
+                  ]
+                : [
+                    { key: "decibel", label: "Opening Decibel short", status: "loading" },
+                    { key: "swap", label: "Swapping USDC → spot on Hyperion (safe)", status: "loading" },
+                    { key: "record", label: "Recording open on-chain", status: "loading" },
+                  ];
             } else if (result?.success) {
-              steps = [
-                {
-                  key: "decibel",
-                  label: "Decibel short opened",
-                  status: "completed",
-                  hash: result.openTxHash,
-                },
-                {
-                  key: "swap",
-                  label: "USDC → spot swapped on Hyperion",
-                  status: "completed",
-                  hash: result.swapTxHash,
-                },
-                {
-                  key: "record",
-                  label: "On-chain record created",
-                  status: "completed",
-                  hash: result.recordOpenTxHash,
-                },
-              ];
+              steps = lpFlow
+                ? [
+                    { key: "swap", label: "Hyperion LP opened", status: "completed", hash: result.openTxHash },
+                    { key: "decibel", label: "Decibel short opened", status: "completed", hash: result.swapTxHash },
+                    { key: "record", label: "Cycle recorded on-chain", status: "completed", hash: result.recordOpenTxHash },
+                  ]
+                : [
+                    { key: "decibel", label: "Decibel short opened", status: "completed", hash: result.openTxHash },
+                    { key: "swap", label: "USDC → spot swapped on Hyperion", status: "completed", hash: result.swapTxHash },
+                    { key: "record", label: "On-chain record created", status: "completed", hash: result.recordOpenTxHash },
+                  ];
             } else {
-              steps = [
-                { key: "decibel", label: "Opening Decibel short", status: "error" },
-                { key: "swap", label: "Swapping USDC → spot on Hyperion (safe)", status: "pending" },
-                { key: "record", label: "Recording open on-chain", status: "pending" },
-              ];
+              steps = lpFlow
+                ? [
+                    { key: "swap", label: "Opening Hyperion LP", status: "error" },
+                    { key: "decibel", label: "Opening Decibel short", status: "pending" },
+                    { key: "record", label: "Recording cycle on-chain", status: "pending" },
+                  ]
+                : [
+                    { key: "decibel", label: "Opening Decibel short", status: "error" },
+                    { key: "swap", label: "Swapping USDC → spot on Hyperion (safe)", status: "pending" },
+                    { key: "record", label: "Recording open on-chain", status: "pending" },
+                  ];
             }
 
             const stepIcon = (s: StepStatus) => {
@@ -5608,57 +7456,22 @@ export function YieldAIPositions() {
       </AlertDialog>
 
       {selectedEchelonWithdrawRow && (
-        <AlertDialog
-          open={showEchelonWithdrawConfirm}
-          onOpenChange={(open) => {
+        <YieldAiEchelonWithdrawModal
+          key={selectedEchelonWithdrawRow.id}
+          isOpen={showEchelonWithdrawConfirm}
+          onClose={() => {
             if (isExecutingEchelonWithdrawToSafe) return;
-            setShowEchelonWithdrawConfirm(open);
-            if (!open) setSelectedEchelonWithdrawRow(null);
+            closeEchelonWithdrawDialog();
           }}
-        >
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Withdraw to AI agent safe?</AlertDialogTitle>
-              <AlertDialogDescription asChild>
-                <div className="space-y-2 text-sm text-muted-foreground">
-                  <p>
-                    This action executes a full withdraw from Echelon on this market back to your AI agent safe.
-                    After this transaction succeeds, use Withdraw in the AI agent wallet section to send funds to
-                    your wallet.
-                  </p>
-                  {echelonAdapterLoadError ? (
-                    <p className="text-destructive text-xs">
-                      Echelon adapter address could not be loaded: {echelonAdapterLoadError}
-                    </p>
-                  ) : null}
-                </div>
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel disabled={isExecutingEchelonWithdrawToSafe}>Cancel</AlertDialogCancel>
-              <AlertDialogAction
-                disabled={
-                  isExecutingEchelonWithdrawToSafe ||
-                  !echelonAdapterAddress ||
-                  Boolean(echelonAdapterLoadError)
-                }
-                onClick={(event) => {
-                  event.preventDefault();
-                  void handleEchelonWithdrawConfirm();
-                }}
-              >
-                {isExecutingEchelonWithdrawToSafe ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Withdrawing...
-                  </>
-                ) : (
-                  "Confirm"
-                )}
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+          row={selectedEchelonWithdrawRow}
+          isPaused={isPaused}
+          adapterReady={Boolean(echelonAdapterAddress)}
+          adapterError={echelonAdapterLoadError}
+          isLoading={isExecutingEchelonWithdrawToSafe}
+          onConfirm={(amountBaseUnits, isFull) => {
+            void handleEchelonWithdrawConfirm(amountBaseUnits, isFull);
+          }}
+        />
       )}
 
       <AlertDialog open={showUsd1ConvertConfirm} onOpenChange={setShowUsd1ConvertConfirm}>

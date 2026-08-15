@@ -6,35 +6,19 @@ import { Logo } from '@/components/ui/logo';
 import { WalletSelector } from '@/components/WalletSelector';
 import { DecibelCTABlock } from '@/components/ui/decibel-cta-block';
 import { DecibelFundingChart, getChartMarketOrder, type RawFundingRecord } from '@/components/decibel/decibel-funding-chart';
+import { DecibelMarketIcon } from '@/components/decibel/DecibelMarketIcon';
 import { DecibelOpenPositionModal, type DecibelOpenPositionMarket } from '@/components/decibel/decibel-open-position-modal';
 import { fetchFundingApr, marketNameForFundingApi } from '@/lib/protocols/decibel/fundingApr';
+import { MARKET_LOGOS } from '@/lib/protocols/decibel/marketIcon';
+import { useDecibelMarketLogosMap } from '@/hooks/useDecibelMarketLogosMap';
 import { formatNumber, formatCurrency } from '@/lib/utils/numberFormat';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { cn } from '@/lib/utils';
-import Image from 'next/image';
-
-const MARKET_LOGOS: Record<string, string> = {
-  'BTC/USD': 'https://app.decibel.trade/images/icons/btc.svg?dpl=dpl_FECfRSDXc1wiUcCXB6MPHgx2CzKp',
-  'APT/USD': 'https://assets.panora.exchange/tokens/aptos/apt.svg',
-  'ETH/USD': 'https://app.decibel.trade/images/icons/eth.svg?dpl=dpl_FECfRSDXc1wiUcCXB6MPHgx2CzKp',
-  'SOL/USD': 'https://app.decibel.trade/images/icons/sol.svg?dpl=dpl_FECfRSDXc1wiUcCXB6MPHgx2CzKp',
-  'DOGE/USD': 'https://app.decibel.trade/images/icons/doge.svg?dpl=dpl_FECfRSDXc1wiUcCXB6MPHgx2CzKp',
-  'XRP/USD': 'https://app.decibel.trade/images/icons/xrp.svg?dpl=dpl_FECfRSDXc1wiUcCXB6MPHgx2CzKp',
-  'BNB/USD': 'https://app.decibel.trade/images/icons/bnb.svg?dpl=dpl_FECfRSDXc1wiUcCXB6MPHgx2CzKp',
-  'SUI/USD': '/token_ico/sui.png',
-  'HYPE/USD': 'https://app.decibel.trade/images/icons/hype.svg?dpl=dpl_FECfRSDXc1wiUcCXB6MPHgx2CzKp',
-  'ZEC/USD': 'https://app.decibel.trade/images/icons/zec.svg?dpl=dpl_FECfRSDXc1wiUcCXB6MPHgx2CzKp',
-};
 
 interface DecibelMarketRow {
   market_addr: string;
   market_name?: string;
-}
-
-function getLogoUrl(marketName: string): string | undefined {
-  const key = marketNameForFundingApi(marketName);
-  return MARKET_LOGOS[key];
 }
 
 /**
@@ -212,17 +196,25 @@ export default function DecibelFundingPage() {
     }
   }, [defaultVisibleMarketKeys, visibleChartMarkets]);
 
+  const marketNamesForLogos = useMemo(
+    () => marketsSortedByOI.map((m) => m.market_name || ''),
+    [marketsSortedByOI],
+  );
+
+  const logoUrlsByMarket = useDecibelMarketLogosMap(marketNamesForLogos, MARKET_LOGOS);
+
   /** Same list as dropdown options for modal (with logo URLs) */
   const marketsForModal = useMemo((): DecibelOpenPositionMarket[] => {
     return marketsSortedByOI.map((m) => {
       const name = m.market_name || '';
+      const key = marketNameForFundingApi(name);
       return {
         marketAddr: m.market_addr,
         marketName: name,
-        marketLogoUrl: getLogoUrl(name),
+        marketLogoUrl: logoUrlsByMarket[key],
       };
     });
-  }, [marketsSortedByOI]);
+  }, [marketsSortedByOI, logoUrlsByMarket]);
 
   return (
     <div className="h-screen min-h-0 flex flex-col md:flex-row bg-background overflow-x-hidden overflow-y-auto md:overflow-hidden" style={{ WebkitOverflowScrolling: 'touch' }}>
@@ -297,7 +289,7 @@ export default function DecibelFundingPage() {
             const hasChartData = allChartMarketNames.includes(key);
             const apr7d = fundingApr7dByMarket[key];
             const oiNotional = oiNotionalByMarket[key];
-            const logoUrl = getLogoUrl(name);
+            const logoUrl = logoUrlsByMarket[key];
             const isVisibleOnChart = effectiveVisibleChartMarkets.has(key);
             return (
               <li
@@ -313,16 +305,11 @@ export default function DecibelFundingPage() {
               >
                 <div className="flex flex-col gap-1.5 min-w-0 flex-1">
                   <div className="flex gap-2 min-w-0 items-start">
-                    {logoUrl && (
-                      <Image
-                        src={logoUrl}
-                        alt=""
-                        width={20}
-                        height={20}
-                        className="shrink-0 rounded-full mt-0.5"
-                        unoptimized
-                      />
-                    )}
+                    <DecibelMarketIcon
+                      logoUrl={logoUrl}
+                      marketName={name}
+                      className="mt-0.5"
+                    />
                     <span className="text-sm font-medium break-words leading-snug min-w-0">
                       {name || m.market_addr.slice(0, 8)}
                     </span>

@@ -16,6 +16,8 @@ import { useToast } from "@/components/ui/use-toast";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { getMesoTokenByAddress } from "@/lib/protocols/meso/tokens";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { submitAptosTransaction } from "@/lib/mobile/submitAptosTransaction";
+import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
 
 interface MesoPositionsProps {
   address?: string;
@@ -81,6 +83,7 @@ function getTokenInfo(tokenAddress: string) {
 
 export function MesoPositions({ address, onPositionsValueChange }: MesoPositionsProps) {
   const { account, signAndSubmitTransaction } = useWallet();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
   const { toast } = useToast();
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(false);
@@ -91,7 +94,7 @@ export function MesoPositions({ address, onPositionsValueChange }: MesoPositions
   const [rewards, setRewards] = useState<RewardsApiResponse | null>(null);
   
 
-  const walletAddress = address || account?.address?.toString();
+  const walletAddress = address || account?.address?.toString() || injectedAptosAddress || undefined;
   const protocol = getProtocolByName("Meso Finance");
 
   // Панора цены больше не нужны
@@ -154,7 +157,7 @@ export function MesoPositions({ address, onPositionsValueChange }: MesoPositions
   };
 
   const handleClaimAll = async () => {
-    if (!signAndSubmitTransaction || !account?.address) return;
+    if (!walletAddress || (!signAndSubmitTransaction && !injectedAptosAddress)) return;
     try {
       setIsClaiming(true);
       const functionAddress = '0x68476f9d437e3f32fd262ba898b5e3ee0a23a1d586a6cf29a28add35f253f6f7';
@@ -184,7 +187,15 @@ export function MesoPositions({ address, onPositionsValueChange }: MesoPositions
         functionArguments: [tokens] as any[]
       } as const;
 
-      const tx = await signAndSubmitTransaction({ data: payload });
+      const tx = await submitAptosTransaction({
+        transaction: { data: payload } as any,
+        signAndSubmitTransaction: signAndSubmitTransaction as any,
+        connected: !!account,
+        address: walletAddress,
+      });
+      if (!tx.hash) {
+        throw new Error("Transaction was submitted without hash");
+      }
       toast({
         title: 'Claim submitted',
         description: `Transaction ${tx.hash.slice(0, 6)}...${tx.hash.slice(-4)}`,

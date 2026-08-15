@@ -5,11 +5,14 @@ import { ToastAction } from '@/components/ui/toast';
 import { protocols } from '../protocols/protocolsRegistry';
 import { showTransactionSuccessToast } from '@/components/ui/transaction-toast';
 import { ProtocolKey } from '../transactions/types';
+import { submitAptosTransaction } from '@/lib/mobile/submitAptosTransaction';
+import { useNativeWalletStore } from '@/lib/stores/nativeWalletStore';
 
 export function useWithdraw() {
   const wallet = useWallet();
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
   
   // Gas Station is configured globally in WalletProvider
   // All transactions via signAndSubmitTransaction will automatically use Gas Station (free transactions)
@@ -35,7 +38,13 @@ export function useWithdraw() {
         throw new Error(`Protocol ${protocolKey} does not have buildWithdraw method`);
       }
 
-      const payload = await protocolInstance.buildWithdraw(marketAddress, amount, token, wallet.account?.address?.toString());
+      const effectiveAptosAddress = wallet.account?.address?.toString() ?? injectedAptosAddress ?? null;
+      const payload = await protocolInstance.buildWithdraw(
+        marketAddress,
+        amount,
+        token,
+        effectiveAptosAddress ?? undefined,
+      );
       console.log('Generated withdraw payload:', payload);
 
       if (!payload || typeof payload !== 'object') {
@@ -44,20 +53,27 @@ export function useWithdraw() {
 
       console.log('Submitting withdraw transaction with payload:', payload);
 
-      if (!wallet.connected || !wallet.signAndSubmitTransaction) {
+      if (!wallet.connected && !effectiveAptosAddress) {
         throw new Error('Wallet not connected');
       }
+      if (!wallet.signAndSubmitTransaction && !effectiveAptosAddress) {
+        throw new Error('Wallet does not support signAndSubmitTransaction');
+      }
 
-      const response = await wallet.signAndSubmitTransaction({
-        data: {
-          function: payload.function as `${string}::${string}::${string}`,
-          typeArguments: payload.type_arguments,
-          functionArguments: payload.arguments as (string | number | bigint | boolean | null)[],
+      const response = await submitAptosTransaction({
+        transaction: {
+          data: {
+            function: payload.function as `${string}::${string}::${string}`,
+            typeArguments: payload.type_arguments,
+            functionArguments: payload.arguments as (string | number | bigint | boolean | null)[],
+          },
+          options: {
+            maxGasAmount: 20000,
+          },
         },
-        options: {
-          maxGasAmount: 20000, // Network limit is 20000
-        },
-        // Gas Station is configured globally in WalletProvider, no need to pass explicitly
+        signAndSubmitTransaction: wallet.signAndSubmitTransaction as any,
+        connected: wallet.connected,
+        address: effectiveAptosAddress,
       });
       console.log('Withdraw transaction response:', response);
 
@@ -134,7 +150,7 @@ export function useWithdraw() {
     } finally {
       setIsLoading(false);
     }
-  }, [wallet, toast]);
+  }, [wallet, toast, injectedAptosAddress]);
 
   return {
     withdraw,

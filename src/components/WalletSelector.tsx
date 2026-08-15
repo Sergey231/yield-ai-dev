@@ -30,6 +30,7 @@ import {
   type WalletConnectChainTab,
 } from "@/components/wallet/customAptosConnectDialogContent";
 import { useNativeWalletStore } from "@/lib/stores/nativeWalletStore";
+import { isNativeAptosSignPending } from "@/lib/mobile/nativeBridge";
 
 interface WalletSelectorProps extends WalletSortingOptions {
   /** External control for dialog open state */
@@ -38,6 +39,11 @@ interface WalletSelectorProps extends WalletSortingOptions {
   onExternalOpenChange?: (open: boolean) => void;
   /** When opening via `externalOpen`, which chain tab to show initially. */
   externalInitialChainTab?: WalletConnectChainTab;
+}
+
+function nativeConnectPayload(chainTab: WalletConnectChainTab) {
+  if (chainTab === "solana") return { chain: "solana", walletId: "phantom" };
+  return { chain: "aptos", walletId: "petra" };
 }
 
 export function WalletSelector({ externalOpen, onExternalOpenChange, externalInitialChainTab, ...walletSortingOptions }: WalletSelectorProps) {
@@ -72,7 +78,7 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, externalIni
       if (open && !hasAnyConnectedWalletForWebView && hasNativeBridgeNow()) {
         const w = window as any;
         if (w?.YieldAIBridge?.post) {
-          w.YieldAIBridge.post("connect_wallet", { chain: pendingChainTab });
+          w.YieldAIBridge.post("connect_wallet", nativeConnectPayload(pendingChainTab));
         }
         return;
       }
@@ -128,7 +134,12 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, externalIni
   // Check if any wallet is connected
   const isAnyWalletConnected = aptosConnected || solanaConnected || !!solanaAddress || !!aptosAddress;
   const isAptosDerived = aptosConnected && !!wallet && isDerivedAptosWalletReliable(wallet);
-  const aptosDisplayTitle = isAptosDerived ? "Aptos (Derived Wallet)" : "Aptos";
+  // Solana wallet the derived Aptos account comes from: "Phantom (Solana)" → "Phantom"
+  const derivedSourceWalletName = isAptosDerived && wallet?.name
+    ? wallet.name.replace(/\s*\(Solana\)\s*$/, "")
+    : null;
+  const solanaWalletName = solanaWallet?.adapter?.name ?? derivedSourceWalletName;
+  const aptosWalletName = !isAptosDerived && aptosConnected ? wallet?.name ?? null : null;
 
   useEffect(() => {
     setMounted(true);
@@ -150,11 +161,19 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, externalIni
   }, [hasNativeBridgeNow]);
 
   const requestNativeConnectWallet = useCallback((chainTab: WalletConnectChainTab) => {
+    if (isNativeAptosSignPending()) {
+      toast({
+        variant: "destructive",
+        title: "Sign in progress",
+        description: "Finish or cancel the Petra transaction before connecting again.",
+      });
+      return;
+    }
     const w = window as any;
     if (w?.YieldAIBridge?.post) {
-      w.YieldAIBridge.post("connect_wallet", { chain: chainTab });
+      w.YieldAIBridge.post("connect_wallet", nativeConnectPayload(chainTab));
     }
-  }, []);
+  }, [toast]);
 
   // Poll adapter state for Phantom (which doesn't trigger React state updates properly)
   useEffect(() => {
@@ -239,6 +258,9 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, externalIni
       // WebView mode: native owns wallet sessions; request native disconnect and exit.
       if (isWebViewNow()) {
         (window as any)?.YieldAIBridge?.post?.("disconnect_wallet", { chain: "all" });
+        setInjectedDisconnected("aptos");
+        setInjectedDisconnected("solana");
+        setPolledSolanaAddress(null);
         return;
       }
       // Disconnect both Aptos and Solana if connected
@@ -288,6 +310,7 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, externalIni
     injectedAptosAddress,
     injectedSolanaAddress,
     setInjectedDisconnected,
+    isWebViewNow,
   ]);
 
   // Handler for disconnecting only Solana (mirrors /bridge handleDisconnectSolana)
@@ -296,6 +319,11 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, externalIni
       // WebView mode: native owns wallet sessions; request native disconnect and exit.
       if (isWebViewNow()) {
         (window as any)?.YieldAIBridge?.post?.("disconnect_wallet", { chain: "solana" });
+        setInjectedDisconnected("solana");
+        setPolledSolanaAddress(null);
+        if (typeof window !== "undefined") {
+          try { window.localStorage.removeItem("walletName"); } catch {}
+        }
         return;
       }
       // Determine if current Aptos is derived
@@ -399,13 +427,23 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, externalIni
     toast,
     injectedSolanaAddress,
     setInjectedDisconnected,
+    isWebViewNow,
   ]);
 
   // Handler for disconnecting only Aptos (mirrors /bridge handleDisconnectAptos)
   const handleDisconnectAptosOnly = useCallback(async () => {
     // WebView mode: native owns wallet sessions; request native disconnect and exit.
     if (isWebViewNow()) {
+      if (isNativeAptosSignPending()) {
+        toast({
+          variant: "destructive",
+          title: "Sign in progress",
+          description: "Finish or cancel the Petra transaction before disconnecting.",
+        });
+        return;
+      }
       (window as any)?.YieldAIBridge?.post?.("disconnect_wallet", { chain: "aptos" });
+      setInjectedDisconnected("aptos");
       return;
     }
     const isDerived = wallet && isDerivedAptosWalletReliable(wallet);
@@ -521,17 +559,131 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, externalIni
     toast,
     injectedAptosAddress,
     setInjectedDisconnected,
+    isWebViewNow,
   ]);
 
   if (!mounted) {
     return null;
   }
 
-  // Determine what address to show in the button
-  const displayAddress = account?.ansName || 
-    truncateAddress(aptosAddress || undefined) || 
-    (solanaAddress ? truncateAddress(solanaAddress) : null) ||
-    "Unknown";
+  // The button shows the wallet the user actually connected: a derived Aptos
+  // account means the user connected a Solana wallet, so show its address.
+  const primaryChain: "aptos" | "solana" =
+    aptosAddress && !isAptosDerived ? "aptos" : solanaAddress ? "solana" : "aptos";
+  const primaryWalletIcon =
+    primaryChain === "solana"
+      ? solanaWallet?.adapter?.icon ?? (isAptosDerived ? wallet?.icon : undefined)
+      : wallet?.icon;
+  const displayAddress =
+    primaryChain === "aptos"
+      ? account?.ansName || truncateAddress(aptosAddress || undefined) || "Unknown"
+      : truncateAddress(solanaAddress || undefined) || "Unknown";
+
+  const solanaBlock = (
+    <div className="px-3 py-2">
+      <p className="text-xs font-medium uppercase text-muted-foreground mb-2">
+        Solana{solanaAddress && solanaWalletName ? ` · ${solanaWalletName}` : ""}
+      </p>
+      {solanaAddress ? (
+        <>
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <span className="font-mono text-sm truncate">
+              {truncateAddress(solanaAddress)}
+            </span>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7 shrink-0"
+              onClick={copySolanaAddress}
+              aria-label="Copy Solana address"
+            >
+              <Copy className="h-4 w-4" />
+            </Button>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
+            onClick={handleDisconnectSolanaOnly}
+          >
+            <LogOut className="h-4 w-4" /> Disconnect
+          </Button>
+        </>
+      ) : (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="w-full justify-start gap-2"
+          onClick={() => {
+            setPendingChainTab("solana");
+            if (isWebViewNow()) {
+              requestNativeConnectWallet("solana");
+              return;
+            }
+            setDialogOpen(true);
+          }}
+        >
+          Connect Solana
+        </Button>
+      )}
+    </div>
+  );
+
+  const aptosBlock = (
+    <div className="px-3 py-2">
+      <p className={`text-xs font-medium uppercase text-muted-foreground ${aptosAddress && isAptosDerived ? "" : "mb-2"}`}>
+        Aptos{aptosAddress && aptosWalletName ? ` · ${aptosWalletName}` : ""}
+      </p>
+      {aptosAddress && isAptosDerived && (
+        <p className="text-[11px] leading-snug text-muted-foreground/80 mt-0.5 mb-2">
+          Derived from {derivedSourceWalletName ?? "your Solana wallet"} — transactions
+          are signed with it, no separate wallet needed
+        </p>
+      )}
+      {aptosAddress ? (
+        <>
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <span className="font-mono text-sm truncate">
+              {truncateAddress(aptosAddress || undefined)}
+            </span>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7 shrink-0"
+              onClick={copyAddress}
+              aria-label="Copy Aptos address"
+            >
+              <Copy className="h-4 w-4" />
+            </Button>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
+            onClick={handleDisconnectAptosOnly}
+          >
+            <LogOut className="h-4 w-4" /> Disconnect
+          </Button>
+        </>
+      ) : (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="w-full justify-start gap-2"
+          onClick={() => {
+            setPendingChainTab("aptos");
+            if (isWebViewNow()) {
+              requestNativeConnectWallet("aptos");
+              return;
+            }
+            setDialogOpen(true);
+          }}
+        >
+          Connect Aptos
+        </Button>
+      )}
+    </div>
+  );
 
   return (
     <Dialog open={isDialogOpen} onOpenChange={setDialogOpen}>
@@ -539,115 +691,37 @@ export function WalletSelector({ externalOpen, onExternalOpenChange, externalIni
         {isAnyWalletConnected ? (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button>
+            <Button className="gap-2">
+              {primaryWalletIcon && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={primaryWalletIcon}
+                  alt=""
+                  className="h-4 w-4 shrink-0 rounded-sm"
+                />
+              )}
               {displayAddress}
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-64">
-            {/* Solana Block */}
-            <div className="px-3 py-2 border-b">
-              <p className="text-xs font-medium uppercase text-muted-foreground mb-2">
-                Solana
-              </p>
-              {solanaAddress ? (
-                <>
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <span className="font-mono text-sm truncate">
-                      {truncateAddress(solanaAddress)}
-                    </span>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-7 w-7 shrink-0"
-                      onClick={copySolanaAddress}
-                      aria-label="Copy Solana address"
-                    >
-                      <Copy className="h-4 w-4" />
-                    </Button>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
-                    onClick={handleDisconnectSolanaOnly}
-                  >
-                    <LogOut className="h-4 w-4" /> Disconnect
-                  </Button>
-                </>
-              ) : (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="w-full justify-start gap-2"
-                  onClick={() => {
-                    setPendingChainTab("solana");
-                    if (isWebViewNow()) {
-                      requestNativeConnectWallet("solana");
-                      return;
-                    }
-                    setDialogOpen(true);
-                  }}
-                >
-                  Connect Solana
-                </Button>
-              )}
-            </div>
-
-            {/* Aptos Block */}
-            <div className="px-3 py-2">
-              <p className="text-xs font-medium uppercase text-muted-foreground mb-2">
-                {aptosDisplayTitle}
-              </p>
-              {aptosAddress ? (
-                <>
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <span className="font-mono text-sm truncate">
-                      {truncateAddress(aptosAddress || undefined)}
-                    </span>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-7 w-7 shrink-0"
-                      onClick={copyAddress}
-                      aria-label="Copy Aptos address"
-                    >
-                      <Copy className="h-4 w-4" />
-                    </Button>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="w-full justify-start gap-2 text-muted-foreground hover:text-foreground"
-                    onClick={handleDisconnectAptosOnly}
-                  >
-                    <LogOut className="h-4 w-4" /> Disconnect
-                  </Button>
-                </>
-              ) : (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="w-full justify-start gap-2"
-                  onClick={() => {
-                    setPendingChainTab("aptos");
-                    if (isWebViewNow()) {
-                      requestNativeConnectWallet("aptos");
-                      return;
-                    }
-                    setDialogOpen(true);
-                  }}
-                >
-                  Connect Aptos
-                </Button>
-              )}
-            </div>
+          <DropdownMenuContent align="end" className="w-64 divide-y">
+            {/* The wallet the user connected themselves goes first */}
+            {primaryChain === "solana" ? (
+              <>
+                {solanaBlock}
+                {aptosBlock}
+              </>
+            ) : (
+              <>
+                {aptosBlock}
+                {solanaBlock}
+              </>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       ) : (
         isInWebView ? (
           <Button
             disabled={isConnecting}
-            data-action="connect_wallet"
             onClick={() => requestNativeConnectWallet("all")}
           >
             {isConnecting ? (

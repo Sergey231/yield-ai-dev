@@ -36,8 +36,18 @@ export async function submitAptosTransaction({
   const nativeFlowActive = isNativeApp && !!address;
 
   if (nativeFlowActive) {
-    const hash = await signAndSubmitAptosTransaction(transaction);
-    return { hash };
+    try {
+      const hash = await signAndSubmitAptosTransaction(transaction);
+      return { hash };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/encryption key|reconnect/i.test(message)) {
+        throw new Error(
+          "Petra session expired. Disconnect and connect the wallet again in the app, then retry.",
+        );
+      }
+      throw error;
+    }
   }
 
   if (!connected || !signAndSubmitTransaction) {

@@ -1,17 +1,24 @@
+import {
+  MANAGE_AUTH_TTL_MS,
+  buildManageAuthMessage,
+  type ManageAuthFields,
+} from "./manageAuth";
+
 export type HyperionManageAction =
   | "hyperion_lp_manage_open"
   | "hyperion_lp_manage_add"
   | "hyperion_lp_manage_claim"
   | "hyperion_lp_manage_close";
 
-export type HyperionManageSignedFields = Record<string, string | number | boolean | null>;
+export type HyperionManageSignedFields = ManageAuthFields;
 
-export const HYPERION_MANAGE_AUTH_TTL_MS = 5 * 60 * 1000;
+export const HYPERION_MANAGE_AUTH_TTL_MS = MANAGE_AUTH_TTL_MS;
 
+/** Delegates to the shared Yield AI manage-auth message (action is embedded in the JSON). */
 export function buildHyperionManageAuthMessage(params: {
   action: HyperionManageAction;
   fields: HyperionManageSignedFields;
   expiresAt: number;
 }): string {
-  return `Yield AI Hyperion LP manage authorization ${JSON.stringify(params)}`;
+  return buildManageAuthMessage(params);
 }

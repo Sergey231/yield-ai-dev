@@ -148,7 +148,8 @@ export async function performMintOnSolana(
   connection: Connection,
   solanaPublicKey: PublicKey,
   signTransaction: (transaction: Transaction) => Promise<Transaction>,
-  onStatusUpdate?: (status: string) => void
+  onStatusUpdate?: (status: string) => void,
+  signAndSubmitTransaction?: (transaction: Transaction) => Promise<string>
 ): Promise<string> {
   const firstMessage = attestationData.messages![0];
   
@@ -262,6 +263,30 @@ export async function performMintOnSolana(
   }
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
   transaction.recentBlockhash = blockhash;
+
+  if (signAndSubmitTransaction) {
+    if (onStatusUpdate) {
+      onStatusUpdate("Please approve the transaction in your wallet...");
+    }
+    const txSignature = await signAndSubmitTransaction(transaction);
+    console.log('[CCTP Mint] Native transaction submitted:', txSignature);
+
+    if (onStatusUpdate) {
+      onStatusUpdate("Waiting for transaction confirmation...");
+    }
+    const confirmation = await connection.confirmTransaction({
+      signature: txSignature,
+      blockhash,
+      lastValidBlockHeight,
+    }, 'confirmed');
+
+    if (confirmation.value.err) {
+      throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+    }
+
+    console.log('[CCTP Mint] Transaction confirmed:', confirmation);
+    return txSignature;
+  }
 
   // Sign transaction
   if (onStatusUpdate) {

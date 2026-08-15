@@ -4,11 +4,14 @@ import { useToast } from '@/components/ui/use-toast';
 import { ToastAction } from '@/components/ui/toast';
 import { protocols } from '../protocols/protocolsRegistry';
 import { ProtocolKey } from '../transactions/types';
+import { submitAptosTransaction } from '@/lib/mobile/submitAptosTransaction';
+import { useNativeWalletStore } from '@/lib/stores/nativeWalletStore';
 
 export function useClaimRewards() {
   const wallet = useWallet();
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
+  const injectedAptosAddress = useNativeWalletStore((s) => s.aptosAddress);
 
   const claimRewards = useCallback(
     async (protocolKey: ProtocolKey, positionIds: string[], tokenTypes: string[]) => {
@@ -18,18 +21,25 @@ export function useClaimRewards() {
         if (!protocolInstance) throw new Error(`Protocol ${protocolKey} not found`);
         if (typeof protocolInstance.buildClaimRewards !== 'function') throw new Error(`Protocol ${protocolKey} does not have buildClaimRewards method`);
         
+        const effectiveAptosAddress = wallet.account?.address?.toString() ?? injectedAptosAddress ?? null;
         // For Echelon, pass user address
-        const userAddress = protocolKey === 'echelon' && wallet.account?.address ? wallet.account.address.toString() : undefined;
+        const userAddress = protocolKey === 'echelon' ? effectiveAptosAddress ?? undefined : undefined;
         const payload = await protocolInstance.buildClaimRewards(positionIds, tokenTypes, userAddress);
         if (!payload || typeof payload !== 'object') throw new Error('Invalid payload generated');
-        if (!wallet.connected || !wallet.signAndSubmitTransaction) throw new Error('Wallet not connected');
-        const response = await wallet.signAndSubmitTransaction({
-          data: {
-            function: payload.function as `${string}::${string}::${string}`,
-            typeArguments: payload.type_arguments,
-            functionArguments: payload.arguments
+        if (!wallet.connected && !effectiveAptosAddress) throw new Error('Wallet not connected');
+        if (!wallet.signAndSubmitTransaction && !effectiveAptosAddress) throw new Error('Wallet does not support signAndSubmitTransaction');
+        const response = await submitAptosTransaction({
+          transaction: {
+            data: {
+              function: payload.function as `${string}::${string}::${string}`,
+              typeArguments: payload.type_arguments,
+              functionArguments: payload.arguments
+            },
+            options: { maxGasAmount: 20000 },
           },
-          options: { maxGasAmount: 20000 }, // Network limit is 20000
+          signAndSubmitTransaction: wallet.signAndSubmitTransaction as any,
+          connected: wallet.connected,
+          address: effectiveAptosAddress,
         });
         if (response.hash) {
           const maxAttempts = 10;
@@ -73,7 +83,7 @@ export function useClaimRewards() {
         setIsLoading(false);
       }
     },
-    [wallet, toast]
+    [wallet, toast, injectedAptosAddress]
   );
 
   return {

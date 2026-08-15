@@ -41,6 +41,10 @@ interface PnlStats {
   apr: string | null;
   /** Days between first deposit and now. */
   holdingDays: number;
+  /** Time-weighted average capital (USDC) used as the APR denominator. null when history < 1 day. */
+  avgCapitalUsd: string | null;
+  /** Precise days between first deposit and now (fractional). */
+  periodDays: number;
 }
 
 interface DepositHistorySummary {
@@ -189,7 +193,7 @@ function computePnlStats(
   currentValue: number | null,
 ): PnlStats {
   if (entries.length === 0) {
-    return { pnl: null, apr: null, holdingDays: 0 };
+    return { pnl: null, apr: null, holdingDays: 0, avgCapitalUsd: null, periodDays: 0 };
   }
 
   const chronological = [...entries].reverse();
@@ -200,15 +204,17 @@ function computePnlStats(
   const holdingDays = Math.max(0, Math.floor(totalDays));
 
   const netDeposits = bigintToNumber(netDepositsRaw);
-
-  if (currentValue == null || !Number.isFinite(currentValue)) {
-    return { pnl: null, apr: null, holdingDays };
-  }
-
-  const pnl = currentValue - netDeposits;
+  const pnl =
+    currentValue != null && Number.isFinite(currentValue) ? currentValue - netDeposits : null;
 
   if (totalDays < 1) {
-    return { pnl: pnl.toFixed(6), apr: null, holdingDays };
+    return {
+      pnl: pnl != null ? pnl.toFixed(6) : null,
+      apr: null,
+      holdingDays,
+      avgCapitalUsd: null,
+      periodDays: totalDays,
+    };
   }
 
   let dollarDays = 0;
@@ -235,15 +241,17 @@ function computePnlStats(
   const avgCapital = dollarDays / totalDays;
 
   let apr: string | null = null;
-  if (avgCapital > 0.01) {
+  if (pnl != null && avgCapital > 0.01) {
     const annualizedReturn = (pnl / avgCapital) * (365 / totalDays) * 100;
     apr = annualizedReturn.toFixed(2);
   }
 
   return {
-    pnl: pnl.toFixed(6),
+    pnl: pnl != null ? pnl.toFixed(6) : null,
     apr,
     holdingDays,
+    avgCapitalUsd: avgCapital > 0.01 ? avgCapital.toFixed(2) : null,
+    periodDays: totalDays,
   };
 }
 

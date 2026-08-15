@@ -21,6 +21,8 @@ export interface YieldAiDepositHistoryResponse {
       pnl?: string | null;
       apr?: string | null;
       holdingDays?: number;
+      avgCapitalUsd?: string | null;
+      periodDays?: number;
     };
     entries?: YieldAiDepositHistoryEntry[];
   };
@@ -35,6 +37,10 @@ export interface YieldAiDepositHistory {
     pnl: string | null;
     apr: string | null;
     holdingDays: number;
+    /** Time-weighted average capital (USDC) — Modified Dietz denominator. */
+    avgCapitalUsd: string | null;
+    /** Precise (fractional) days since first deposit. */
+    periodDays: number;
   };
   entries: YieldAiDepositHistoryEntry[];
 }
@@ -64,6 +70,8 @@ async function fetchYieldAiDepositHistory(params: {
       pnl: json.data?.pnlStats?.pnl ?? null,
       apr: json.data?.pnlStats?.apr ?? null,
       holdingDays: Number(json.data?.pnlStats?.holdingDays ?? 0),
+      avgCapitalUsd: json.data?.pnlStats?.avgCapitalUsd ?? null,
+      periodDays: Number(json.data?.pnlStats?.periodDays ?? 0),
     },
     entries: Array.isArray(json.data?.entries) ? json.data!.entries! : [],
   };

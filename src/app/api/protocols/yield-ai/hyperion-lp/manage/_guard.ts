@@ -1,21 +1,13 @@
-import {
-  Aptos,
-  AptosConfig,
-  Ed25519PublicKey,
-  Ed25519Signature,
-  Network,
-} from "@aptos-labs/ts-sdk";
+import { Aptos, AptosConfig, Network } from "@aptos-labs/ts-sdk";
 import { toCanonicalAddress } from "@/lib/utils/addressNormalization";
 import {
   STRATEGY_REGISTRY_VIEWS,
   resolveActiveAiAgentStrategy,
 } from "@/lib/protocols/yield-ai/strategyRegistry";
-import { VAULT_VIEW } from "@/lib/constants/yieldAiVault";
-import {
-  HYPERION_MANAGE_AUTH_TTL_MS,
-  buildHyperionManageAuthMessage,
-  type HyperionManageAction,
-  type HyperionManageSignedFields,
+import { assertOwnerManageAuth } from "@/lib/protocols/yield-ai/manageAuthServer";
+import type {
+  HyperionManageAction,
+  HyperionManageSignedFields,
 } from "@/lib/protocols/yield-ai/hyperionManageAuth";
 
 const APTOS_API_KEY = process.env.APTOS_API_KEY;
@@ -29,24 +21,9 @@ const aptos = new Aptos(
   })
 );
 
-export class HyperionManageAuthError extends Error {
-  status: number;
-
-  constructor(message: string, status = 401) {
-    super(message);
-    this.name = "HyperionManageAuthError";
-    this.status = status;
-  }
-}
-
-type HyperionManageAuthBody = {
-  ownerAddress?: unknown;
-  publicKey?: unknown;
-  signature?: unknown;
-  fullMessage?: unknown;
-  nonce?: unknown;
-  expiresAt?: unknown;
-};
+// Signature/ownership verification lives in the shared guard; routes keep
+// catching this class by its historical name.
+export { ManageAuthError as HyperionManageAuthError } from "@/lib/protocols/yield-ai/manageAuthServer";
 
 /**
  * Authorization for the user-facing Hyperion LP `manage/*` routes.
@@ -80,133 +57,16 @@ export async function assertSafeOptedIntoHyperion(safeAddressRaw: string): Promi
   return safe;
 }
 
-function requireString(value: unknown, field: string): string {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new HyperionManageAuthError(`Missing manage auth field: ${field}`);
-  }
-  return value.trim();
-}
-
-function extractFullMessageLine(fullMessage: string, key: string): string | null {
-  const prefix = `${key}: `;
-  const line = fullMessage.split(/\r?\n/).find((entry) => entry.startsWith(prefix));
-  return line ? line.slice(prefix.length).trim() : null;
-}
-
-async function assertSafeOwnedByOwner(params: { safeAddress: string; ownerAddress: string }) {
-  const safe = toCanonicalAddress(params.safeAddress);
-  const owner = toCanonicalAddress(params.ownerAddress);
-
-  const existsResult = await aptos.view({
-    payload: {
-      function: VAULT_VIEW.safeRefExists,
-      typeArguments: [],
-      functionArguments: [owner],
-    },
-  });
-  const exists = Array.isArray(existsResult) && existsResult[0] === true;
-  if (!exists) {
-    throw new HyperionManageAuthError("Signed owner does not have Yield AI safes", 403);
-  }
-
-  const countResult = await aptos.view({
-    payload: {
-      function: VAULT_VIEW.getSafeCount,
-      typeArguments: [],
-      functionArguments: [owner],
-    },
-  });
-  const rawCount = Array.isArray(countResult) ? countResult[0] : countResult;
-  const count = Number(rawCount);
-  if (!Number.isFinite(count) || count <= 0) {
-    throw new HyperionManageAuthError("Signed owner does not own this safe", 403);
-  }
-
-  for (let i = 0; i < count; i += 1) {
-    const addrResult = await aptos.view({
-      payload: {
-        function: VAULT_VIEW.getSafeAddress,
-        typeArguments: [],
-        functionArguments: [owner, i],
-      },
-    });
-    const addr = Array.isArray(addrResult) ? addrResult[0] : addrResult;
-    if (typeof addr === "string" && toCanonicalAddress(addr) === safe) {
-      return;
-    }
-  }
-
-  throw new HyperionManageAuthError("Signed owner does not own this safe", 403);
-}
-
-async function assertPublicKeyAuthenticatesOwner(params: {
-  publicKey: Ed25519PublicKey;
-  ownerAddress: string;
-}) {
-  const owner = toCanonicalAddress(params.ownerAddress);
-  const derivedAuthKey = toCanonicalAddress(params.publicKey.authKey().derivedAddress().toString());
-  const accountInfo = await aptos.getAccountInfo({ accountAddress: owner });
-  const onChainAuthKey = toCanonicalAddress(accountInfo.authentication_key);
-
-  if (derivedAuthKey !== onChainAuthKey) {
-    throw new HyperionManageAuthError("Wallet public key does not authenticate the signed owner", 403);
-  }
-}
-
 export async function assertHyperionManageOwnerAuth(params: {
   safeAddress: string;
   action: HyperionManageAction;
   fields: HyperionManageSignedFields;
   auth: unknown;
 }) {
-  const auth = params.auth as HyperionManageAuthBody | null | undefined;
-  if (!auth || typeof auth !== "object") {
-    throw new HyperionManageAuthError("Wallet signature is required for live Hyperion LP actions");
-  }
-
-  const ownerAddress = toCanonicalAddress(requireString(auth.ownerAddress, "ownerAddress"));
-  const publicKey = requireString(auth.publicKey, "publicKey");
-  const signature = requireString(auth.signature, "signature");
-  const fullMessage = requireString(auth.fullMessage, "fullMessage");
-  const nonce = requireString(auth.nonce, "nonce");
-  const expiresAt = Number(auth.expiresAt);
-  if (!Number.isFinite(expiresAt)) {
-    throw new HyperionManageAuthError("Invalid manage auth expiry");
-  }
-  if (Date.now() > expiresAt || expiresAt - Date.now() > HYPERION_MANAGE_AUTH_TTL_MS + 30_000) {
-    throw new HyperionManageAuthError("Hyperion LP authorization expired");
-  }
-
-  const expectedMessage = buildHyperionManageAuthMessage({
+  await assertOwnerManageAuth({
     action: params.action,
     fields: params.fields,
-    expiresAt,
+    auth: params.auth,
+    safeAddress: params.safeAddress,
   });
-  const signedMessage = extractFullMessageLine(fullMessage, "message");
-  const signedNonce = extractFullMessageLine(fullMessage, "nonce");
-  const signedAddress = extractFullMessageLine(fullMessage, "address");
-
-  if (signedMessage !== expectedMessage || signedNonce !== nonce) {
-    throw new HyperionManageAuthError("Wallet signature does not match this Hyperion LP action");
-  }
-  if (!signedAddress || toCanonicalAddress(signedAddress) !== ownerAddress) {
-    throw new HyperionManageAuthError("Wallet signature address does not match the claimed owner");
-  }
-
-  const publicKeyObject = new Ed25519PublicKey(publicKey);
-  let valid = false;
-  try {
-    valid = publicKeyObject.verifySignature({
-      message: new TextEncoder().encode(fullMessage),
-      signature: new Ed25519Signature(signature),
-    });
-  } catch {
-    valid = false;
-  }
-  if (!valid) {
-    throw new HyperionManageAuthError("Invalid Hyperion LP owner signature");
-  }
-
-  await assertPublicKeyAuthenticatesOwner({ publicKey: publicKeyObject, ownerAddress });
-  await assertSafeOwnedByOwner({ safeAddress: params.safeAddress, ownerAddress });
 }

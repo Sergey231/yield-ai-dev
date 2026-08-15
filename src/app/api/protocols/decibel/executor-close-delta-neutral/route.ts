@@ -13,8 +13,17 @@ import {
   DELTA_NEUTRAL_GET_POSITION_VIEW,
   parseDeltaNeutralPositionView,
 } from "@/lib/protocols/yield-ai/deltaNeutralViews";
-import { fetchFaBalanceIndexerOrOnChain } from "@/lib/protocols/yield-ai/indexerFaBalance";
+import {
+  fetchFaBalanceIndexerOrOnChain,
+  fetchOnChainPrimaryFaBalance,
+} from "@/lib/protocols/yield-ai/indexerFaBalance";
+import {
+  STRATEGY_JOURNAL_ENTRIES,
+  STRATEGY_JOURNAL_VIEWS,
+  parseCycleView,
+} from "@/lib/protocols/yield-ai/strategyJournal";
 import { submitSwapFaToFaWithFallbackLimits } from "@/lib/protocols/yield-ai/swapFaToFa";
+import { runHyperionCloseConvert } from "@/lib/protocols/yield-ai/hyperionLpActions";
 import {
   fetchVaultFaSwapLimits,
   isVaultDailyLimitAbort,
@@ -22,6 +31,10 @@ import {
 } from "@/lib/protocols/yield-ai/vaultFaSwapLimits";
 import { getApprovedBuilderFeeBps } from "@/lib/protocols/decibel/getApprovedBuilderFee";
 import { decibelSpotFeeTierForMetadata } from "@/lib/protocols/decibel/deltaNeutralSpotAssets";
+import {
+  ManageAuthError,
+  assertOwnerManageAuth,
+} from "@/lib/protocols/yield-ai/manageAuthServer";
 
 type DelegationDto = {
   delegated_account?: string;
@@ -197,6 +210,16 @@ export async function POST(request: NextRequest) {
     // and write record_close to clear the on-chain DN slot. Server re-validates that no real
     // short exists before honouring this — never trust the client flag alone.
     const force = body.force === true;
+    // New (journal) close path: when cycleId is present, close the strategy_journal cycle and
+    // record close_cycle. Otherwise fall back to the legacy delta_neutral per-safe record.
+    const cycleIdRaw = body.cycleId;
+    const cycleId =
+      typeof cycleIdRaw === "string" && /^\d+$/.test(cycleIdRaw.trim())
+        ? cycleIdRaw.trim()
+        : typeof cycleIdRaw === "number" && Number.isFinite(cycleIdRaw) && cycleIdRaw > 0
+          ? String(Math.trunc(cycleIdRaw))
+          : null;
+    const isJournalClose = cycleId != null;
 
     if (!subaccountRaw || !ownerRaw || !safeRaw) {
       return NextResponse.json(
@@ -224,27 +247,76 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const { ownerAddress: verifiedOwner } = await assertOwnerManageAuth({
+      action: "decibel_dn_close",
+      // Must mirror the client exactly: same keys, order, and raw values.
+      fields: {
+        safeAddress: safeRaw,
+        subaccount: subaccountRaw,
+        asset: assetRaw,
+        force,
+        ...(cycleId != null ? { cycleId } : {}),
+      },
+      auth: body.auth,
+      safeAddress: canonicalSafe,
+    });
+    if (normalizeAddress(verifiedOwner) !== normalizeAddress(canonicalOwner)) {
+      return NextResponse.json(
+        { success: false, error: "owner does not match the signed authorization" },
+        { status: 403 }
+      );
+    }
+
     const { aptosMainnet, decibelAptos, network, isTestnet } = getAptosClients();
 
-    const rawView = await aptosMainnet.view({
-      payload: {
-        function: DELTA_NEUTRAL_GET_POSITION_VIEW,
-        typeArguments: [],
-        functionArguments: [canonicalSafe],
-      },
-    });
-    const dn = parseDeltaNeutralPositionView(rawView);
-    if (!dn || !dn.recordExists) {
-      return NextResponse.json({ success: false, error: "No delta-neutral record for this safe" }, { status: 404 });
-    }
-    if (!dn.isOpen) {
-      return NextResponse.json({ success: false, error: "Delta-neutral position is already closed on-chain" }, { status: 400 });
-    }
-    if (normalizeAddress(dn.decibelSubaccount) !== normalizeAddress(canonicalSubaccount)) {
-      return NextResponse.json(
-        { success: false, error: "subaccount does not match on-chain delta-neutral record" },
-        { status: 400 }
-      );
+    // Resolve the position's market + spot metadata from whichever record we're closing.
+    let marketAddr: string;
+    let spotMetadata: string;
+    // Non-zero only for LP-hedge cycles → unwind the Hyperion LP instead of a spot-balance swap.
+    let lpPosition: string | null = null;
+    if (isJournalClose) {
+      const cycleRaw = await aptosMainnet.view({
+        payload: {
+          function: STRATEGY_JOURNAL_VIEWS.getCycle,
+          typeArguments: [],
+          functionArguments: [canonicalSafe, cycleId],
+        },
+      });
+      const cycle = parseCycleView(cycleRaw);
+      if (!cycle || !cycle.recordExists) {
+        return NextResponse.json({ success: false, error: `No journal cycle #${cycleId} for this safe` }, { status: 404 });
+      }
+      if (!cycle.isOpen) {
+        return NextResponse.json({ success: false, error: `Journal cycle #${cycleId} is already closed` }, { status: 400 });
+      }
+      // The cycle does not pin the Decibel subaccount; the provided subaccount is validated by the
+      // delegation check below. Spot-hold DN cycles carry the perp market + spot metadata we need.
+      marketAddr = toCanonicalAddress(cycle.perpMarket);
+      spotMetadata = toCanonicalAddress(cycle.spotMetadata);
+      lpPosition = toCanonicalAddress(cycle.lpPosition);
+    } else {
+      const rawView = await aptosMainnet.view({
+        payload: {
+          function: DELTA_NEUTRAL_GET_POSITION_VIEW,
+          typeArguments: [],
+          functionArguments: [canonicalSafe],
+        },
+      });
+      const dn = parseDeltaNeutralPositionView(rawView);
+      if (!dn || !dn.recordExists) {
+        return NextResponse.json({ success: false, error: "No delta-neutral record for this safe" }, { status: 404 });
+      }
+      if (!dn.isOpen) {
+        return NextResponse.json({ success: false, error: "Delta-neutral position is already closed on-chain" }, { status: 400 });
+      }
+      if (normalizeAddress(dn.decibelSubaccount) !== normalizeAddress(canonicalSubaccount)) {
+        return NextResponse.json(
+          { success: false, error: "subaccount does not match on-chain delta-neutral record" },
+          { status: 400 }
+        );
+      }
+      marketAddr = toCanonicalAddress(dn.perpMarket);
+      spotMetadata = toCanonicalAddress(dn.spotAssetMetadata);
     }
 
     const executorAddress = toCanonicalAddress(getDecibelExecutorAccount().accountAddress.toString());
@@ -292,9 +364,6 @@ export async function POST(request: NextRequest) {
         { status: 403 }
       );
     }
-
-    const marketAddr = toCanonicalAddress(dn.perpMarket);
-    const spotMetadata = toCanonicalAddress(dn.spotAssetMetadata);
 
     const marketsRaw = await fetchDecibel("/api/v1/markets");
     const markets = normalizeMarketsPayload(marketsRaw);
@@ -421,6 +490,81 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // LP-hedge cycle: unwind the Hyperion LP (claim fees → remove all → convert the freed APT to
+    // USDC — the reverse swap) instead of the spot-balance swap below, then close_cycle and return.
+    // Only the APT delta produced by this remove is converted (never pre-existing safe APT).
+    if (isJournalClose && lpPosition && !/^0x0+$/.test(normalizeAddress(lpPosition))) {
+      const usdcBeforeUnwind = await fetchOnChainPrimaryFaBalance(
+        aptosMainnet,
+        canonicalSafe,
+        USDC_FA_METADATA_MAINNET
+      );
+      const lpUnwind = await runHyperionCloseConvert({
+        safeAddress: canonicalSafe,
+        position: lpPosition,
+        claimFirst: true, // claim trading fees (perf cut) before remove
+        claimRewardsFirst: true, // claim farm/gauge rewards before the remove burns the position
+      });
+
+      let usdcReceivedOnClose = BigInt(0);
+      for (let i = 0; i < 6; i++) {
+        const after = await fetchOnChainPrimaryFaBalance(aptosMainnet, canonicalSafe, USDC_FA_METADATA_MAINNET);
+        if (after > usdcBeforeUnwind) {
+          usdcReceivedOnClose = after - usdcBeforeUnwind;
+          break;
+        }
+        await sleep(2000);
+      }
+
+      const recordCloseTxHash = await submitExecutorEntryFunction({
+        network,
+        fn: STRATEGY_JOURNAL_ENTRIES.closeCycle,
+        functionArguments: [
+          canonicalSafe,
+          cycleId,
+          usdcReceivedOnClose,
+          BigInt(0), // perp_funding_abs (lives on the Decibel subaccount; reconstruct off-chain)
+          true, // perp_funding_positive
+          BigInt(0), // perp_realized_abs
+          true, // perp_realized_positive
+        ],
+        maxGasAmount: 50_000,
+      });
+
+      const pkg = isTestnet ? PACKAGE_TESTNET : PACKAGE_MAINNET;
+      return NextResponse.json({
+        success: true,
+        data: {
+          owner: canonicalOwner,
+          safeAddress: canonicalSafe,
+          subaccount: canonicalSubaccount,
+          marketAddr,
+          mode: "lp",
+          lpPosition,
+          closeTxHash,
+          closeTxVersion: closeTxVersion?.toString() ?? null,
+          claimFeesHash: lpUnwind.claimFeesHash,
+          claimRewardsHash: lpUnwind.claimRewardsHash,
+          removeAllHash: lpUnwind.removeAllHash,
+          convertSwapHash: lpUnwind.convertSwapHash,
+          convertedAptInBaseUnits: lpUnwind.convertedAmountIn,
+          convertAmountOutMin: lpUnwind.convertAmountOutMin,
+          recordCloseTxHash,
+          cycleId,
+          usdcReceivedOnClose: usdcReceivedOnClose.toString(),
+          forceRecovery: noActiveShort,
+          decibelPackage: pkg,
+        },
+      });
+    }
+
+    // For a journal close we record the USDC the safe actually receives unwinding the spot leg
+    // (= safe USDC balance delta around the spot→USDC swap). Decibel margin + realized PnL returns
+    // to the subaccount, not the safe, so it is intentionally excluded from this figure.
+    const usdcBeforeClose = isJournalClose
+      ? await fetchOnChainPrimaryFaBalance(aptosMainnet, canonicalSafe, USDC_FA_METADATA_MAINNET)
+      : BigInt(0);
+
     const balanceLookup = await fetchFaBalanceIndexerOrOnChain({
       aptos: aptosMainnet,
       owner: canonicalSafe,
@@ -536,6 +680,19 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Measure USDC received unwinding the spot leg (journal close only).
+    let usdcReceivedOnClose = BigInt(0);
+    if (isJournalClose && swapTxHash) {
+      for (let i = 0; i < 6; i++) {
+        const after = await fetchOnChainPrimaryFaBalance(aptosMainnet, canonicalSafe, USDC_FA_METADATA_MAINNET);
+        if (after > usdcBeforeClose) {
+          usdcReceivedOnClose = after - usdcBeforeClose;
+          break;
+        }
+        await sleep(2000);
+      }
+    }
+
     // record_close anchor tx version: Decibel close tx version when present; otherwise (force
     // recovery) fall back to the safe-swap tx version, or 0 if the safe also had no spot to
     // swap. Move-side does not validate the value — it's stored as `closeDecibelTxVersion`.
@@ -545,13 +702,36 @@ export async function POST(request: NextRequest) {
       if (v != null && v > BigInt(0)) recordCloseAnchor = v;
     }
 
-    const recordCloseFn = `${YIELD_AI_PACKAGE_ADDRESS}::delta_neutral::record_close`;
-    const recordCloseTxHash = await submitExecutorEntryFunction({
-      network,
-      fn: recordCloseFn,
-      functionArguments: [canonicalSafe, recordCloseAnchor],
-      maxGasAmount: 50_000,
-    });
+    let recordCloseTxHash: string;
+    if (isJournalClose) {
+      // close_cycle(safe, cycle_id, usdc_received_on_close, perp_funding_abs, perp_funding_positive,
+      //             perp_realized_abs, perp_realized_positive).
+      // v1: funding/realized recorded as 0/positive. The perp leg's funding + realized PnL still
+      // lives on the Decibel subaccount and is reconstructable off-chain. TODO: pull the final
+      // numbers from Decibel and write them so the close record is fully self-contained on chain.
+      recordCloseTxHash = await submitExecutorEntryFunction({
+        network,
+        fn: STRATEGY_JOURNAL_ENTRIES.closeCycle,
+        functionArguments: [
+          canonicalSafe,
+          cycleId,
+          usdcReceivedOnClose,
+          BigInt(0), // perp_funding_abs
+          true, // perp_funding_positive
+          BigInt(0), // perp_realized_abs
+          true, // perp_realized_positive
+        ],
+        maxGasAmount: 50_000,
+      });
+    } else {
+      const recordCloseFn = `${YIELD_AI_PACKAGE_ADDRESS}::delta_neutral::record_close`;
+      recordCloseTxHash = await submitExecutorEntryFunction({
+        network,
+        fn: recordCloseFn,
+        functionArguments: [canonicalSafe, recordCloseAnchor],
+        maxGasAmount: 50_000,
+      });
+    }
 
     const pkg = isTestnet ? PACKAGE_TESTNET : PACKAGE_MAINNET;
 
@@ -570,6 +750,8 @@ export async function POST(request: NextRequest) {
         usedSqrtPriceLimit,
         recordCloseTxHash,
         recordCloseAnchorTxVersion: recordCloseAnchor.toString(),
+        cycleId: isJournalClose ? cycleId : null,
+        usdcReceivedOnClose: isJournalClose ? usdcReceivedOnClose.toString() : null,
         forceRecovery: noActiveShort,
         decibelPackage: pkg,
       },
@@ -578,7 +760,7 @@ export async function POST(request: NextRequest) {
     console.error("[Decibel] executor-close-delta-neutral error:", error);
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : "Unknown error" },
-      { status: 500 }
+      { status: error instanceof ManageAuthError ? error.status : 500 }
     );
   }
 }

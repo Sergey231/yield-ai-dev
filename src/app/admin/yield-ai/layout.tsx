@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 const TABS = [
   { href: '/admin/yield-ai/activity', label: 'Activity' },
   { href: '/admin/yield-ai/flows', label: 'Flows' },
+  { href: '/admin/yield-ai/decibel', label: 'Decibel' },
 ];
 
 export default function YieldAiAdminLayout({
