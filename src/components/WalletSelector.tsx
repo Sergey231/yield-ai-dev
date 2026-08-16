@@ -42,8 +42,9 @@ interface WalletSelectorProps extends WalletSortingOptions {
 }
 
 function nativeConnectPayload(chainTab: WalletConnectChainTab) {
-  if (chainTab === "solana") return { chain: "solana", walletId: "phantom" };
-  return { chain: "aptos", walletId: "petra" };
+  if (chainTab === "aptos") return { chain: "aptos" };
+  if (chainTab === "solana") return { chain: "solana" };
+  return { chain: "all" };
 }
 
 export function WalletSelector({ externalOpen, onExternalOpenChange, externalInitialChainTab, ...walletSortingOptions }: WalletSelectorProps) {
