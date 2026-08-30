@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.yieldai.mobile",
+      "sha256_cert_fingerprints": [
+        "57:C5:70:B3:C4:99:8F:25:26:FF:08:54:AE:F7:6F:48:E9:62:CC:BE:70:E1:AB:DB:C2:E1:61:1A:32:44:87:89"
+      ]
+    }
+  }
+]
